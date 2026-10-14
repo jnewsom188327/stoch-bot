@@ -46,6 +46,7 @@ jobs:
           git config user.name "stoch-bot"
           git config user.email "stoch-bot@users.noreply.github.com"
           if [ -f trades.csv ]; then git add trades.csv; fi
+          if [ -f shadow_b.csv ]; then git add shadow_b.csv; fi
           if ! git diff --cached --quiet; then
             git commit -m "trade log $(date -u +%F)"
             git pull --rebase origin main || true
