@@ -1,5 +1,5 @@
 """
-TREND FLIP v3.0 BACKTEST - years of 3-minute bars from Alpaca. DATA ONLY: it never places an order.
+TREND FLIP v3.0 / v4.0 BACKTEST - years of 2- and 3-minute bars from Alpaca. DATA ONLY: it never places an order.
 Runs in GitHub Actions. Keys come from GitHub Secrets ALPACA_KEY / ALPACA_SECRET (never in this file).
 
 Same rules as the TradingView indicator Trend Flip v3.0:
@@ -10,6 +10,11 @@ Same rules as the TradingView indicator Trend Flip v3.0:
           Filled at the NEXT candle's open.
   EXIT  : 2 ATR stop (checked first, worst case) | opposite color flip | close of candle 15 | flat at 15:55
           (also flat at the end of a short day).
+v4.0 ideas tested against v3.0 (same code as the TradingView LAB box):
+  ENTRY + 15m agrees / + 15m and 60m agree (trend of the last CLOSED higher-timeframe candle)
+  EXIT  ride strong trend (keep holding after candle 15 until the warning color) / ride if 15m agrees /
+        cut losers on warning (from candle 3, losing + warning color) / ride + cut
+  Warning color = price closed back through the fast line while it is rolling over, 2 candles in a row.
 Results: printed in the run log, shown on the run's Summary page, and saved in the results/ folder.
 """
 import os
@@ -24,11 +29,13 @@ NY = ZoneInfo("America/New_York")
 SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
+TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
 OUT = "results"
 
 # v3.0 settings
 V30 = dict(fast=13, slow=34, use_vwap=True, vf_on=True, vf_look=10, wait=5,
-           hold=15, stop=2.0, t_start=935, t_end=1530, flat_at=1555, direction=0)
+           hold=15, stop=2.0, t_start=935, t_end=1530, flat_at=1555, direction=0,
+           htf=0, xm=0, weak_n=2, max_hold=60, cut_after=3, htf1=15, htf2=60)
 
 
 # ---------------------------------------------------------------- data
@@ -93,17 +100,28 @@ def fake_1m(symbol, start, end):
     return pd.DataFrame({"open": open_, "high": hi, "low": lo, "close": close, "volume": vol}, index=idx), "fake"
 
 
-def to_3m(df1, rth_only):
+def to_tf(df1, rth_only, mins=3):
     hm = df1.index.hour * 100 + df1.index.minute
     df1 = df1[(hm >= 930) & (hm < 1600)] if rth_only else df1[(hm >= 400) & (hm < 2000)]
-    g = df1.groupby(df1.index.floor("3min"))
+    g = df1.groupby(df1.index.floor(f"{mins}min"))
     out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
                         "close": g["close"].last(), "volume": g["volume"].sum()})
     return out.dropna()
 
 
 # ---------------------------------------------------------------- indicators (TradingView math)
-def indicators(df, fast, slow, use_vwap):
+def htf_state(df, fast, slow, mins):
+    """Trend (+1 / -1) of the last CLOSED higher-timeframe candle, known at each chart bar's start
+    (matches TradingView request.security(..., f()[1], lookahead_on))."""
+    c = df["close"].groupby(df.index.floor(f"{mins}min")).last()
+    s = np.where(c.ewm(span=fast, adjust=False).mean() > c.ewm(span=slow, adjust=False).mean(), 1, -1)
+    hs = pd.DataFrame({"end": c.index + pd.Timedelta(minutes=mins), "s": s})
+    bars = pd.DataFrame({"t": df.index})
+    m = pd.merge_asof(bars, hs, left_on="t", right_on="end", direction="backward")
+    return m["s"].fillna(0).astype(int).to_numpy()
+
+
+def indicators(df, fast, slow, use_vwap, weak_n=2, htf1=15, htf2=60):
     o, h, l, c, v = (df[k] for k in ("open", "high", "low", "close", "volume"))
     pc = c.shift(1)
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
@@ -129,8 +147,17 @@ def indicators(df, fast, slow, use_vwap):
         return ((w >= mid + 2 * sd) | (w >= w.rolling(50).max() * 0.85)).fillna(False).to_numpy()
 
     hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+    # warning color: close back through the fast line while it rolls over, weak_n candles in a row
+    fl_raw = ((c < ef) & (ef < ef.shift(1))).astype(int)
+    fs_raw = ((c > ef) & (ef > ef.shift(1))).astype(int)
+    fadeL = (fl_raw.rolling(weak_n).sum() == weak_n).to_numpy()
+    fadeS = (fs_raw.rolling(weak_n).sum() == weak_n).to_numpy()
+    strongL = (st == 1) & ~fadeL
+    strongS = (st == -1) & ~fadeS
     return dict(o=o.to_numpy(), h=h.to_numpy(), l=l.to_numpy(), c=c.to_numpy(), atr=atr.to_numpy(),
-                st=st, fear=spike(wvf), greed=spike(wvi), hm=hm, day=np.array(day))
+                st=st, fear=spike(wvf), greed=spike(wvi), hm=hm, day=np.array(day),
+                strongL=strongL, strongS=strongS,
+                h1=htf_state(df, fast, slow, htf1), h2=htf_state(df, fast, slow, htf2))
 
 
 def bars_since(flag):
@@ -153,6 +180,12 @@ def signals(ind, p):
         okS = bars_since(ind["greed"]) <= p["vf_look"]
     else:
         okL = okS = np.ones(len(st), dtype=bool)
+    if p["htf"] >= 1:
+        okL = okL & (ind["h1"] == 1)
+        okS = okS & (ind["h1"] == -1)
+    if p["htf"] >= 2:
+        okL = okL & (ind["h2"] == 1)
+        okS = okS & (ind["h2"] == -1)
     ent = np.zeros(len(st), dtype=np.int64)
     arm, armB = 0, 0
     for i in range(len(st)):
@@ -171,6 +204,8 @@ def signals(ind, p):
 # ---------------------------------------------------------------- trade simulator (same order as Pine)
 def simulate(ind, sig, ent, p, times):
     o, h, l, c, atr, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    sL, sS, h1 = ind["strongL"], ind["strongS"], ind["h1"]
+    xm = p["xm"]
     n = len(o)
     trades = []
     side = pend = 0
@@ -195,14 +230,22 @@ def simulate(ind, sig, ent, p, times):
             best, worst = max(best, fav), max(worst, adv)
             code, px = 0, 0.0
             last_of_day = i + 1 >= n or day[i + 1] != day[i]
+            weak = (not sL[i]) if sd == 1 else (not sS[i])
+            agr = h1[i] == sd
             if (l[i] <= stp) if sd == 1 else (h[i] >= stp):
                 code, px = 1, (min(o[i], stp) if sd == 1 else max(o[i], stp))
             elif sig[i] == -sd:
                 code, px = 5, c[i]
-            elif held >= p["hold"]:
-                code, px = 2, c[i]
             elif hm[i] >= p["flat_at"] or last_of_day:
                 code, px = 6, c[i]
+            elif xm in (3, 4) and p["cut_after"] <= held < p["hold"] and weak and sd * (c[i] - en) < 0:
+                code, px = 9, c[i]
+            elif held >= p["hold"]:
+                ride = (not weak) if xm in (1, 4) else ((not weak) and agr) if xm == 2 else False
+                if not ride:
+                    code, px = (7 if held > p["hold"] else 2), c[i]
+                elif held >= p["max_hold"]:
+                    code, px = 2, c[i]
             if code:
                 pts = sd * (px - en)
                 trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft))
@@ -213,9 +256,15 @@ def simulate(ind, sig, ent, p, times):
     return pd.DataFrame(trades, columns=cols)
 
 
+_IND = {}
+
+
 def run(df3, **over):
     p = dict(V30, **over)
-    ind = indicators(df3, p["fast"], p["slow"], p["use_vwap"])
+    key = (id(df3), p["fast"], p["slow"], p["use_vwap"], p["weak_n"], p["htf1"], p["htf2"])
+    if key not in _IND:
+        _IND[key] = indicators(df3, p["fast"], p["slow"], p["use_vwap"], p["weak_n"], p["htf1"], p["htf2"])
+    ind = _IND[key]
     sig, ent = signals(ind, p)
     return simulate(ind, sig, ent, p, df3.index)
 
@@ -260,57 +309,56 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
     os.makedirs(OUT, exist_ok=True)
-    md = [f"# Trend Flip v3.0 backtest - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
-          f"Data: {START} to {end:%Y-%m-%d}, 3-minute candles. ATR / trade = average result per trade in ATR "
+    md = [f"# Trend Flip v3.0 / v4.0 backtest - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data: {START} to {end:%Y-%m-%d}, {'/'.join(str(t) for t in TFS)}-minute candles. ATR / trade = average result per trade in ATR "
           f"(the same number as the TradingView box). Healthy = above +0.30 with PF above 1.3.", ""]
     for sym in SYMBOLS:
         print(f"\n=== {sym} ===", flush=True)
         df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
-        ext = to_3m(df1, rth_only=False)
-        rth = to_3m(df1, rth_only=True)
-        print(f"  {len(df1):,} 1m bars -> {len(ext):,} 3m bars (with pre/post market), feed {feed}", flush=True)
-
-        main_t = run(ext)
-        main_t.assign(entry_time=main_t["entry_time"].dt.strftime("%Y-%m-%d %H:%M")).to_csv(
-            f"{OUT}/trades_{sym}_v30.csv", index=False)
-        s = stats(main_t)
-        md += [f"## {sym}  ({feed} data, {ext.index[0]:%Y-%m-%d} to {ext.index[-1]:%Y-%m-%d})", "",
-               "### Trend Flip v3.0 vs simple changes (one change at a time)", HEAD,
-               fmt_row("**v3.0 (your settings)**", s)]
-        tests = [("no Vix Fix filter", dict(vf_on=False)),
-                 ("Vix Fix spike within 5", dict(vf_look=5)),
-                 ("Vix Fix spike within 20", dict(vf_look=20)),
-                 ("hold 10 candles", dict(hold=10)),
-                 ("hold 25 candles", dict(hold=25)),
-                 ("stop 1.5 ATR", dict(stop=1.5)),
-                 ("stop 3 ATR", dict(stop=3.0)),
-                 ("EMA 8 / 21 line", dict(fast=8, slow=21)),
-                 ("EMA 21 / 50 line", dict(fast=21, slow=50))]
-        for name, over in tests:
-            print(f"  running: {name}", flush=True)
-            md.append(fmt_row(name, stats(run(ext, **over))))
-        md.append(fmt_row("regular hours only data (no pre-market)", stats(run(rth))))
-        md.append("")
-
-        L, S = main_t[main_t["side"] == 1], main_t[main_t["side"] == -1]
-        sl, ss = stats(L), stats(S)
-        md += ["### v3.0 details",
-               f"- Longs: {sl.get('n', 0)} trades, {sl.get('avg', float('nan')):+.2f} ATR | "
-               f"Shorts: {ss.get('n', 0)} trades, {ss.get('avg', float('nan')):+.2f} ATR",
-               f"- 1st half of the years {s.get('h1', float('nan')):+.2f} | 2nd half {s.get('h2', float('nan')):+.2f} ATR per trade",
-               f"- Went +1 ATR your way before -1 ATR against: {s.get('plus1', float('nan')):.0f}% "
-               f"| avg best +{s.get('best', 0):.1f} / avg worst -{s.get('worst', 0):.1f} ATR",
-               f"- {s.get('per_day', 0):.1f} trades per day that had a trade | rough $ per option per trade "
-               f"(0.6 delta, before theta + spread): ${s.get('usd', 0):+.0f}", "",
-               "### v3.0 by year", "| Year | Trades | Win | ATR / trade | PF | Total ATR |", "|---|---|---|---|---|---|"]
-        for yr, g in main_t.groupby(main_t["entry_time"].dt.year):
-            y = stats(g)
-            md.append(f"| {yr} | {y['n']} | {y['win']:.0f}% | **{y['avg']:+.2f}** | {y['pf']:.2f} | {y['total']:+.0f} |")
-        md += ["", "### v3.0 by exit reason", "| Exit | Trades | ATR / trade |", "|---|---|---|"]
-        names = {1: "stop", 2: "time (candle 15)", 5: "opposite flip", 6: "flat / end of day"}
-        for code, g in main_t.groupby("code"):
-            md.append(f"| {names.get(code, code)} | {len(g)} | {g['r'].mean():+.2f} |")
-        md.append("")
+        for tf in TFS:
+            ext = to_tf(df1, rth_only=False, mins=tf)
+            print(f"  {tf}m: {len(ext):,} bars (with pre/post market), feed {feed}", flush=True)
+            main_t = run(ext)
+            main_t.assign(entry_time=main_t["entry_time"].dt.strftime("%Y-%m-%d %H:%M")).to_csv(
+                f"{OUT}/trades_{sym}_{tf}m_v30.csv", index=False)
+            s = stats(main_t)
+            md += [f"## {sym} {tf}-minute  ({feed} data, {ext.index[0]:%Y-%m-%d} to {ext.index[-1]:%Y-%m-%d})", "",
+                   "### v4.0 ideas vs v3.0 (one change at a time)", HEAD,
+                   fmt_row("**v3.0 (your settings)**", s)]
+            tests = [("ENTRY + 15m agrees", dict(htf=1)),
+                     ("ENTRY + 15m and 60m agree", dict(htf=2)),
+                     ("EXIT ride strong trend", dict(xm=1)),
+                     ("EXIT ride if 15m agrees", dict(xm=2)),
+                     ("EXIT cut losers on warning", dict(xm=3)),
+                     ("EXIT ride + cut losers", dict(xm=4)),
+                     ("15m agrees + ride + cut", dict(htf=1, xm=4)),
+                     ("no Vix Fix filter", dict(vf_on=False)),
+                     ("Vix Fix spike within 5", dict(vf_look=5)),
+                     ("Vix Fix spike within 20", dict(vf_look=20)),
+                     ("hold 10 candles", dict(hold=10)),
+                     ("hold 25 candles", dict(hold=25)),
+                     ("stop 1.5 ATR", dict(stop=1.5)),
+                     ("stop 3 ATR", dict(stop=3.0))]
+            for name, over in tests:
+                print(f"    running: {name}", flush=True)
+                md.append(fmt_row(name, stats(run(ext, **over))))
+            md.append("")
+            L, S = main_t[main_t["side"] == 1], main_t[main_t["side"] == -1]
+            sl, ss = stats(L), stats(S)
+            md += ["### v3.0 details",
+                   f"- Longs: {sl.get('n', 0)} trades, {sl.get('avg', float('nan')):+.2f} ATR | "
+                   f"Shorts: {ss.get('n', 0)} trades, {ss.get('avg', float('nan')):+.2f} ATR",
+                   f"- 1st half {s.get('h1', float('nan')):+.2f} | 2nd half {s.get('h2', float('nan')):+.2f} ATR per trade",
+                   f"- Went +1 ATR your way before -1 ATR against: {s.get('plus1', float('nan')):.0f}% "
+                   f"| avg best +{s.get('best', 0):.1f} / avg worst -{s.get('worst', 0):.1f} ATR",
+                   f"- {s.get('per_day', 0):.1f} trades per trading day | rough $ per option per trade "
+                   f"(0.6 delta, before theta + spread): ${s.get('usd', 0):+.0f}", "",
+                   "### v3.0 by year", "| Year | Trades | Win | ATR / trade | PF | Total ATR |", "|---|---|---|---|---|---|"]
+            for yr, g in main_t.groupby(main_t["entry_time"].dt.year):
+                y = stats(g)
+                md.append(f"| {yr} | {y['n']} | {y['win']:.0f}% | **{y['avg']:+.2f}** | {y['pf']:.2f} | {y['total']:+.0f} |")
+            md.append("")
+            _IND.clear()
 
     text = "\n".join(md)
     print("\n" + text)
