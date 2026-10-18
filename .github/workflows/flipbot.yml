@@ -1,0 +1,53 @@
+name: Trend Flip bot
+
+on:
+  schedule:
+    # Weekdays. Covers summer (EDT) and winter (EST) time. Only one run at a time: the first run waits for
+    # the open and trades until about 3 PM, the next one takes over open trades and runs to the close.
+    - cron: "25 13 * * 1-5"
+    - cron: "25 14 * * 1-5"
+    - cron: "25 17 * * 1-5"
+    - cron: "25 18 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = test keys + show the charts only, run = trade now"
+        default: "check"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flipbot
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get latest trade log + open trades
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run Trend Flip bot (PAPER)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          MODE: ${{ github.event.inputs.mode || 'run' }}
+        run: python flipbot.py
+      - name: Save trade log
+        if: always()
+        run: |
+          git config user.name "flipbot"
+          git config user.email "flipbot@users.noreply.github.com"
+          for f in flip_trades.csv flip_state.json; do if [ -f "$f" ]; then git add "$f"; fi; done
+          if ! git diff --cached --quiet; then
+            git commit -m "flipbot log $(date -u +%F)"
+            git pull --rebase origin main || true
+            git push || true
+          fi
