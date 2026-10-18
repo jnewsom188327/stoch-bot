@@ -1,5 +1,7 @@
 """
-TREND FLIP OPTIMIZER + MONTE CARLO (MODE=optimize, the default) - see the OPTIMIZER section at the bottom.
+TREND FLIP ENTRY QUALITY (MODE=quality, the default) - grades only the entry, for trading the exit by hand:
+  every combination of quiet days / entry window / Vix Fix / 15m filter / VWAP rule, TRAIN 2020-23 vs TEST 2024-now.
+TREND FLIP OPTIMIZER + MONTE CARLO (MODE=optimize) - see the OPTIMIZER section at the bottom.
   Every entry and exit idea, on top of the quiet-day filter, picked on 2020-2023 only and checked on 2024-now,
   then a Monte Carlo of the final setup in option dollars (Black-Scholes estimate, 1DTE and 0DTE).
 TREND FLIP QUIET-DAY FILTER + MARKET-CONDITIONS STUDY (+ v3.0 / v4.0 backtest) - years of 2/3-minute bars from Alpaca.
@@ -40,7 +42,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "optimize").strip().lower() or "optimize"
+MODE = os.getenv("MODE", "quality").strip().lower() or "quality"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -327,6 +329,8 @@ def main():
         return quiet_main()
     if MODE == "optimize":
         return optimize_main()
+    if MODE == "quality":
+        return quality_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -1035,6 +1039,228 @@ def optimize_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/optimize_{stamp}.md", f"{OUT}/optimize_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ ENTRY QUALITY (MODE=quality, the default)
+# For traders who manage the exit by hand: grades ONLY the entry, so no exit rule is involved.
+# For every entry (filled at the next open) it watches the next 30 candles (or until 15:55):
+#   +1 before -1 = price reached +1 ATR your way before it went 1 ATR against you (same candle = counted as a loss)
+#   +2 before -1 = reached +2 ATR before -1 ATR against ("great trade")
+#   1:1 result   = what a simple bracket (+1 ATR target / -1 ATR stop) made, in ATR; unresolved = closed after 30 candles
+#   1:2 result   = same with a +2 ATR target / -1 ATR stop
+# One trade at a time: a new signal is ignored while the previous one is still open (bracket not hit yet).
+# Every combination of the settings below is tested on all charts; TRAIN = 2020-2023, TEST = 2024-now.
+# A combination only counts if it is good in BOTH periods (score = the worse of the two).
+QWIN = int(os.getenv("QWIN", "30"))
+LUCK = "55% (2020-23) / 52% (2024-now), with 4/4 charts \"positive\" - measured on random-walk data, same 4 charts and dates"
+GRID = dict(
+    quiet=[None, 0.7],
+    window=[(935, 1530), (1000, 1530), (935, 1400), (1000, 1400)],
+    vf=[5, 10, 20, None],
+    htf=[0, 1],
+    vwap=[True, False],
+)
+WIN_NAME = {(935, 1530): "9:35-15:30", (1000, 1530): "10:00-15:30", (935, 1400): "9:35-14:00", (1000, 1400): "10:00-14:00"}
+
+
+def grade_entries(ind, ent, times, win=QWIN):
+    o, h, l, c, atr, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    rows = []
+    busy_until = -1
+    for i in np.nonzero(ent)[0]:
+        e_i = i + 1
+        if e_i >= n or day[e_i] != day[i] or e_i <= busy_until:
+            continue
+        sd, en, a = int(ent[i]), o[e_i], atr[i]
+        if not a or np.isnan(a):
+            continue
+        r1 = r2 = None
+        h1 = h2 = 0
+        mfe = mae = 0.0
+        j = e_i
+        last = e_i
+        res1 = None
+        while j < n and day[j] == day[e_i] and j < e_i + win and hm[j] < 1555:
+            fav = ((h[j] - en) if sd == 1 else (en - l[j])) / a
+            adv = ((en - l[j]) if sd == 1 else (h[j] - en)) / a
+            mae = max(mae, adv) if h1 == 0 and r1 is None else mae
+            mfe = max(mfe, fav)
+            if r1 is None:
+                if adv >= 1:
+                    r1, res1 = -1.0, j
+                elif fav >= 1:
+                    r1, h1, res1 = 1.0, 1, j
+            if r2 is None:
+                if adv >= 1:
+                    r2 = -1.0
+                elif fav >= 2:
+                    r2, h2 = 2.0, 1
+            last = j
+            if r1 is not None and r2 is not None:
+                break
+            j += 1
+        close_r = sd * (c[last] - en) / a
+        if r1 is None:
+            r1, res1 = close_r, last
+        if r2 is None:
+            r2 = close_r
+        busy_until = res1
+        rows.append((times[e_i], sd, h1, h2, r1, r2, mfe, res1 - e_i + 1))
+    return pd.DataFrame(rows, columns=["t", "side", "hit1", "hit2", "r1", "r2", "mfe", "bars"])
+
+
+def q_stats(g, years):
+    if len(g) == 0:
+        return dict(n=0, per_yr=0.0, hit1=np.nan, hit2=np.nan, r1=np.nan, r2=np.nan, mfe=np.nan, bars=np.nan)
+    return dict(n=len(g), per_yr=len(g) / years, hit1=100 * g["hit1"].mean(), hit2=100 * g["hit2"].mean(),
+                r1=g["r1"].mean(), r2=g["r2"].mean(), mfe=g["mfe"].mean(), bars=g["bars"].mean())
+
+
+def combo_name(k):
+    q, w, vf, htf, vw = k
+    parts = ["quiet days only" if q else "every day", WIN_NAME[w], f"Vix Fix {vf}" if vf else "no Vix Fix"]
+    if htf:
+        parts.append("15m agrees")
+    if not vw:
+        parts.append("no VWAP rule")
+    return " · ".join(parts)
+
+
+def combo_tv(k):
+    q, w, vf, htf, vw = k
+    return (f"Trade days = {'Only after quiet days' if q else 'Every day'}; "
+            f"New entries from = {w[0]}, until = {w[1]}; "
+            + (f"Vix Fix filter ON, spike within = {vf}" if vf else "Vix Fix filter OFF")
+            + f"; HTF entry filter = {'HTF 1 agrees' if htf else 'Off'}; "
+            f"VWAP rule = {'ON' if vw else 'OFF'}")
+
+
+def quality_main():
+    import itertools
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    combos = list(itertools.product(GRID["quiet"], GRID["window"], GRID["vf"], GRID["htf"], GRID["vwap"]))
+    BASE = (None, (935, 1530), 10, 0, True)        # v3.0
+    res = {k: {} for k in combos}
+    chart_info = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            _IND.clear()
+            name = f"{sym} {tf}m"
+            run(df)                                                     # builds indicators (VWAP on)
+            ind_on = _IND[next(iter(_IND))]
+            yr = regime_features(df1, df, ind_on)["yrange"]
+            hm = ind_on["hm"]
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            y_tr = max((dates < split.date()).sum() / 252.0, 1e-9)
+            y_te = max((dates >= split.date()).sum() / 252.0, 1e-9)
+            last_days = dates[-20:]
+            atr_now = float(np.nanmean(ind_on["atr"][rth & np.isin(np.array(df.index.date), last_days)]))
+            chart_info.append((name, atr_now, float(ind_on["c"][rth][-1])))
+            inds = {True: ind_on, False: indicators(df, 13, 34, False)}
+            for k in combos:
+                q, w, vf, htf, vw = k
+                p = dict(V30, t_start=w[0], t_end=w[1], vf_on=vf is not None, vf_look=vf or 10, htf=htf)
+                if q:
+                    ok = np.nan_to_num(yr, nan=99.0) < q
+                    p["allowL"], p["allowS"] = ok, ok
+                _, ent = signals(inds[vw], p)
+                g = grade_entries(inds[vw], ent, df.index)
+                tr, te = g[g["t"] < split], g[g["t"] >= split]
+                res[k][name] = dict(tr=q_stats(tr, y_tr), te=q_stats(te, y_te), all=q_stats(g, y_tr + y_te))
+            print(f"  {name}: {len(combos)} combinations graded", flush=True)
+            _IND.clear()
+            del inds
+        del df1
+    charts = [c[0] for c in chart_info]
+    nC = len(charts)
+    y_te_all = y_te
+
+    def moe(p, n):
+        return 196 * np.sqrt(max(p / 100 * (1 - p / 100), 1e-9) / max(n, 1)) if not np.isnan(p) else float("nan")
+
+    rows = []
+    for k in combos:
+        r = res[k]
+        b = res[BASE]
+        tr1 = np.mean([r[c]["tr"]["r1"] for c in charts])
+        te1 = np.mean([r[c]["te"]["r1"] for c in charts])
+        tr2 = np.mean([r[c]["tr"]["r2"] for c in charts])
+        te2 = np.mean([r[c]["te"]["r2"] for c in charts])
+        both = sum(r[c]["tr"]["r1"] > b[c]["tr"]["r1"] and r[c]["te"]["r1"] > b[c]["te"]["r1"] for c in charts)
+        pos = sum(r[c]["tr"]["r1"] > 0 and r[c]["te"]["r1"] > 0 for c in charts)
+        rows.append(dict(k=k, name=combo_name(k), per_yr=np.mean([r[c]["all"]["per_yr"] for c in charts]),
+                         h1_tr=np.mean([r[c]["tr"]["hit1"] for c in charts]), h1_te=np.mean([r[c]["te"]["hit1"] for c in charts]),
+                         h2_tr=np.mean([r[c]["tr"]["hit2"] for c in charts]), h2_te=np.mean([r[c]["te"]["hit2"] for c in charts]),
+                         tr1=tr1, te1=te1, tr2=tr2, te2=te2, score1=min(tr1, te1), score2=min(tr2, te2),
+                         both=both, pos=pos, mfe=np.mean([r[c]["all"]["mfe"] for c in charts]),
+                         bars=np.mean([r[c]["all"]["bars"] for c in charts])))
+    enough = [x for x in rows if x["per_yr"] >= 25]
+    rank = sorted(enough, key=lambda x: -max(x["score1"], x["score2"]))
+    base = next(x for x in rows if x["k"] == BASE)
+    best = rank[0]
+    use2 = best["score2"] > best["score1"]
+
+    def line(x, mark=""):
+        return (f"| {mark}{x['name']} | {x['per_yr']:.0f} | {x['h1_tr']:.0f}% / **{x['h1_te']:.0f}%** | "
+                f"{x['tr1']:+.3f} / **{x['te1']:+.3f}** | {x['h2_tr']:.0f}% / **{x['h2_te']:.0f}%** | "
+                f"{x['tr2']:+.3f} / **{x['te2']:+.3f}** | {x['pos']}/{nC} | {x['both']}/{nC} | {x['bars']:.0f} |")
+    HQ = ("| Settings | Trades / yr per chart | +1 before -1 (TRAIN / TEST) | 1:1 bracket ATR / trade | "
+          "+2 before -1 | 1:2 bracket ATR / trade | Charts positive in BOTH periods (1:1) | Charts better than v3.0 in BOTH | "
+          "Avg candles to +1 or -1 |\n|---|---|---|---|---|---|---|---|---|")
+    md = [f"# Trend Flip ENTRY QUALITY - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(charts)}. {len(combos)} setting combinations. DATA ONLY - no orders.",
+          "Grades only the entry (you manage the exit). 50% '+1 before -1' = coin flip; 55%+ in BOTH periods is a real edge. "
+          "1:1 / 1:2 bracket = what a fixed target/stop would have made per trade (ATR). TRAIN 2020-2023 / TEST 2024-now.", "",
+          "## The answer in 30 seconds",
+          f"- **Best settings (good in BOTH periods):** {best['name']}",
+          f"- In TradingView v4.1: {combo_tv(best['k'])}",
+          f"- Hits +1 ATR before -1 ATR: **{best['h1_tr']:.0f}%** (2020-23) / **{best['h1_te']:.0f}%** (2024-now) "
+          f"vs v3.0 {base['h1_tr']:.0f}% / {base['h1_te']:.0f}% "
+          f"(luck margin about ±{moe(best['h1_te'], best['per_yr'] * nC * y_te_all):.0f} points on 2024-now)",
+          f"- Luck check: when this same search was run on RANDOM price data, the best of {len(combos)} combinations "
+          f"still showed about {LUCK} '+1 before -1'. Only trust a winner that clearly beats that in BOTH periods.",
+          f"- Best simple bracket for it: **{'+2 ATR target / -1 ATR stop' if use2 else '+1 ATR target / -1 ATR stop'}** "
+          f"= {(best['tr2'] if use2 else best['tr1']):+.3f} / {(best['te2'] if use2 else best['te1']):+.3f} ATR per trade (TRAIN / TEST)",
+          f"- About {best['per_yr']:.0f} trades a year per chart (≈ {best['per_yr'] / 52:.1f} a week)",
+          "- Option reality check (1 ATR now, 0.6 delta): " + "; ".join(
+              f"{n} 1 ATR ≈ ${a * DELTA * 100:.0f}" for n, a, _ in chart_info) +
+          ". Costs (~$2 spread + commission) and time decay come out of that.", "",
+          "## Top 15 (needs 25+ trades a year; ranked by the WORSE of TRAIN and TEST)", HQ]
+    md += [line(x, "**→** " if i == 0 else "") for i, x in enumerate(rank[:15])]
+    md += ["", "## Reference rows", HQ, line(base, "v3.0: ")]
+    for k in combos:
+        if k == (0.7, (935, 1530), 10, 0, True):
+            md.append(line(next(x for x in rows if x["k"] == k), "v4.1 default: "))
+    md += ["", f"## Best settings chart by chart: {best['name']}",
+           "| Chart | Period | Trades | Trades / yr | +1 before -1 | +2 before -1 | 1:1 ATR / trade | 1:2 ATR / trade | Avg best move (ATR) |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for c in charts:
+        for per, lbl in (("tr", "2020-23"), ("te", "2024-now")):
+            s_ = res[best["k"]][c][per]
+            b_ = res[BASE][c][per]
+            md.append(f"| {c} | {lbl} | {s_['n']} | {s_['per_yr']:.0f} | **{s_['hit1']:.0f}%** (v3.0 {b_['hit1']:.0f}%) | "
+                      f"{s_['hit2']:.0f}% | {s_['r1']:+.3f} | {s_['r2']:+.3f} | {s_['mfe']:.2f} |")
+    md += ["", "## Every combination (sorted)", HQ]
+    md += [line(x) for x in sorted(rows, key=lambda x: -max(x["score1"], x["score2"]))]
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/quality_{stamp}.md", f"{OUT}/quality_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     summ = os.getenv("GITHUB_STEP_SUMMARY")
