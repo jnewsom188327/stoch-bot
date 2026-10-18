@@ -1,10 +1,15 @@
 """
-TREND FLIP MARKET-CONDITIONS STUDY (+ v3.0 / v4.0 backtest) - years of 2/3-minute bars from Alpaca.
+TREND FLIP OPTIMIZER + MONTE CARLO (MODE=optimize, the default) - see the OPTIMIZER section at the bottom.
+  Every entry and exit idea, on top of the quiet-day filter, picked on 2020-2023 only and checked on 2024-now,
+  then a Monte Carlo of the final setup in option dollars (Black-Scholes estimate, 1DTE and 0DTE).
+TREND FLIP QUIET-DAY FILTER + MARKET-CONDITIONS STUDY (+ v3.0 / v4.0 backtest) - years of 2/3-minute bars from Alpaca.
 DATA ONLY: it never places an order.
-MODE=regime (default): for every v3.0 trade, measure the market conditions at the signal candle, split each
+MODE=regime: for every v3.0 trade, measure the market conditions at the signal candle, split each
   condition into thirds using 2020-2023 ONLY (TRAIN), pick rules on TRAIN, then check them on 2024-2026 (TEST),
   data the rules never saw. A rule is only real if it also helps on TEST.
 MODE=compare: the earlier v3.0 vs v4.0 comparison.
+MODE=quiet: v3.0 + "quiet day" filter = only trade when YESTERDAY's regular-hours range was below
+  X times the daily ATR(14). Same rule on every chart, several X values, TRAIN / TEST / year by year.
 Runs in GitHub Actions. Keys come from GitHub Secrets ALPACA_KEY / ALPACA_SECRET (never in this file).
 
 Same rules as the TradingView indicator Trend Flip v3.0:
@@ -35,7 +40,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "regime").strip().lower() or "regime"
+MODE = os.getenv("MODE", "optimize").strip().lower() or "optimize"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -258,11 +263,11 @@ def simulate(ind, sig, ent, p, times):
                     code, px = 2, c[i]
             if code:
                 pts = sd * (px - en)
-                trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft, eb))
+                trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft, eb, i))
                 side = 0
         if ent[i] != 0 and side == 0 and (p["direction"] == 0 or ent[i] == p["direction"]):
             pend = ent[i]
-    cols = ["entry_time", "side", "entry", "exit", "code", "pts", "r", "held", "best_r", "worst_r", "first", "ib"]
+    cols = ["entry_time", "side", "entry", "exit", "code", "pts", "r", "held", "best_r", "worst_r", "first", "ib", "ix"]
     return pd.DataFrame(trades, columns=cols)
 
 
@@ -318,6 +323,10 @@ HEAD = ("| Test | Trades | Win | ATR / trade | PF | Total ATR | Worst drawdown (
 def main():
     if MODE == "regime":
         return regime_main()
+    if MODE == "quiet":
+        return quiet_main()
+    if MODE == "optimize":
+        return optimize_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -563,6 +572,469 @@ def regime_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/regime_{stamp}.md", f"{OUT}/regime_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+
+# ================================================================ QUIET-DAY FILTER (fixed rule, all charts)
+QX = [0.6, 0.7, 0.8, 1.0]
+
+
+def quiet_one(sym, tf, df1, df):
+    base = run(df)
+    ind = _IND[next(iter(_IND))]
+    yr = regime_features(df1, df, ind)["yrange"]
+    sm = pd.Timestamp(SPLIT, tz=NY)
+    rows, runs = [], {}
+    for x in QX:
+        ok = np.nan_to_num(yr, nan=99.0) < x
+        runs[x] = run(df, allowL=ok, allowS=ok)
+    big = np.nan_to_num(yr, nan=0.0) <= 1.0
+    runs["skipbig"] = run(df, allowL=big, allowS=big)
+
+    def line(name, t):
+        tr, te = t[t["entry_time"] < sm], t[t["entry_time"] >= sm]
+        s_all, s_tr, s_te = stats(t), stats(tr), stats(te)
+        if s_all.get("n", 0) == 0:
+            return f"| {name} | 0 | | | | | |"
+        days = t["entry_time"].dt.date.nunique()
+        return (f"| {name} | {s_all['n']} | {s_all['win']:.0f}% | **{s_all['avg']:+.3f}** | {s_all['pf']:.2f} | "
+                f"{s_tr.get('avg', float('nan')):+.3f} | **{s_te.get('avg', float('nan')):+.3f}** | {s_all['dd']:.0f} | {days} |")
+    md = [f"## {sym} {tf}-minute", "",
+          "| Rule | Trades | Win | ATR / trade (all) | PF | TRAIN 2020-23 | TEST 2024-now | Worst DD (ATR) | Days traded |",
+          "|---|---|---|---|---|---|---|---|---|", line("v3.0 (no filter)", base)]
+    for x in QX:
+        md.append(line(f"only after quiet days: yesterday < {x:.1f} ATR", runs[x]))
+    md.append(line("skip days after a big day (yesterday > 1.0 ATR)", runs["skipbig"]))
+    md += ["", "| Year | v3.0 | quiet < 0.7 | trades (quiet) |", "|---|---|---|---|"]
+    q = runs[0.7]
+    for y in sorted(set(base["entry_time"].dt.year)):
+        b_, q_ = base[base["entry_time"].dt.year == y], q[q["entry_time"].dt.year == y]
+        md.append(f"| {y} | {avg(b_['r']):+.2f} | **{avg(q_['r']):+.2f}** | {len(q_)} |")
+    md.append("")
+    return md
+
+
+def quiet_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    md = [f"# Trend Flip quiet-day filter - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          "Rule: only take v3.0 trades when YESTERDAY's 9:30-16:00 range (high - low) was below X times the daily "
+          "ATR(14). Found in the market-conditions study; same rule on every chart. ATR / trade like the TradingView box.", ""]
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in TFS:
+            print(f"  {tf}m ...", flush=True)
+            df = to_tf(df1, rth_only=False, mins=tf)
+            _IND.clear()
+            md += quiet_one(sym, tf, df1, df)
+            _IND.clear()
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/quiet_{stamp}.md", f"{OUT}/quiet_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ OPTIMIZER + MONTE CARLO (MODE=optimize)
+# 1. Every entry idea and every exit idea is tested ON TOP of the quiet-day filter (yesterday < 0.7 daily ATR).
+# 2. Winners are picked on TRAIN (2020-2023) only: an idea is picked if it earns more option $ per year than the
+#    plain quiet-day setup on at least 3 of the 4 charts. TEST (2024-now) is only used to check, never to pick.
+# 3. Monte Carlo: the final setup's trading DAYS are re-shuffled into 10,000 possible years, so you see the range
+#    of years it could give you (typical, bad case, chance of a losing year, worst drop from a high).
+# Option $ = Black-Scholes estimate for an at-the-money call (longs) or put (shorts), 1 contract, in today's prices:
+#   volatility from the daily ATR (ATR / 1.6 = daily move, +15% implied-vol premium), time decay from the real clock
+#   (0DTE expires at today's close, 1DTE at tomorrow's close), minus COST $ per round trip (spread + commission).
+#   This includes theta and gamma, which the simple "delta x ATR" number does not. Still an estimate, not fills.
+from math import erf as _m_erf
+
+COST = float(os.getenv("COST", "2"))             # $ per contract per round trip
+PICK = os.getenv("OPT", "1dte").strip().lower()   # option type used to pick winners: 1dte or 0dte
+QUIET_X = float(os.getenv("QUIET_X", "0.7"))
+PATHS = int(os.getenv("PATHS", "10000"))
+
+ENTRY_TESTS = [
+    ("+ 15m agrees", dict(htf=1)),
+    ("+ 15m and 60m agree", dict(htf=2)),
+    ("Vix Fix spike within 5", dict(vf_look=5)),
+    ("Vix Fix spike within 20", dict(vf_look=20)),
+    ("no Vix Fix filter", dict(vf_on=False)),
+    ("no waiting for a late spike (wait 0)", dict(wait=0)),
+    ("wait up to 10 for a spike", dict(wait=10)),
+    ("entries from 10:00", dict(t_start=1000)),
+    ("no entries after 14:00", dict(t_end=1400)),
+    ("no VWAP rule on the line", dict(use_vwap=False)),
+]
+EXIT_TESTS = [
+    ("EXIT ride strong trend", dict(xm=1)),
+    ("EXIT ride if 15m agrees", dict(xm=2)),
+    ("EXIT cut losers on warning", dict(xm=3)),
+    ("EXIT ride + cut losers", dict(xm=4)),
+    ("EXIT ride + cut, warning after 3 candles", dict(xm=4, weak_n=3)),
+    ("EXIT hold 10 candles", dict(hold=10)),
+    ("EXIT hold 20 candles", dict(hold=20)),
+    ("EXIT hold 25 candles", dict(hold=25)),
+    ("EXIT stop 1.5 ATR", dict(stop=1.5)),
+    ("EXIT stop 3 ATR", dict(stop=3.0)),
+    ("EXIT no stop (flip / time / 15:55 only)", dict(stop=50.0)),
+]
+TV_NAME = {  # how to set each idea in Trend Flip v4.1
+    "+ 15m agrees": "Higher timeframes > Entry filter = HTF 1 agrees",
+    "+ 15m and 60m agree": "Higher timeframes > Entry filter = Both agree",
+    "Vix Fix spike within 5": "Setup > Vix Fix: spike within the last N candles = 5",
+    "Vix Fix spike within 20": "Setup > Vix Fix: spike within the last N candles = 20",
+    "no Vix Fix filter": "Setup > Vix Fix filter = OFF",
+    "no waiting for a late spike (wait 0)": "Setup > No spike at the flip? Wait up to N candles = 0",
+    "wait up to 10 for a spike": "Setup > No spike at the flip? Wait up to N candles = 10",
+    "entries from 10:00": "Exit > New entries from = 1000",
+    "no entries after 14:00": "Exit > New entries until = 1400",
+    "no VWAP rule on the line": "Setup > Price must be on the right side of VWAP = OFF",
+    "EXIT ride strong trend": "Exit > Exit = Ride strong trend",
+    "EXIT ride if 15m agrees": "Exit > Exit = Ride if HTF agrees",
+    "EXIT cut losers on warning": "Exit > Exit = Cut losers on warning",
+    "EXIT ride + cut losers": "Exit > Exit = Ride + cut losers",
+    "EXIT ride + cut, warning after 3 candles": "Exit > Exit = Ride + cut losers, and Warning colors > N = 3",
+    "EXIT hold 10 candles": "Exit > Time: sell at the close of candle N = 10",
+    "EXIT hold 20 candles": "Exit > Time: sell at the close of candle N = 20",
+    "EXIT hold 25 candles": "Exit > Time: sell at the close of candle N = 25",
+    "EXIT stop 1.5 ATR": "Exit > Stop (x ATR) = 1.5",
+    "EXIT stop 3 ATR": "Exit > Stop (x ATR) = 3",
+    "EXIT no stop (flip / time / 15:55 only)": "Exit > Stop (x ATR) = 50",
+}
+
+_verf = np.vectorize(_m_erf)
+
+
+def _ncdf(x):
+    return 0.5 * (1.0 + _verf(np.asarray(x, dtype=float) / np.sqrt(2.0)))
+
+
+def bs_price(S, K, T, sig, call):
+    """Black-Scholes, no rates/dividends. T in years, sig annual."""
+    T = np.maximum(T, 1e-9)
+    v = np.maximum(sig * np.sqrt(T), 1e-9)
+    d1 = (np.log(S / K) + 0.5 * v * v) / v
+    c = S * _ncdf(d1) - K * _ncdf(d1 - v)
+    return np.where(call, c, c - S + K)
+
+
+def fm(x):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    return f"{'+' if x >= 0 else '-'}${abs(x):,.0f}"
+
+
+class Ctx:
+    """Everything about one chart that does not depend on the setup being tested."""
+
+    def __init__(self, sym, tf, df1, df):
+        self.sym, self.tf, self.df = sym, tf, df
+        self.name = f"{sym} {tf}m"
+        base = run(df)
+        ind = _IND[next(iter(_IND))]
+        F = regime_features(df1, df, ind)
+        self.yr = F["yrange"]
+        self.quiet_ok = np.nan_to_num(self.yr, nan=99.0) < QUIET_X
+        vol = pd.Series(F["vol"]).ffill().bfill().to_numpy()            # daily ATR as % of price
+        self.sig = vol / 100.0 / 1.6 * np.sqrt(252.0) * 1.15             # annual implied-vol estimate
+        self.times = df.index
+        self.mod = (df.index.hour * 60 + df.index.minute).to_numpy()
+        hm = ind["hm"]
+        rth = (hm >= 930) & (hm < 1600)
+        dates = pd.Index(df.index.date)
+        last_bar = pd.Series(self.mod[rth], index=dates[rth]).groupby(level=0).max() + tf
+        self.close_min = last_bar                                         # minute of day the session closes
+        self.sessions = np.array(sorted(set(dates[rth])))
+        self.split = pd.Timestamp(SPLIT, tz=NY).date()
+        self.n_tr = int((self.sessions < self.split).sum())
+        self.n_te = int((self.sessions >= self.split).sum())
+        last_days = self.sessions[-20:]
+        mask = rth & np.isin(np.array(df.index.date), last_days)
+        self.atr_now = float(np.nanmean(ind["atr"][mask]))
+        self.p_now = float(ind["c"][rth][-1])
+        self.base = base
+
+    def money(self, t):
+        """Adds option $ columns (today's prices, after costs) to a trades table."""
+        t = t.copy()
+        if len(t) == 0:
+            for k in ("usd_delta", "usd_1dte", "usd_0dte"):
+                t[k] = []
+            t["date"] = []
+            return t
+        ib, ix = t["ib"].to_numpy(), t["ix"].to_numpy()
+        S0, S1 = t["entry"].to_numpy(), t["exit"].to_numpy()
+        call = t["side"].to_numpy() == 1
+        dates = pd.Index(self.times[ib].date)
+        cm = self.close_min.reindex(dates).to_numpy(dtype=float)
+        cm = np.where(np.isnan(cm), 960.0, cm)
+        rem0 = np.maximum(cm - self.mod[ib], 1.0)
+        rem1 = np.maximum(cm - (self.mod[ix] + self.tf), 0.5)
+        sig = self.sig[np.maximum(ib - 1, 0)]
+        K = np.round(S0)
+        scale = self.p_now / S0 * 100.0
+        yr_min = 252.0 * 390.0
+        for k, extra in (("usd_0dte", 0.0), ("usd_1dte", 390.0)):
+            v0 = bs_price(S0, K, (rem0 + extra) / yr_min, sig, call)
+            v1 = bs_price(S1, K, (rem1 + extra) / yr_min, sig, call)
+            t[k] = (v1 - v0) * scale - COST
+        t["usd_delta"] = t["r"] * self.atr_now * DELTA * 100.0 - COST
+        t["date"] = dates
+        return t
+
+    def ev(self, t):
+        t = self.money(t)
+        d = t["date"].to_numpy() if len(t) else np.array([])
+        tr, te = t[d < self.split] if len(t) else t, t[d >= self.split] if len(t) else t
+        yt, ye = max(self.n_tr / 252.0, 1e-9), max(self.n_te / 252.0, 1e-9)
+        ya = yt + ye
+
+        def part(x, yrs):
+            n = len(x)
+            return dict(n=n, per_yr=n / yrs, avg=x["r"].mean() if n else float("nan"),
+                        win=100 * (x["r"] > 0).mean() if n else float("nan"),
+                        d1=x["usd_1dte"].sum() / yrs if n else 0.0, d0=x["usd_0dte"].sum() / yrs if n else 0.0,
+                        dd=x["usd_delta"].sum() / yrs if n else 0.0,
+                        t1=x["usd_1dte"].mean() if n else float("nan"), t0=x["usd_0dte"].mean() if n else float("nan"))
+        return dict(all=part(t, ya), tr=part(tr, yt), te=part(te, ye), trades=t)
+
+    def daily(self, t, col, which="all"):
+        s = t.groupby("date")[col].sum() if len(t) else pd.Series(dtype=float)
+        sess = self.sessions if which == "all" else (
+            self.sessions[self.sessions < self.split] if which == "tr" else self.sessions[self.sessions >= self.split])
+        return s.reindex(sess, fill_value=0.0).to_numpy(dtype=float)
+
+
+def monte_carlo(daily, seed, paths=PATHS, days=252):
+    """Re-shuffle trading days (with replacement) into many possible years."""
+    if len(daily) == 0:
+        return None
+    rng = np.random.default_rng(seed)
+    out_tot, out_dd, out_q = [], [], []
+    for chunk in range(0, paths, 2000):
+        k = min(2000, paths - chunk)
+        sim = daily[rng.integers(0, len(daily), size=(k, days))]
+        cum = np.cumsum(sim, axis=1)
+        peak = np.maximum.accumulate(np.concatenate([np.zeros((k, 1)), cum], axis=1), axis=1)[:, 1:]
+        out_dd.append((peak - cum).max(axis=1))
+        out_tot.append(cum[:, -1])
+        out_q.append(cum[:, days // 4 - 1])
+    tot, dd, q = np.concatenate(out_tot), np.concatenate(out_dd), np.concatenate(out_q)
+    # how sure is the edge? re-shuffle the whole history (same length) many times
+    L = len(daily)
+    hist = np.array([daily[rng.integers(0, L, L)].sum() for _ in range(2000)])
+    return dict(med=np.median(tot), p5=np.percentile(tot, 5), p95=np.percentile(tot, 95),
+                lose=100 * (tot < 0).mean(), lose_q=100 * (q < 0).mean(),
+                dd_med=np.median(dd), dd95=np.percentile(dd, 95), real=100 * (hist > 0).mean())
+
+
+def mc_row(label, opt, sample, m, per_yr):
+    if m is None:
+        return f"| {label} | {opt} | {sample} | 0 | | | | | | | | |"
+    return (f"| {label} | {opt} | {sample} | {per_yr:.0f} | **{fm(m['med'])}** | {fm(m['p5'])} | {fm(m['p95'])} | "
+            f"**{m['lose']:.0f}%** | {m['lose_q']:.0f}% | {fm(-m['dd_med'])} | {fm(-m['dd95'])} | {m['real']:.0f}% |")
+
+
+MC_HEAD = ("| Setup | Option | Days sampled from | Trades / yr | Typical year | Bad year (1 in 20) | Good year (1 in 20) | "
+           "Chance of a losing year | Chance of a losing 3 months | Typical worst drop | Bad-case worst drop | "
+           "Chance the edge is real |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
+
+
+def optimize_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    pk = "d1" if PICK != "0dte" else "d0"
+    pk_name = "1DTE" if pk == "d1" else "0DTE"
+    charts = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            _IND.clear()
+            print(f"  {sym} {tf}m: {len(df):,} bars ({feed})", flush=True)
+            cx = Ctx(sym, tf, df1, df)
+            ok = cx.quiet_ok
+            res = {"v3.0 (every day)": cx.ev(cx.base)}
+            res["QUIET (v3.0 + quiet-day filter)"] = cx.ev(run(df, allowL=ok, allowS=ok))
+            for name, over in ENTRY_TESTS + EXIT_TESTS:
+                print(f"    {cx.name}: {name}", flush=True)
+                res[name] = cx.ev(run(df, allowL=ok, allowS=ok, **over))
+                for k in list(_IND.keys())[1:]:
+                    if len(_IND) > 2:
+                        del _IND[k]
+            cx.res = res
+            charts.append(cx)
+            _IND.clear()
+        del df1
+    QK = "QUIET (v3.0 + quiet-day filter)"
+    nC = len(charts)
+    need = max(1, int(np.ceil(0.75 * nC)))
+
+    # ---------- scoreboard (picked on TRAIN only)
+    board = []
+    for name, over in ENTRY_TESTS + EXIT_TESTS:
+        dtr = [c.res[name]["tr"][pk] - c.res[QK]["tr"][pk] for c in charts]
+        dte = [c.res[name]["te"][pk] - c.res[QK]["te"][pk] for c in charts]
+        btr, bte = sum(x > 0 for x in dtr), sum(x > 0 for x in dte)
+        board.append(dict(name=name, over=over, kind="exit" if name.startswith("EXIT") else "entry",
+                          btr=btr, bte=bte, mtr=float(np.mean(dtr)), mte=float(np.mean(dte)),
+                          cand=btr >= need and np.mean(dtr) > 0))
+    best_e = max([b for b in board if b["cand"] and b["kind"] == "entry"], key=lambda b: b["mtr"], default=None)
+    best_x = max([b for b in board if b["cand"] and b["kind"] == "exit"], key=lambda b: b["mtr"], default=None)
+
+    # ---------- final setup: best of {quiet, +entry pick, +exit pick, +both}, judged on TRAIN only
+    options = [("QUIET only", {}, [])]
+    if best_e:
+        options.append((f"QUIET + {best_e['name']}", dict(best_e["over"]), [best_e["name"]]))
+    if best_x:
+        options.append((f"QUIET + {best_x['name']}", dict(best_x["over"]), [best_x["name"]]))
+    if best_e and best_x:
+        options.append((f"QUIET + {best_e['name']} + {best_x['name']}", dict(best_e["over"], **best_x["over"]),
+                        [best_e["name"], best_x["name"]]))
+    for c in charts:
+        c.opt_res = {}
+        for lbl, over, names in options:
+            if not names:
+                c.opt_res[lbl] = c.res[QK]
+            elif len(names) == 1:
+                c.opt_res[lbl] = c.res[names[0]]
+            else:
+                print(f"    {c.name}: combined {lbl}", flush=True)
+                c.opt_res[lbl] = c.ev(run(c.df, allowL=c.quiet_ok, allowS=c.quiet_ok, **over))
+                _IND.clear()
+    final_lbl, final_over, final_names = max(
+        options, key=lambda o: np.mean([c.opt_res[o[0]]["tr"][pk] for c in charts]))
+
+    # ---------- write up
+    yrs_tr = f"{START[:4]}-{int(SPLIT[:4]) - 1}"
+    yrs_te = f"{SPLIT[:4]}-now"
+    det = []
+    for c in charts:
+        det += [f"## {c.name}: every idea on top of the quiet-day filter",
+                f"Today's prices: {c.sym} ≈ {c.p_now:.2f}, 1 ATR ({c.tf}m) ≈ {c.atr_now:.2f} pts. "
+                f"TRAIN {yrs_tr} = {c.n_tr} sessions, TEST {yrs_te} = {c.n_te} sessions. $ = 1 contract per trade, after ${COST:.0f} costs.", "",
+                f"| Setup | Trades / yr | Win | ATR / trade TRAIN | ATR / trade TEST | 1DTE $/yr TRAIN | 1DTE $/yr TEST | "
+                f"0DTE $/yr TRAIN | 0DTE $/yr TEST | beats QUIET ({pk_name}) |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
+        q = c.res[QK]
+        for name, r in c.res.items():
+            if name in ("v3.0 (every day)", QK):
+                mark = ""
+                nm = f"**{name}**"
+            else:
+                a, b = r["tr"][pk] > q["tr"][pk], r["te"][pk] > q["te"][pk]
+                mark = "✅ both" if a and b else ("TRAIN only" if a else ("TEST only" if b else ""))
+                nm = name
+            det.append(f"| {nm} | {r['all']['per_yr']:.0f} | {r['all']['win']:.0f}% | {r['tr']['avg']:+.3f} | "
+                       f"**{r['te']['avg']:+.3f}** | {fm(r['tr']['d1'])} | **{fm(r['te']['d1'])}** | "
+                       f"{fm(r['tr']['d0'])} | {fm(r['te']['d0'])} | {mark} |")
+        det.append("")
+
+    sb = [f"## Scoreboard: does the idea beat the quiet-day setup? ({nC} charts, {pk_name} $ per year)",
+          f"Picked = beats QUIET on TRAIN ({yrs_tr}) on at least {need} of {nC} charts. TEST ({yrs_te}) was never used to pick.", "",
+          f"| Idea | TRAIN: charts better | TEST: charts better | TRAIN $/yr vs QUIET (avg) | TEST $/yr vs QUIET (avg) | Picked on TRAIN? | Held up on TEST? |",
+          "|---|---|---|---|---|---|---|"]
+    for b in sorted(board, key=lambda b: -b["mtr"]):
+        held = "" if not b["cand"] else ("✅ yes" if b["bte"] >= need and b["mte"] > 0 else "❌ no")
+        sb.append(f"| {b['name']} | {b['btr']}/{nC} | {b['bte']}/{nC} | {fm(b['mtr'])} | {fm(b['mte'])} | "
+                  f"{'✅' if b['cand'] else ''} | {held} |")
+    sb.append("")
+
+    fin = [f"## Final setup (picked on TRAIN): **{final_lbl}**",
+           "Choices tried (best average TRAIN wins): " + "; ".join(o[0] for o in options) + "."]
+    if final_names:
+        fin.append("TradingView v4.1 settings: " + " | ".join(TV_NAME.get(n, n) for n in final_names) + " (quiet-day filter stays ON).")
+    fin += ["", "| Chart | Setup | TRAIN ATR / trade | TEST ATR / trade | TRAIN 1DTE $/yr | TEST 1DTE $/yr | TEST 0DTE $/yr |",
+            "|---|---|---|---|---|---|---|"]
+    fin_test_better = 0
+    for c in charts:
+        f_ = c.opt_res[final_lbl]
+        if f_["te"][pk] > c.res[QK]["te"][pk] or not final_names:
+            fin_test_better += 1
+        for lbl, r in (("v3.0 every day", c.res["v3.0 (every day)"]), ("QUIET", c.res[QK]), ("**FINAL**", f_)):
+            fin.append(f"| {c.name} | {lbl} | {r['tr']['avg']:+.3f} | **{r['te']['avg']:+.3f}** | {fm(r['tr']['d1'])} | "
+                       f"**{fm(r['te']['d1'])}** | {fm(r['te']['d0'])} |")
+    fin.append("")
+
+    mc = ["## Monte Carlo: 10,000 possible years (1 contract per trade, today's prices, after costs)",
+          "How it works: the real trading days (including days with no trade) are drawn at random, with replacement, "
+          "252 at a time = one possible year. Repeated 10,000 times. "
+          "*Chance the edge is real* = how often a re-shuffled copy of the whole history still ended in profit "
+          "(95%+ = strong, 80-95% = maybe, under 80% = could easily be luck). "
+          "*Worst drop* = biggest fall from a high point during the year.", ""]
+    head_lines = []
+    seed = 1
+    for c in charts:
+        f_ = c.opt_res[final_lbl]
+        mc += [f"### {c.name}", MC_HEAD]
+        rows = [("v3.0 every day", c.res["v3.0 (every day)"]), ("QUIET", c.res[QK]), ("FINAL", f_)]
+        for col, opt in (("usd_1dte", "1DTE"), ("usd_0dte", "0DTE")):
+            for lbl, r in rows:
+                seed += 1
+                m = monte_carlo(c.daily(r["trades"], col), seed)
+                mc.append(mc_row(lbl, opt, "all years", m, r["all"]["per_yr"]))
+                if lbl == "FINAL" and opt == pk_name:
+                    head_lines.append(
+                        f"- **{c.name}** ({opt}): typical year {fm(m['med']) if m else '-'}, "
+                        f"bad year {fm(m['p5']) if m else '-'}, chance of a losing year {m['lose']:.0f}%, "
+                        f"bad-case worst drop {fm(-m['dd95'])}, chance the edge is real {m['real']:.0f}%"
+                        if m else f"- **{c.name}**: no trades")
+            if opt == pk_name:
+                for which, nm in (("tr", f"only {yrs_tr} (if that market comes back)"), ("te", f"only {yrs_te}")):
+                    seed += 1
+                    m = monte_carlo(c.daily(f_["trades"], col, which), seed)
+                    mc.append(mc_row("FINAL", opt, nm, m, f_[which]["per_yr"]))
+        mc.append("")
+        ft = f_["trades"]
+        if len(ft):
+            ft.assign(entry_time=ft["entry_time"].dt.strftime("%Y-%m-%d %H:%M")).drop(columns=["date"]).round(3).to_csv(
+                f"{OUT}/final_trades_{c.sym}_{c.tf}m.csv", index=False)
+
+    yr = ["## Year by year (1DTE $ per year, 1 contract)", "| Chart | Year | v3.0 every day | QUIET | FINAL | FINAL trades |",
+          "|---|---|---|---|---|---|"]
+    for c in charts:
+        f_ = c.opt_res[final_lbl]["trades"]
+        b_, q_ = c.res["v3.0 (every day)"]["trades"], c.res[QK]["trades"]
+        for y in sorted(set(b_["entry_time"].dt.year)):
+            def ys(t):
+                return t[t["entry_time"].dt.year == y]["usd_1dte"].sum() if len(t) else 0.0
+            nf = int((f_["entry_time"].dt.year == y).sum()) if len(f_) else 0
+            yr.append(f"| {c.name} | {y} | {fm(ys(b_))} | {fm(ys(q_))} | **{fm(ys(f_))}** | {nf} |")
+    yr.append("")
+
+    top = [f"# Trend Flip optimizer + Monte Carlo - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+           f"Data {START} to {end:%Y-%m-%d}, {', '.join(c.name for c in charts)}. DATA ONLY - no orders.", "",
+           "## The answer in 30 seconds",
+           f"- Entry idea picked on {yrs_tr}: **{best_e['name'] if best_e else 'none beat the quiet-day setup'}**",
+           f"- Exit idea picked on {yrs_tr}: **{best_x['name'] if best_x else 'none beat the quiet-day setup'}**",
+           f"- Final setup: **{final_lbl}**" + (f" - beat QUIET on {yrs_te} (never seen) on {fin_test_better}/{nC} charts"
+                                                 if final_names else ""),
+           f"- Monte Carlo of the final setup, 1 contract per trade, after ${COST:.0f} costs per trade:"] + head_lines + [
+           "",
+           f"Assumptions: option $ = Black-Scholes estimate for an at-the-money option (theta and gamma included), "
+           f"implied vol from the daily ATR, in today's {', '.join(sorted(set(c.sym for c in charts)))} prices, "
+           f"${COST:.0f} per round trip. Real fills, IV changes and slippage will differ. Quiet day = yesterday's "
+           f"range < {QUIET_X:.1f} daily ATR.", ""]
+    text = "\n".join(top + sb + fin + mc + yr + det)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/optimize_{stamp}.md", f"{OUT}/optimize_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     summ = os.getenv("GITHUB_STEP_SUMMARY")
