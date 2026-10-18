@@ -1,5 +1,10 @@
 """
-TREND FLIP v3.0 / v4.0 BACKTEST - years of 2- and 3-minute bars from Alpaca. DATA ONLY: it never places an order.
+TREND FLIP MARKET-CONDITIONS STUDY (+ v3.0 / v4.0 backtest) - years of 2/3-minute bars from Alpaca.
+DATA ONLY: it never places an order.
+MODE=regime (default): for every v3.0 trade, measure the market conditions at the signal candle, split each
+  condition into thirds using 2020-2023 ONLY (TRAIN), pick rules on TRAIN, then check them on 2024-2026 (TEST),
+  data the rules never saw. A rule is only real if it also helps on TEST.
+MODE=compare: the earlier v3.0 vs v4.0 comparison.
 Runs in GitHub Actions. Keys come from GitHub Secrets ALPACA_KEY / ALPACA_SECRET (never in this file).
 
 Same rules as the TradingView indicator Trend Flip v3.0:
@@ -30,6 +35,8 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
+MODE = os.getenv("MODE", "regime").strip().lower() or "regime"
+SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
 # v3.0 settings
@@ -156,7 +163,7 @@ def indicators(df, fast, slow, use_vwap, weak_n=2, htf1=15, htf2=60):
     strongS = (st == -1) & ~fadeS
     return dict(o=o.to_numpy(), h=h.to_numpy(), l=l.to_numpy(), c=c.to_numpy(), atr=atr.to_numpy(),
                 st=st, fear=spike(wvf), greed=spike(wvi), hm=hm, day=np.array(day),
-                strongL=strongL, strongS=strongS,
+                strongL=strongL, strongS=strongS, vwap=vwap.to_numpy(),
                 h1=htf_state(df, fast, slow, htf1), h2=htf_state(df, fast, slow, htf2))
 
 
@@ -180,6 +187,9 @@ def signals(ind, p):
         okS = bars_since(ind["greed"]) <= p["vf_look"]
     else:
         okL = okS = np.ones(len(st), dtype=bool)
+    if p.get("allowL") is not None:
+        okL = okL & p["allowL"]
+        okS = okS & p["allowS"]
     if p["htf"] >= 1:
         okL = okL & (ind["h1"] == 1)
         okS = okS & (ind["h1"] == -1)
@@ -248,11 +258,11 @@ def simulate(ind, sig, ent, p, times):
                     code, px = 2, c[i]
             if code:
                 pts = sd * (px - en)
-                trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft))
+                trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft, eb))
                 side = 0
         if ent[i] != 0 and side == 0 and (p["direction"] == 0 or ent[i] == p["direction"]):
             pend = ent[i]
-    cols = ["entry_time", "side", "entry", "exit", "code", "pts", "r", "held", "best_r", "worst_r", "first"]
+    cols = ["entry_time", "side", "entry", "exit", "code", "pts", "r", "held", "best_r", "worst_r", "first", "ib"]
     return pd.DataFrame(trades, columns=cols)
 
 
@@ -262,6 +272,7 @@ _IND = {}
 def run(df3, **over):
     p = dict(V30, **over)
     key = (id(df3), p["fast"], p["slow"], p["use_vwap"], p["weak_n"], p["htf1"], p["htf2"])
+    p.setdefault("allowL", None)
     if key not in _IND:
         _IND[key] = indicators(df3, p["fast"], p["slow"], p["use_vwap"], p["weak_n"], p["htf1"], p["htf2"])
     ind = _IND[key]
@@ -305,6 +316,8 @@ HEAD = ("| Test | Trades | Win | ATR / trade | PF | Total ATR | Worst drawdown (
 
 # ---------------------------------------------------------------- main
 def main():
+    if MODE == "regime":
+        return regime_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -364,6 +377,192 @@ def main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/backtest_{stamp}.md", f"{OUT}/latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ MARKET-CONDITIONS STUDY
+# Each condition is measured on the SIGNAL candle (the candle before the entry) using only data known then.
+# "aligned" conditions are multiplied by the trade side, so + means "in the direction of my trade".
+FEATS = [
+    # key, label, aligned?
+    ("trend", "Daily trend: yesterday's close vs its 20-day average (ATR, + = with my trade)", True),
+    ("gap", "Today's opening gap (daily ATR, + = gap in my trade's direction)", True),
+    ("daymove", "Move since today's 9:30 open (daily ATR, + = day already moving my way)", True),
+    ("vwap", "Distance from VWAP at the signal (3m ATR, + = stretched my way)", True),
+    ("vol", "Volatility level: daily ATR as % of price", False),
+    ("yrange", "Yesterday's range vs normal (1 = normal day)", False),
+    ("dayrange", "Today's range so far vs normal", False),
+    ("ivol", "3-minute ATR now vs its 20-day normal", False),
+    ("tod", "Time of day", False),
+]
+TOD_EDGES = [1030, 1200, 1400]
+TOD_NAMES = ["9:35-10:30", "10:30-12:00", "12:00-14:00", "14:00-15:30"]
+
+
+def regime_features(df1, df, ind):
+    """Raw (side-free) feature arrays aligned to the chart bars of df."""
+    hm1 = df1.index.hour * 100 + df1.index.minute
+    rth = df1[(hm1 >= 930) & (hm1 < 1600)]
+    g = rth.groupby(rth.index.date)
+    d = pd.DataFrame({"o": g["open"].first(), "h": g["high"].max(), "l": g["low"].min(), "c": g["close"].last()})
+    pc = d["c"].shift(1)
+    tr = pd.concat([d["h"] - d["l"], (d["h"] - pc).abs(), (d["l"] - pc).abs()], axis=1).max(axis=1)
+    atrd = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    sma20 = d["c"].rolling(20).mean()
+    known = pd.DataFrame({                       # everything here is known before today's open
+        "pc": pc, "atr": atrd.shift(1), "sma": sma20.shift(1), "prange": (d["h"] - d["l"]).shift(1),
+        "dopen": d["o"]})
+    day = pd.Index(df.index.date)
+    k = known.reindex(day)
+    c, h, l = ind["c"], ind["h"], ind["l"]
+    hm = ind["hm"]
+    inrth = (hm >= 930) & (hm < 1600)
+    # today's range so far (RTH only)
+    hh = pd.Series(np.where(inrth, h, np.nan), index=df.index).groupby(day).cummax().to_numpy()
+    ll = pd.Series(np.where(inrth, l, np.nan), index=df.index).groupby(day).cummin().to_numpy()
+    atr_d = k["atr"].to_numpy()
+    a3 = ind["atr"]
+    a3norm = pd.Series(a3).ewm(span=20 * 130, adjust=False).mean().shift(1).to_numpy()
+    vw = ind["vwap"]
+    tod = np.digitize(hm, TOD_EDGES).astype(float)
+    return {
+        "trend": (k["pc"].to_numpy() - k["sma"].to_numpy()) / atr_d,
+        "gap": (k["dopen"].to_numpy() - k["pc"].to_numpy()) / atr_d,
+        "daymove": np.where(inrth, (c - k["dopen"].to_numpy()) / atr_d, np.nan),
+        "vwap": (c - vw) / a3,
+        "vol": atr_d / k["pc"].to_numpy() * 100,
+        "yrange": k["prange"].to_numpy() / atr_d,
+        "dayrange": (hh - ll) / atr_d,
+        "ivol": a3 / a3norm,
+        "tod": tod,
+    }
+
+
+def trade_feats(t, F):
+    sb = (t["ib"].to_numpy() - 1).clip(0)
+    side = t["side"].to_numpy()
+    out = {}
+    for key, _, aligned in FEATS:
+        v = F[key][sb]
+        out[key] = v * side if aligned else v
+    return pd.DataFrame(out, index=t.index)
+
+
+def bucket(v, cuts, key):
+    if key == "tod":
+        return v.astype(int)
+    b = np.digitize(v, cuts)
+    return np.where(np.isnan(v), -1, b)
+
+
+def avg(r):
+    return r.mean() if len(r) else float("nan")
+
+
+def regime_one(sym, tf, df1, df):
+    md = []
+    base = run(df)
+    ind = _IND[next(iter(_IND))]
+    F = regime_features(df1, df, ind)
+    tf_ = trade_feats(base, F)
+    t = pd.concat([base, tf_], axis=1)
+    test_mask = t["entry_time"] >= pd.Timestamp(SPLIT, tz=NY)
+    tr, te = t[~test_mask], t[test_mask]
+    md += [f"## {sym} {tf}-minute",
+           f"TRAIN 2020-{int(SPLIT[:4]) - 1}: {len(tr)} trades, **{avg(tr['r']):+.3f}** ATR/trade | "
+           f"TEST {SPLIT[:4]}-now: {len(te)} trades, **{avg(te['r']):+.3f}** ATR/trade "
+           f"(thirds hold ~{len(tr) // 3} trades each: differences under about 0.10 are noise)", ""]
+    md += ["### Each condition split into thirds (cut points from TRAIN only)",
+           "| Condition | Third | TRAIN n | TRAIN ATR | TEST n | TEST ATR |", "|---|---|---|---|---|---|"]
+    rules = []
+    for key, label, aligned in FEATS:
+        if key == "tod":
+            cuts, names = None, TOD_NAMES
+        else:
+            cuts = np.nanquantile(tr[key], [1 / 3, 2 / 3])
+            names = [f"low (< {cuts[0]:.2f})", f"mid", f"high (> {cuts[1]:.2f})"]
+        btr, bte = bucket(tr[key].to_numpy(), cuts, key), bucket(te[key].to_numpy(), cuts, key)
+        avgs = []
+        for i, nm in enumerate(names):
+            a_tr, a_te = tr["r"][btr == i], te["r"][bte == i]
+            avgs.append(avg(a_tr))
+            md.append(f"| {label if i == 0 else ''} | {nm} | {len(a_tr)} | {avg(a_tr):+.2f} | {len(a_te)} | {avg(a_te):+.2f} |")
+        worst = int(np.nanargmin(avgs))
+        best = int(np.nanargmax(avgs))
+        keep = [i for i in range(len(names)) if i != worst]
+        k_tr, k_te = tr["r"][np.isin(btr, keep)], te["r"][np.isin(bte, keep)]
+        o_tr, o_te = tr["r"][btr == best], te["r"][bte == best]
+        rules.append(dict(key=key, label=label, cuts=cuts, aligned=aligned, worst=worst, best=best, names=names,
+                          skip_tr=avg(k_tr), skip_te=avg(k_te), n_skip_te=len(k_te),
+                          only_tr=avg(o_tr), only_te=avg(o_te), n_only_te=len(o_te)))
+    md.append("")
+    md += ["### Rules picked on TRAIN, checked on TEST",
+           f"Baseline v3.0: TRAIN {avg(tr['r']):+.3f} | TEST {avg(te['r']):+.3f}. ✅ = helps on BOTH TRAIN and TEST.",
+           "| Rule | TRAIN ATR | TEST ATR | TEST trades | |", "|---|---|---|---|---|"]
+    btr0, bte0 = avg(tr["r"]), avg(te["r"])
+    for r in sorted(rules, key=lambda x: -x["skip_tr"]):
+        ok = r["skip_tr"] > btr0 and r["skip_te"] > bte0
+        md.append(f"| skip {r['names'][r['worst']]} - {r['key']} | {r['skip_tr']:+.3f} | {r['skip_te']:+.3f} | {r['n_skip_te']} | {'✅' if ok else ''} |")
+    for r in sorted(rules, key=lambda x: -x["only_tr"]):
+        ok = r["only_tr"] > btr0 and r["only_te"] > bte0
+        md.append(f"| ONLY {r['names'][r['best']]} - {r['key']} | {r['only_tr']:+.3f} | {r['only_te']:+.3f} | {r['n_only_te']} | {'✅' if ok else ''} |")
+    md.append("")
+
+    # combined rule: the 2 best "skip worst third" rules on TRAIN, re-simulated candle by candle
+    top = sorted(rules, key=lambda x: -x["skip_tr"])[:2]
+
+    def allow(side):
+        ok = np.ones(len(df), dtype=bool)
+        for r in top:
+            v = F[r["key"]] * side if r["aligned"] else F[r["key"]]
+            b = bucket(v, r["cuts"], r["key"])
+            ok &= (b != r["worst"]) & (b >= 0)
+        return ok
+    comb = run(df, allowL=allow(1), allowS=allow(-1))
+    cm = comb["entry_time"] >= pd.Timestamp(SPLIT, tz=NY)
+    desc = " AND ".join(f"skip {r['names'][r['worst']]} {r['key']}" for r in top)
+    s_tr, s_te, s_all = stats(comb[~cm]), stats(comb[cm]), stats(comb)
+    b_tr, b_te = stats(base[~test_mask]), stats(base[test_mask])
+    md += [f"### Best 2 rules combined (picked on TRAIN, full candle-by-candle re-run): {desc}", HEAD,
+           fmt_row("v3.0 TRAIN", b_tr), fmt_row("**combined TRAIN**", s_tr),
+           fmt_row("v3.0 TEST (never seen)", b_te), fmt_row("**combined TEST (never seen)**", s_te), "",
+           "| Year | Trades | ATR / trade (combined) | ATR / trade (v3.0) |", "|---|---|---|---|"]
+    for yr in sorted(set(base["entry_time"].dt.year)):
+        c_ = comb[comb["entry_time"].dt.year == yr]
+        b_ = base[base["entry_time"].dt.year == yr]
+        md.append(f"| {yr} | {len(c_)} | **{avg(c_['r']):+.2f}** | {avg(b_['r']):+.2f} |")
+    md.append("")
+    t.assign(entry_time=t["entry_time"].dt.strftime("%Y-%m-%d %H:%M")).to_csv(
+        f"{OUT}/regime_trades_{sym}_{tf}m.csv", index=False)
+    return md
+
+
+def regime_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    md = [f"# Trend Flip market-conditions study - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"v3.0 rules. TRAIN = {START[:4]} to {int(SPLIT[:4]) - 1} (rules are picked here). "
+          f"TEST = {SPLIT[:4]} to now (never used to pick anything). ATR / trade like the TradingView box.", ""]
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in TFS:
+            print(f"  {tf}m ...", flush=True)
+            df = to_tf(df1, rth_only=False, mins=tf)
+            _IND.clear()
+            md += regime_one(sym, tf, df1, df)
+            _IND.clear()
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/regime_{stamp}.md", f"{OUT}/regime_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     summ = os.getenv("GITHUB_STEP_SUMMARY")
