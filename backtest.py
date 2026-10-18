@@ -1,0 +1,328 @@
+"""
+TREND FLIP v3.0 BACKTEST - years of 3-minute bars from Alpaca. DATA ONLY: it never places an order.
+Runs in GitHub Actions. Keys come from GitHub Secrets ALPACA_KEY / ALPACA_SECRET (never in this file).
+
+Same rules as the TradingView indicator Trend Flip v3.0:
+  LINE  : EMA 13 > EMA 34 and close > VWAP = GREEN | the opposite = RED | anything else = GRAY
+  ENTRY : the line turns GREEN (long) / RED (short) on a candle close between 9:35 and 15:30 ET,
+          and a Vix Fix FEAR spike (longs) / GREED spike (shorts) happened in the last 10 candles.
+          No spike yet? Wait up to 5 candles for one while the line keeps its color.
+          Filled at the NEXT candle's open.
+  EXIT  : 2 ATR stop (checked first, worst case) | opposite color flip | close of candle 15 | flat at 15:55
+          (also flat at the end of a short day).
+Results: printed in the run log, shown on the run's Summary page, and saved in the results/ folder.
+"""
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+
+NY = ZoneInfo("America/New_York")
+SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
+START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
+DELTA = 0.6          # option delta for the rough $ estimate
+OUT = "results"
+
+# v3.0 settings
+V30 = dict(fast=13, slow=34, use_vwap=True, vf_on=True, vf_look=10, wait=5,
+           hold=15, stop=2.0, t_start=935, t_end=1530, flat_at=1555, direction=0)
+
+
+# ---------------------------------------------------------------- data
+def fetch_1m(symbol, start, end):
+    """1-minute bars 4:00-20:00 ET from Alpaca (SIP first, IEX if the plan does not allow SIP)."""
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+
+    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
+    if not key or not sec:
+        sys.exit("ALPACA_KEY / ALPACA_SECRET are missing. Add them in Settings > Secrets and variables > Actions.")
+    client = StockHistoricalDataClient(key, sec)
+    last_err = None
+    for feed in (DataFeed.SIP, DataFeed.IEX):
+        try:
+            parts = []
+            cur = start
+            while cur < end:
+                nxt = min(cur + timedelta(days=120), end)
+                req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
+                                       start=cur, end=nxt, feed=feed, adjustment=Adjustment.SPLIT)
+                df = client.get_stock_bars(req).df
+                if len(df):
+                    parts.append(df)
+                print(f"  {symbol} {feed.value}: {cur:%Y-%m-%d} -> {nxt:%Y-%m-%d}  {len(df):,} bars", flush=True)
+                cur = nxt
+            if not parts:
+                raise RuntimeError("no bars returned")
+            df = pd.concat(parts)
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.reset_index(level=0, drop=True)
+            df = df[~df.index.duplicated()].sort_index()
+            df.index = df.index.tz_convert(NY)
+            return df[["open", "high", "low", "close", "volume"]].astype(float), feed.value
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            msg = str(e)
+            print(f"  {symbol}: feed {feed.value} failed: {msg[:300]}", flush=True)
+            if "401" in msg or "unauthorized" in msg.lower():
+                break  # bad keys - the other feed will fail the same way
+    sys.exit(f"Could not download {symbol}: {last_err}\n"
+             "If it says 401 / unauthorized / forbidden: the API keys in GitHub Secrets are wrong or expired. "
+             "Make new PAPER keys in Alpaca and paste them into ALPACA_KEY and ALPACA_SECRET again.")
+
+
+def fake_1m(symbol, start, end):
+    """Random-walk data so the program can be tested without keys (TEST=1)."""
+    rng = np.random.default_rng(7 if symbol == "SPY" else 11)
+    days = pd.bdate_range(start.date(), end.date()).tz_localize(NY)
+    idx = []
+    for d in days:
+        idx.append(pd.date_range(d + pd.Timedelta(hours=4), d + pd.Timedelta(hours=19, minutes=59), freq="1min"))
+    idx = idx[0].append(idx[1:]) if len(idx) > 1 else idx[0]
+    ret = rng.normal(0, 0.0004, len(idx))
+    close = 400 * np.exp(np.cumsum(ret))
+    open_ = np.r_[close[0], close[:-1]]
+    hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0002, len(idx))))
+    lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0002, len(idx))))
+    vol = rng.integers(100, 5000, len(idx)).astype(float)
+    return pd.DataFrame({"open": open_, "high": hi, "low": lo, "close": close, "volume": vol}, index=idx), "fake"
+
+
+def to_3m(df1, rth_only):
+    hm = df1.index.hour * 100 + df1.index.minute
+    df1 = df1[(hm >= 930) & (hm < 1600)] if rth_only else df1[(hm >= 400) & (hm < 2000)]
+    g = df1.groupby(df1.index.floor("3min"))
+    out = pd.DataFrame({"open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(),
+                        "close": g["close"].last(), "volume": g["volume"].sum()})
+    return out.dropna()
+
+
+# ---------------------------------------------------------------- indicators (TradingView math)
+def indicators(df, fast, slow, use_vwap):
+    o, h, l, c, v = (df[k] for k in ("open", "high", "low", "close", "volume"))
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    tr.iloc[0] = h.iloc[0] - l.iloc[0]
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()                 # ta.atr = RMA of true range
+    ef = c.ewm(span=fast, adjust=False).mean()
+    es = c.ewm(span=slow, adjust=False).mean()
+    day = df.index.date
+    hlc3 = (h + l + c) / 3
+    pv = (hlc3 * v).groupby(day).cumsum()
+    vv = v.groupby(day).cumsum()
+    vwap = (pv / vv.replace(0, np.nan)).ffill()                      # ta.vwap, resets every day
+    up = (ef > es) & (c > vwap) if use_vwap else (ef > es)
+    dn = (ef < es) & (c < vwap) if use_vwap else (ef < es)
+    st = np.where(up, 1, np.where(dn, -1, 0))
+    # CM Williams Vix Fix (fear) + mirror (greed): 22 lookback, BB 20 / 2, range 50 at 0.85
+    hc22, lc22 = c.rolling(22).max(), c.rolling(22).min()
+    wvf = (hc22 - l) / hc22 * 100
+    wvi = (h - lc22) / lc22 * 100
+
+    def spike(w):
+        mid, sd = w.rolling(20).mean(), w.rolling(20).std(ddof=0)
+        return ((w >= mid + 2 * sd) | (w >= w.rolling(50).max() * 0.85)).fillna(False).to_numpy()
+
+    hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+    return dict(o=o.to_numpy(), h=h.to_numpy(), l=l.to_numpy(), c=c.to_numpy(), atr=atr.to_numpy(),
+                st=st, fear=spike(wvf), greed=spike(wvi), hm=hm, day=np.array(day))
+
+
+def bars_since(flag):
+    out = np.full(len(flag), 999, dtype=np.int64)
+    last = -10**9
+    for i, f in enumerate(flag):
+        if f:
+            last = i
+        out[i] = i - last if last > -10**9 else 999
+    return out
+
+
+def signals(ind, p):
+    st, hm = ind["st"], ind["hm"]
+    inT = (hm >= p["t_start"]) & (hm < p["t_end"])
+    prev = np.r_[0, st[:-1]]
+    sig = np.where(inT & (st != 0) & (st != prev), st, 0)
+    if p["vf_on"]:
+        okL = bars_since(ind["fear"]) <= p["vf_look"]
+        okS = bars_since(ind["greed"]) <= p["vf_look"]
+    else:
+        okL = okS = np.ones(len(st), dtype=bool)
+    ent = np.zeros(len(st), dtype=np.int64)
+    arm, armB = 0, 0
+    for i in range(len(st)):
+        if sig[i] != 0:
+            arm, armB = sig[i], 0
+        elif arm != 0:
+            armB += 1
+        if arm != 0 and (st[i] != arm or armB > p["wait"] or not inT[i]):
+            arm = 0
+        if arm != 0 and (okL[i] if arm == 1 else okS[i]):
+            ent[i] = arm
+            arm = 0
+    return sig, ent
+
+
+# ---------------------------------------------------------------- trade simulator (same order as Pine)
+def simulate(ind, sig, ent, p, times):
+    o, h, l, c, atr, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    trades = []
+    side = pend = 0
+    en = ea = stp = 0.0
+    eb = 0
+    best = worst = 0.0
+    ft = 0
+    for i in range(n):
+        if pend != 0 and side == 0:
+            side, en = pend, o[i]
+            ea = atr[i - 1] if i > 0 and not np.isnan(atr[i - 1]) else atr[i]
+            stp = en - side * p["stop"] * ea
+            eb, best, worst, ft = i, 0.0, 0.0, 0
+        pend = 0
+        if side != 0:
+            sd = side
+            held = i - eb + 1
+            fav = (h[i] - en) if sd == 1 else (en - l[i])
+            adv = (en - l[i]) if sd == 1 else (h[i] - en)
+            if ft == 0:
+                ft = -1 if adv >= ea else (1 if fav >= ea else 0)
+            best, worst = max(best, fav), max(worst, adv)
+            code, px = 0, 0.0
+            last_of_day = i + 1 >= n or day[i + 1] != day[i]
+            if (l[i] <= stp) if sd == 1 else (h[i] >= stp):
+                code, px = 1, (min(o[i], stp) if sd == 1 else max(o[i], stp))
+            elif sig[i] == -sd:
+                code, px = 5, c[i]
+            elif held >= p["hold"]:
+                code, px = 2, c[i]
+            elif hm[i] >= p["flat_at"] or last_of_day:
+                code, px = 6, c[i]
+            if code:
+                pts = sd * (px - en)
+                trades.append((times[eb], sd, en, px, code, pts, pts / ea, held, best / ea, worst / ea, ft))
+                side = 0
+        if ent[i] != 0 and side == 0 and (p["direction"] == 0 or ent[i] == p["direction"]):
+            pend = ent[i]
+    cols = ["entry_time", "side", "entry", "exit", "code", "pts", "r", "held", "best_r", "worst_r", "first"]
+    return pd.DataFrame(trades, columns=cols)
+
+
+def run(df3, **over):
+    p = dict(V30, **over)
+    ind = indicators(df3, p["fast"], p["slow"], p["use_vwap"])
+    sig, ent = signals(ind, p)
+    return simulate(ind, sig, ent, p, df3.index)
+
+
+# ---------------------------------------------------------------- stats
+def stats(t):
+    if len(t) == 0:
+        return dict(n=0)
+    r = t["r"].to_numpy()
+    gw, gl = r[r > 0].sum(), -r[r < 0].sum()
+    cum = np.cumsum(r)
+    dd = (np.maximum.accumulate(np.r_[0, cum])[1:] - cum).max()
+    streak = best_streak = 0
+    for x in r:
+        streak = streak + 1 if x <= 0 else 0
+        best_streak = max(best_streak, streak)
+    half = len(r) // 2
+    first = t["first"].to_numpy()
+    dec = (first != 0).sum()
+    days = t["entry_time"].dt.date.nunique()
+    return dict(n=len(t), win=100 * (r > 0).mean(), avg=r.mean(), pf=gw / gl if gl > 0 else float("inf"),
+                total=r.sum(), usd=t["pts"].mean() * DELTA * 100, dd=dd, streak=best_streak,
+                h1=r[:half].mean() if half else float("nan"), h2=r[half:].mean() if half else float("nan"),
+                plus1=100 * (first == 1).sum() / dec if dec else float("nan"),
+                best=t["best_r"].mean(), worst=t["worst_r"].mean(), per_day=len(t) / max(days, 1))
+
+
+def fmt_row(name, s):
+    if s.get("n", 0) == 0:
+        return f"| {name} | 0 | - | - | - | - | - | - |"
+    return (f"| {name} | {s['n']} | {s['win']:.0f}% | **{s['avg']:+.2f}** | {s['pf']:.2f} | {s['total']:+.0f} | "
+            f"{s['dd']:.1f} | {s['streak']} |")
+
+
+HEAD = ("| Test | Trades | Win | ATR / trade | PF | Total ATR | Worst drawdown (ATR) | Longest losing run |\n"
+        "|---|---|---|---|---|---|---|---|")
+
+
+# ---------------------------------------------------------------- main
+def main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    md = [f"# Trend Flip v3.0 backtest - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data: {START} to {end:%Y-%m-%d}, 3-minute candles. ATR / trade = average result per trade in ATR "
+          f"(the same number as the TradingView box). Healthy = above +0.30 with PF above 1.3.", ""]
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        ext = to_3m(df1, rth_only=False)
+        rth = to_3m(df1, rth_only=True)
+        print(f"  {len(df1):,} 1m bars -> {len(ext):,} 3m bars (with pre/post market), feed {feed}", flush=True)
+
+        main_t = run(ext)
+        main_t.assign(entry_time=main_t["entry_time"].dt.strftime("%Y-%m-%d %H:%M")).to_csv(
+            f"{OUT}/trades_{sym}_v30.csv", index=False)
+        s = stats(main_t)
+        md += [f"## {sym}  ({feed} data, {ext.index[0]:%Y-%m-%d} to {ext.index[-1]:%Y-%m-%d})", "",
+               "### Trend Flip v3.0 vs simple changes (one change at a time)", HEAD,
+               fmt_row("**v3.0 (your settings)**", s)]
+        tests = [("no Vix Fix filter", dict(vf_on=False)),
+                 ("Vix Fix spike within 5", dict(vf_look=5)),
+                 ("Vix Fix spike within 20", dict(vf_look=20)),
+                 ("hold 10 candles", dict(hold=10)),
+                 ("hold 25 candles", dict(hold=25)),
+                 ("stop 1.5 ATR", dict(stop=1.5)),
+                 ("stop 3 ATR", dict(stop=3.0)),
+                 ("EMA 8 / 21 line", dict(fast=8, slow=21)),
+                 ("EMA 21 / 50 line", dict(fast=21, slow=50))]
+        for name, over in tests:
+            print(f"  running: {name}", flush=True)
+            md.append(fmt_row(name, stats(run(ext, **over))))
+        md.append(fmt_row("regular hours only data (no pre-market)", stats(run(rth))))
+        md.append("")
+
+        L, S = main_t[main_t["side"] == 1], main_t[main_t["side"] == -1]
+        sl, ss = stats(L), stats(S)
+        md += ["### v3.0 details",
+               f"- Longs: {sl.get('n', 0)} trades, {sl.get('avg', float('nan')):+.2f} ATR | "
+               f"Shorts: {ss.get('n', 0)} trades, {ss.get('avg', float('nan')):+.2f} ATR",
+               f"- 1st half of the years {s.get('h1', float('nan')):+.2f} | 2nd half {s.get('h2', float('nan')):+.2f} ATR per trade",
+               f"- Went +1 ATR your way before -1 ATR against: {s.get('plus1', float('nan')):.0f}% "
+               f"| avg best +{s.get('best', 0):.1f} / avg worst -{s.get('worst', 0):.1f} ATR",
+               f"- {s.get('per_day', 0):.1f} trades per day that had a trade | rough $ per option per trade "
+               f"(0.6 delta, before theta + spread): ${s.get('usd', 0):+.0f}", "",
+               "### v3.0 by year", "| Year | Trades | Win | ATR / trade | PF | Total ATR |", "|---|---|---|---|---|---|"]
+        for yr, g in main_t.groupby(main_t["entry_time"].dt.year):
+            y = stats(g)
+            md.append(f"| {yr} | {y['n']} | {y['win']:.0f}% | **{y['avg']:+.2f}** | {y['pf']:.2f} | {y['total']:+.0f} |")
+        md += ["", "### v3.0 by exit reason", "| Exit | Trades | ATR / trade |", "|---|---|---|"]
+        names = {1: "stop", 2: "time (candle 15)", 5: "opposite flip", 6: "flat / end of day"}
+        for code, g in main_t.groupby("code"):
+            md.append(f"| {names.get(code, code)} | {len(g)} | {g['r'].mean():+.2f} |")
+        md.append("")
+
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/backtest_{stamp}.md", f"{OUT}/latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+if __name__ == "__main__":
+    main()
