@@ -1,5 +1,7 @@
 """
-VIX FIX WHIPLASH (MODE=wsw, the default) - one side of the Vix Fix pane maxed, then the other side maxes within N candles.
+HOW FAR DOES VIX FIX STRETCH? (MODE=vst, the default) - every fear / greed max episode: $ stretch at the first max,
+  how much further it went, candles to the extreme, snap back. SPY + QQQ 1/2/3/5m, 2020-now. DATA ONLY.
+VIX FIX WHIPLASH (MODE=wsw) - one side of the Vix Fix pane maxed, then the other side maxes within N candles.
   Measures what a whiplash looks like (gap, how often) and tests FOLLOW / FADE, every T x N, hold 1-10 candles,
   SPY + QQQ 1/2/3/5m, 2020-now, vs random entries. DATA ONLY.
 VF SCALPER +$0.50 IN 20 MINUTES (MODE=vfs) - every fire of the VF Scalper indicator (12 Vix Fix fires) with the
@@ -101,7 +103,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "wsw").strip().lower() or "wsw"
+MODE = os.getenv("MODE", "vst").strip().lower() or "vst"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -399,6 +401,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "vst":
+        return vst_main()
     if MODE == "wsw":
         return wsw_main()
     if MODE == "vfs":
@@ -5043,6 +5047,141 @@ def wsw_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/wsw_{stamp}.md", f"{OUT}/wsw_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VIX FIX STRETCH (MODE=vst, the default)
+VST_START_LVL = float(os.getenv("VST_LVL", "95"))   # an episode starts when the number crosses up to this
+VST_END_LVL = 50.0                                    # ... and ends when it drops back under this (or the day ends)
+
+
+def vst_episodes(df, ind, side, start_lvl=VST_START_LVL, end_lvl=VST_END_LVL, bounce_min=20, tf=1):
+    """side +1 = FEAR episodes (price stretched DOWN), -1 = GREED episodes (stretched UP). Starts 9:30-15:40.
+    For each: stretch at the first max ($ from the 22-candle highest close to the low, mirror for greed), how much
+    further price went after that candle, candles to the extreme, total stretch, and the snap back within bounce_min
+    minutes of the extreme."""
+    F, G = vfx_pane(df)
+    X = np.nan_to_num(F if side == 1 else G)
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    hc22 = df["close"].rolling(22).max().to_numpy()
+    lc22 = df["close"].rolling(22).min().to_numpy()
+    n = len(X)
+    nb = max(1, int(round(bounce_min / tf)))
+    out = []
+    i = 1
+    while i < n:
+        if not (X[i] >= start_lvl and X[i - 1] < start_lvl and day[i] == day[i - 1] and 930 <= hm[i] < 1540):
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and day[j + 1] == day[i] and hm[j + 1] < 1600 and X[j + 1] >= end_lvl:
+            j += 1
+        if side == 1:
+            seg = l[i:j + 1]
+            m = i + int(np.argmin(seg))
+            first = hc22[i] - l[i]
+            further = l[i] - l[m]
+            total = hc22[i] - l[m]
+            e2 = min(n - 1, m + nb)
+            while e2 > m and day[e2] != day[m]:
+                e2 -= 1
+            snap = (h[m + 1:e2 + 1].max() - l[m]) if e2 > m else 0.0
+        else:
+            seg = h[i:j + 1]
+            m = i + int(np.argmax(seg))
+            first = h[i] - lc22[i]
+            further = h[m] - h[i]
+            total = h[m] - lc22[i]
+            e2 = min(n - 1, m + nb)
+            while e2 > m and day[e2] != day[m]:
+                e2 -= 1
+            snap = (h[m] - l[m + 1:e2 + 1].min()) if e2 > m else 0.0
+        out.append(dict(i=i, first=first, further=further, total=total, to_ext=m - i, length=j - i + 1,
+                        snap=snap, pct=100 * first / c[i], atr=first / ind["atr"][i] if ind["atr"][i] > 0 else np.nan))
+        i = j + 1
+    return out
+
+
+def vst_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("VST_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(os.getenv("VST_RECENT", "2025-01-01"), tz=NY)
+    t0 = time.time()
+    rows, days = [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            hm = ind["hm"]
+            rth = (hm >= 930) & (hm < 1540)
+            days[(sym, tf)] = len(np.unique(ind["day"][rth & (df.index >= split)]))
+            for side, nm in ((1, "FEAR (down)"), (-1, "GREED (up)")):
+                ep = vst_episodes(df, ind, side, tf=tf)
+                if not ep:
+                    continue
+                d_ = pd.DataFrame(ep)
+                ts = df.index[d_["i"].to_numpy()]
+                d_["recent"], d_["year"] = ts >= split, ts.year
+                d_["sym"], d_["tf"], d_["side"] = sym, tf, nm
+                rows.append(d_)
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["further_pct"] = 100 * E["further"] / (E["first"] / E["pct"] * 100)
+    E["total_pct"] = E["pct"] + E["further_pct"]
+
+    def q(s, fmt="{:.2f}"):
+        s = s.dropna()
+        if not len(s):
+            return "-"
+        v = [fmt.format(s.quantile(p)) for p in (0.25, 0.5, 0.75, 0.9)]
+        return f"{v[0]} / **{v[1]}** / {v[2]} / {v[3]}"
+
+    rec = E[E["recent"]]
+    md = [f"# HOW FAR DOES VIX FIX STRETCH? - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"**Episode** = the fear (or greed) number crosses up to {VST_START_LVL:.0f}+ (start 9:30-15:40) and lasts until it drops under "
+          f"{VST_END_LVL:.0f}. **At the first max** = $ from the 22-candle highest close down to that candle's low (greed: from the "
+          "22-candle lowest close up to the high) = how stretched price already is the first time it reads maxed. **Further** = how much "
+          "MORE price went the same way after that candle before the episode ended. **Total** = both. **Snap back** = the bounce off "
+          "the extreme within 20 minutes. Numbers = 25% / **median** / 75% / 90% of episodes, $ per share. "
+          f"Tables use {split:%Y}-now (today's prices); the last table is every year in % of price.", ""]
+    for nm in ("FEAR (down)", "GREED (up)"):
+        md += [f"## {nm} - {split:%Y}-now",
+               "| Chart | Per day | At the first max ($) | Further after it ($) | Total stretch ($) | Stopped within $0.10 | Candles to the extreme | Snap back in 20 min ($) |",
+               "|---|---|---|---|---|---|---|---|"]
+        for tf in ST_TFS:
+            for sym in SYMBOLS:
+                g = rec[(rec["side"] == nm) & (rec["tf"] == tf) & (rec["sym"] == sym)]
+                if not len(g):
+                    continue
+                md.append(f"| {sym} {tf}m | {len(g) / max(days[(sym, tf)], 1):.1f} | {q(g['first'])} | {q(g['further'])} | {q(g['total'])} | "
+                          f"{100 * (g['further'] < 0.10).mean():.0f}% | {q(g['to_ext'], '{:.0f}')} | {q(g['snap'])} |")
+        md.append("")
+    yrs = sorted(int(y) for y in E["year"].unique())
+    md += ["## Every year, median % of price: at the first max / further / total (SPY + QQQ)",
+           "| Chart | Side | " + " | ".join(str(y) for y in yrs) + " |", "|---|---|" + "---|" * len(yrs)]
+    for tf in ST_TFS:
+        for nm in ("FEAR (down)", "GREED (up)"):
+            cells = []
+            for y in yrs:
+                g = E[(E["tf"] == tf) & (E["side"] == nm) & (E["year"] == y)]
+                cells.append(f"{g['pct'].median():.2f} / {g['further_pct'].median():.2f} / {g['total_pct'].median():.2f}" if len(g) else "-")
+            md.append(f"| {tf}m | {nm} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/vst_{stamp}.md", f"{OUT}/vst_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
