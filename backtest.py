@@ -1,5 +1,7 @@
 """
-VIX FIX MIRROR -> BREAKAWAY (MODE=mir, the default) - squeeze, both numbers rise together, then one side pulls away.
+BOUNCE OFF THE VIX FIX LINES (MODE=bnc, the default) - price touches the red (FEAR 100 / 85) or blue (GREED) line and
+  bounces: touch, close back, next high, bounce $0.25 / $0.50, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + stop. DATA ONLY.
+VIX FIX MIRROR -> BREAKAWAY (MODE=mir) - squeeze, both numbers rise together, then one side pulls away.
   FOLLOW / FADE, 32 settings, hold 1-10 candles, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + move size. DATA ONLY.
 HOW FAR DOES VIX FIX STRETCH? (MODE=vst) - every fear / greed max episode: $ stretch at the first max,
   how much further it went, candles to the extreme, snap back. SPY + QQQ 1/2/3/5m, 2020-now. DATA ONLY.
@@ -105,7 +107,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "mir").strip().lower() or "mir"
+MODE = os.getenv("MODE", "bnc").strip().lower() or "bnc"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -161,18 +163,20 @@ def fetch_1m(symbol, start, end):
 
 
 def fake_1m(symbol, start, end):
-    """Random-walk data so the program can be tested without keys (TEST=1)."""
+    """Random-walk data so the program can be tested without keys (TEST=1). Built from 10 steps a minute, so each
+    candle's high / low are real points of the path (needed to test instant, intrabar entries fairly)."""
     rng = np.random.default_rng(7 if symbol == "SPY" else 11)
     days = pd.bdate_range(start.date(), end.date()).tz_localize(NY)
     idx = []
     for d in days:
         idx.append(pd.date_range(d + pd.Timedelta(hours=4), d + pd.Timedelta(hours=19, minutes=59), freq="1min"))
     idx = idx[0].append(idx[1:]) if len(idx) > 1 else idx[0]
-    ret = rng.normal(0, 0.0004, len(idx))
-    close = 400 * np.exp(np.cumsum(ret))
-    open_ = np.r_[close[0], close[:-1]]
-    hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.0002, len(idx))))
-    lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.0002, len(idx))))
+    steps = rng.normal(0, 0.0004 / np.sqrt(10), (len(idx), 10)).astype(np.float32)
+    path = 400 * np.exp(np.cumsum(steps.ravel(), dtype=np.float64)).reshape(len(idx), 10)
+    close = path[:, -1]
+    open_ = np.r_[400.0, close[:-1]]
+    hi = np.maximum(path.max(axis=1), open_)
+    lo = np.minimum(path.min(axis=1), open_)
     vol = rng.integers(100, 5000, len(idx)).astype(float)
     return pd.DataFrame({"open": open_, "high": hi, "low": lo, "close": close, "volume": vol}, index=idx), "fake"
 
@@ -403,6 +407,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "bnc":
+        return bnc_main()
     if MODE == "mir":
         return mir_main()
     if MODE == "vst":
@@ -5413,6 +5419,287 @@ def mir_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/mir_{stamp}.md", f"{OUT}/mir_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ BOUNCE OFF THE VIX FIX LINES (MODE=bnc, the default)
+# RED line = FEAR 100 (a low at/under it = fear reads 100), BLUE line = GREED 100 (mirror). Also the 85 (spike zone) lines.
+# LONG = price touches the red line and bounces; SHORT = touches the blue line and gets rejected.
+BNC_W = 5                      # the bounce must come within this many candles of the touch low
+BNC_SLIP = 0.03                # instant (intrabar) entries fill this much worse than the trigger price (conservative)
+BNC_KINDS = ("TOUCH", "CLOSE BACK", "NEXT HIGH", "BOUNCE $0.25", "BOUNCE $0.50")
+
+
+def bnc_lines(df):
+    """the VF LINES price levels (exactly the pane: fear = 100 when low <= f100, greed = 100 when high >= g100)"""
+    c, h, l = df["close"], df["high"], df["low"]
+    hc, lc = c.rolling(22).max(), c.rolling(22).min()
+    wvf, wvs = (hc - l) / hc * 100, (h - lc) / lc * 100
+    wP, sP = wvf.rolling(49).max().shift(1), wvs.rolling(49).max().shift(1)
+    return {100: ((hc * (1 - wP / 100)).to_numpy(), (lc * (1 + sP / 100)).to_numpy()),
+            85: ((hc * (1 - 0.85 * wP / 100)).to_numpy(), (lc * (1 + 0.85 * sP / 100)).to_numpy())}
+
+
+def bnc_events(ind, fl, gl, kind, W=BNC_W, sess_end=1540):
+    """Returns arrays (signal candle, entry candle, entry price, side, stop price) using only what is known at the time:
+    TOUCH      = the first candle of a touch streak (low <= red line); fires at its close, entry next open
+    CLOSE BACK = a touch candle that closes back above the red line in its upper half (wick rejection); entry next open
+    NEXT HIGH  = within W candles of the touch low, a candle closes above the high of the touch-low candle (no new low first)
+    BOUNCE $Y  = within W candles of the touch low, price trades $Y above that low -> entry right there (instant, intrabar);
+                 any candle after the touch low can trigger it, even one that later touches the line or makes a new
+                 low (we can't know that at the moment of entry); a new low only moves the level for LATER candles.
+    Stop = just under the touch low. Shorts = the mirror on the blue line. Fires 9:30-15:40."""
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    Y = 0.25 if kind == "BOUNCE $0.25" else 0.50
+    out = []
+    for sd in (1, -1):
+        line = fl if sd == 1 else gl
+        lo = l if sd == 1 else -h            # mirror the short side so "low" is always the extreme
+        hi = h if sd == 1 else -l
+        cl = c if sd == 1 else -c
+        op = o if sd == 1 else -o
+        ln = line if sd == 1 else -line
+        touch = np.zeros(n, dtype=bool)
+        ok = ~np.isnan(line)
+        touch[ok] = lo[ok] <= ln[ok]
+        active, streak = False, False
+        ext = extH = 0.0
+        extI = -1
+        for i in range(n):
+            nd = i == 0 or day[i] != day[i - 1]
+            if nd:
+                active, streak = False, False
+            inw = 930 <= hm[i] < sess_end
+            if kind in ("TOUCH", "CLOSE BACK"):
+                if touch[i]:
+                    if not streak:
+                        streak, done = True, False
+                    if not done and inw and i + 1 < n and day[i + 1] == day[i]:
+                        if kind == "TOUCH" or (cl[i] > ln[i] and cl[i] >= (hi[i] + lo[i]) / 2):
+                            out.append((i, i + 1, o[i + 1], sd, l[i] - 0.01 if sd == 1 else h[i] + 0.01))
+                            done = True
+                else:
+                    streak = False
+                continue
+            if active and i - extI > W:
+                active = False
+            if active and kind != "NEXT HIGH":
+                # the bounce level is set by candles BEFORE this one; any candle can trigger it (even one that later
+                # touches the line or makes a new low - we can't know that at the moment of entry)
+                trig = ext + Y
+                if hi[i] >= trig and inw:
+                    en = max(op[i], trig) + BNC_SLIP
+                    stop = ext - 0.01
+                    out.append((i, i, en if sd == 1 else -en, sd, stop if sd == 1 else -stop))
+                    active = False
+                    continue
+            if touch[i]:
+                if not active:
+                    active, ext, extI, extH = True, lo[i], i, hi[i]
+                elif lo[i] < ext:
+                    ext, extI, extH = lo[i], i, hi[i]
+                continue
+            if not active:
+                continue
+            if lo[i] < ext:
+                ext, extI, extH = lo[i], i, hi[i]
+                continue
+            if kind == "NEXT HIGH" and cl[i] > extH and inw and i + 1 < n and day[i + 1] == day[i]:
+                stop = ext - 0.01
+                out.append((i, i + 1, o[i + 1], sd, stop if sd == 1 else -stop))
+                active = False
+    if not out:
+        return [np.array([], dtype=np.int64)] * 2 + [np.array([])] + [np.array([], dtype=np.int64)] + [np.array([])]
+    a = sorted(out)
+    return (np.array([x[0] for x in a]), np.array([x[1] for x in a]), np.array([x[2] for x in a], dtype=float),
+            np.array([x[3] for x in a]), np.array([x[4] for x in a], dtype=float))
+
+
+def bnc_outcomes(ind, eidx, epx, sd, stop, ks=WSW_K):
+    """From entry candle e at price en (candle e counts as candle 1): no-stop $ at the close of candle k, and the same trade
+    with the stop under the touch low (stop checked first in every candle, including the entry candle = conservative)."""
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    K = max(ks)
+    ret = np.full((len(eidx), len(ks)), np.nan)
+    rst = np.full((len(eidx), len(ks)), np.nan)
+    hitS = np.full((len(eidx), len(ks)), np.nan)
+    for q, (e, en, s, sp) in enumerate(zip(eidx, epx, sd, stop)):
+        if e >= n or hm[e] >= 1555:
+            continue
+        last = e
+        while last + 1 < n and day[last + 1] == day[e] and hm[last + 1] < 1600 and last + 1 - e < K:
+            last += 1
+        stopped_at = None
+        for j in range(e, last + 1):
+            if (s == 1 and l[j] <= sp) or (s == -1 and h[j] >= sp):
+                px = (min(o[j], sp) if s == 1 else max(o[j], sp)) if j > e else sp
+                stopped_at = (j, s * (px - en))
+                break
+        for kk, k in enumerate(ks):
+            j = min(e + k - 1, last)
+            ret[q, kk] = s * (c[j] - en)
+            if stopped_at is not None and stopped_at[0] <= j:
+                rst[q, kk], hitS[q, kk] = stopped_at[1], 1.0
+            else:
+                rst[q, kk], hitS[q, kk] = ret[q, kk], 0.0
+    return ret, rst, hitS
+
+
+def bnc_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("BNC_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("BNC_TFS", "1,2,3,5,15").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rng = np.random.default_rng(10)
+    KN = [f"k{k}" for k in WSW_K]
+    SN_ = [f"s{k}" for k in WSW_K]
+    XN = [f"x{k}" for k in WSW_K]
+    rows, base, days = [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            lines = bnc_lines(df)
+            hm = ind["hm"]
+            years = np.asarray(df.index.year)
+            per = np.where(df.index < split, "tr", "te")
+            days[(sym, tf)] = len(np.unique(ind["day"][(hm >= 930) & (hm < 1540)]))
+            cnt = []
+            for lv in (100, 85):
+                fl, gl = lines[lv]
+                for kind in BNC_KINDS:
+                    si, ei, ep, sd, sp = bnc_events(ind, fl, gl, kind)
+                    cnt.append(len(si))
+                    if not len(si):
+                        continue
+                    R, RS, HS = bnc_outcomes(ind, ei, ep, sd, sp)
+                    d_ = pd.DataFrame(np.c_[R, RS, HS], columns=KN + SN_ + XN)
+                    d_["set"], d_["sym"], d_["tf"] = f"{kind} ({lv} line)", sym, tf
+                    d_["side"] = np.where(sd > 0, "LONG", "SHORT")
+                    d_["risk"] = np.abs(ep - sp)
+                    tr_ = ind["st"][si] * sd
+                    d_["trend"] = np.where(tr_ > 0, "with", np.where(tr_ < 0, "against", "gray"))
+                    d_["per"], d_["year"] = per[si], years[si]
+                    rows.append(d_.dropna(subset=[KN[0]]))
+            pool = np.nonzero((hm >= 930) & (hm < 1540))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("BNC_RANDOM", "8000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                Rr, _, _ = wsw_outcomes(ind, ridx, np.full(len(ridx), sdv))
+                d_ = pd.DataFrame(Rr, columns=KN)
+                d_["sym"], d_["tf"], d_["side"] = sym, tf, snm
+                d_["per"], d_["year"] = per[ridx], years[ridx]
+                base.append(d_.dropna(subset=[KN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | fires per setting {min(cnt)}-{max(cnt)}", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B_ = pd.concat(base, ignore_index=True)
+    bm_per = B_.groupby(["sym", "tf", "side", "per"])[KN].mean()
+    bm_yr = B_.groupby(["sym", "tf", "side", "year"])[KN].mean()
+    pn = {"tr": f"{start:%Y}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    yrs = sorted(int(y) for y in E["year"].unique())
+
+    def adj(g, col, by="per"):
+        if not len(g):
+            return np.nan
+        bm = bm_per if by == "per" else bm_yr
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", by]):
+            if kk in bm.index and not np.isnan(bm.loc[kk, col]):
+                tot += (gg[col].mean() - bm.loc[kk, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    summ = []
+    for (st_, tf), g in E.groupby(["set", "tf"]):
+        if len(g) < 100:
+            continue
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        trk = [adj(tr, k_) for k_ in KN]
+        if all(np.isnan(v) for v in trk):
+            continue
+        bk = int(np.nanargmax(trk))
+        k_ = KN[bk]
+        se_tr = tr[k_].std() / np.sqrt(len(tr)) if len(tr) > 1 else np.nan
+        se_te = te[k_].std() / np.sqrt(len(te)) if len(te) > 1 else np.nan
+        tev = adj(te, k_)
+        ych = [adj(g[g["year"] == y_], k_, by="year") for y_ in yrs]
+        nd = sum(days[(s_, tf)] for s_ in g["sym"].unique())
+        summ.append(dict(s=st_, tf=tf, k=WSW_K[bk], n=len(g), perday=len(g) / max(nd, 1), tr=trk[bk], te=tev,
+                         ttr=trk[bk] / se_tr if se_tr else np.nan, tte=tev / se_te if se_te else np.nan,
+                         green=100 * (te[k_] > 0).mean() if len(te) else np.nan,
+                         syms=sum(1 for _, gg in te.groupby("sym") if adj(gg, k_) > 0), nsym=te["sym"].nunique(),
+                         ych=ych, ypos=sum(1 for v in ych if v > 0), ny=sum(1 for v in ych if not np.isnan(v)),
+                         tek=[adj(te, kk) for kk in KN],
+                         risk=te["risk"].median() if len(te) else np.nan, sst=100 * te[f"x{WSW_K[bk]}"].mean() if len(te) else np.nan,
+                         susd=te[f"s{WSW_K[bk]}"].mean() if len(te) else np.nan, nusd=te[k_].mean() if len(te) else np.nan,
+                         sR=(te[f"s{WSW_K[bk]}"] / te["risk"].clip(lower=0.05)).mean() if len(te) else np.nan))
+    S = pd.DataFrame(summ)
+    S["score"] = S["tr"].fillna(-9) + S["te"].fillna(-9)
+
+    def real(z):
+        return (z["tr"] > 0.01 and z["te"] > 0.01 and z["ttr"] >= 2 and z["tte"] >= 2 and z["syms"] == z["nsym"]
+                and z["ypos"] >= max(z["ny"] - 1, 1) and z["n"] >= 200)
+    S["real"] = S.apply(real, axis=1)
+    good = S[S["real"]].sort_values("score", ascending=False)
+    top = S.sort_values("score", ascending=False).head(12)
+    md = [f"# BOUNCE OFF THE VIX FIX LINES - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Fires 9:30-15:40. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**LONG** = price touches the RED line (FEAR 100, or the faint 85 line) and bounces; **SHORT** = touches the BLUE line and is "
+          "rejected. **TOUCH** = the first touch candle (no bounce needed), entry next open. **CLOSE BACK** = the touch candle closes "
+          "back inside the line in its upper half (a wick rejection). **NEXT HIGH** = within 5 candles a candle closes above the "
+          "touch-low candle's high. **BOUNCE $0.25 / $0.50** = price trades that far off the touch low within 5 candles -> entry "
+          "right there (instant, filled $0.03 worse than the trigger). Hold k candles (picked on "
+          f"{pn['tr']} only). **vs random** = $ per share minus random entries the same way on the same chart. **With a stop** = the "
+          "same trades with a stop $0.01 under the touch low (above the touch high for shorts). "
+          f"**REAL EDGE** = +$0.01/share vs random in {pn['tr']} AND {pn['te']}, t >= 2 in BOTH, SPY and QQQ both positive, "
+          "every year but one, 200+ fires.", "",
+          "## The answer in 30 seconds",
+          f"- **REAL EDGE: {len(good)}**" + (" - " + "; ".join(
+              f"{z.tf}m {z.s}, hold {z.k} candles ({z.k * z.tf} min): ${z.te:+.3f}/share vs random ({pn['te']}, t {z.tte:.1f}), "
+              f"{z.ypos}/{z.ny} years" for z in good.head(6).itertuples()) if len(good) else " - none passed every check."), "",
+          "## Every setting (sorted by both periods vs random)",
+          f"| Chart | Setting | Per day | Hold | Fires | vs random {pn['tr']} (t) | **vs random {pn['te']}** (t) | Green | Years + | SPY+QQQ + | |",
+          "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in S.sort_values("score", ascending=False).itertuples():
+        md.append(f"| {z.tf}m | {z.s} | {z.perday:.1f} | {z.k} ({z.k * z.tf} min) | {z.n} | {z.tr:+.3f} ({z.ttr:.1f}) | **{z.te:+.3f}** ({z.tte:.1f}) | "
+                  f"{z.green:.0f}% | {z.ypos}/{z.ny} | {z.syms}/{z.nsym} | {'✅' if z.real else ''} |")
+    md += ["", f"## With a stop under the touch low (top 12, {pn['te']}, same hold)",
+           "| Chart | Setting | Risk to the stop (median $) | Stopped out | Avg $ no stop | **Avg $ with the stop** | Avg R (with the stop) |",
+           "|---|---|---|---|---|---|---|"]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m | {z.s} | ${z.risk:.2f} | {z.sst:.0f}% | {z.nusd:+.3f} | **{z.susd:+.3f}** | {z.sR:+.2f}R |")
+    md += ["", f"## Speed: $ vs random ({pn['te']}) after 1 / 2 / 3 / 5 / 10 candles (top 12)",
+           "| Chart | Setting | " + " | ".join(f"{k} c" for k in WSW_K) + " |", "|---|---|" + "---|" * len(WSW_K)]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m | {z.s} | " + " | ".join(f"{v:+.3f}" for v in z.tek) + " |")
+    md += ["", "## Top 12 every year ($ vs random)", "| Setting | " + " | ".join(str(y_) for y_ in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m {z.s} k{z.k} | " + " | ".join("-" if np.isnan(v) else f"{v:+.3f}" for v in z.ych) + " |")
+    md += ["", f"## Top 5 split by side and trend line ({pn['te']}, $ vs random | fires)",
+           "| Setting | LONG (red line) | SHORT (blue line) | With the line | Against the line |", "|---|---|---|---|---|"]
+    for z in top.head(5).itertuples():
+        g = E[(E["set"] == z.s) & (E["tf"] == z.tf) & (E["per"] == "te")]
+        k_ = f"k{z.k}"
+        cells = [f"{adj(g[g['side'] == s_], k_):+.3f} ({(g['side'] == s_).sum()})" for s_ in ("LONG", "SHORT")]
+        cells += [f"{adj(g[g['trend'] == t_], k_):+.3f} ({(g['trend'] == t_).sum()})" for t_ in ("with", "against")]
+        md.append(f"| {z.tf}m {z.s} k{z.k} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/bnc_{stamp}.md", f"{OUT}/bnc_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
