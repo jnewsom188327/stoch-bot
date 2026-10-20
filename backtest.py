@@ -1,5 +1,14 @@
 """
-STOCH SCALP PRO - LAST 2 YEARS (MODE=stoch, the default) - your Stoch Pro v1.2 box on SPY + QQQ 1/2/3/5m:
+VIX FIX RETEST + THE LEADERBOARD (MODE=vfx, the default) - 2020-now, SPY + QQQ 1/2/3/5m. DATA ONLY, ATR only.
+  Your 10/20 chart idea: a FEAR spike (red bars) marks a low, price BOUNCES at least 1 ATR, then PULLS BACK at least
+  half of the bounce, but fear has dried up (the fear bar is under half the spike's tallest bar) -> long.
+    VF1 = that retest | VF2 = + greed bar taller than fear (the mirror flipped) | VF3 = VF2 + a mirror phase first
+    VF4 = VF2, then wait for the first green candle (confirmation) | VF5 = true divergence: a LOWER low than the spike
+    low with a fear bar under 70% of the spike | VF0 = reference: the streak ends (tested before).
+  Shorts = the mirror image (GREED spike, bounce down, pull back up, greed dried up, fear taller than greed).
+  On the same ruler: SUPER, SUPER+ and GAP & GO. Edge vs a coin flip, ATR after 5 / 10 / 15 / 30 / 60 candles and to
+  15:55, minus a random entry in the same direction, best hold picked on 2020-23 only, every year, chart, side.
+STOCH SCALP PRO - LAST 2 YEARS (MODE=stoch) - your Stoch Pro v1.2 box on SPY + QQQ 1/2/3/5m:
   Stoch 14-3-3 hook (was under 20 / over 80 in the last 3 bars, crosses %D, still under / over 50), filters
   trend (EMA 21/50) / VWAP / 5m trend / price candle, fast 5-3-3 and slow 21-5-5, entry at the next open,
   3-bar cooldown, 0.02 ATR slippage a side, flat 15:55. Every stop x target x hold time, the hold curve,
@@ -78,7 +87,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "stoch").strip().lower() or "stoch"
+MODE = os.getenv("MODE", "vfx").strip().lower() or "vfx"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -376,6 +385,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "vfx":
+        return vfx_main()
     if MODE == "stoch":
         return stoch_main()
     if MODE == "v27":
@@ -3841,6 +3852,282 @@ def stoch_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/stoch_{stamp}.md", f"{OUT}/stoch_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VIX FIX RETEST + LEADERBOARD (MODE=vfx)
+VFX_WIN = int(os.getenv("VFX_WIN", "30"))         # candles after the spike ends to find the bounce + retest (same day)
+VFX_BOUNCE = float(os.getenv("VFX_BOUNCE", "1.0"))  # the bounce must reach at least this many ATR off the spike low
+VFX_PULL = float(os.getenv("VFX_PULL", "0.5"))    # the retest gives back at least this share of the bounce
+VFX_DRY = float(os.getenv("VFX_DRY", "0.5"))      # fear "dried up" = fear bar under this share of the spike's tallest bar
+VFX_NAMES = ["VF1 retest, fear dried up", "VF2 retest + greed taller than fear (mirror flipped)",
+             "VF3 mirror phase first, then VF2", "VF4 VF2 + first green candle (confirmed)",
+             "VF5 true divergence (lower low, fear bar under 70%)", "VF0 reference: spike streak ends (tested before)"]
+
+
+def vfx_pane(df):
+    """Your VIX FIX pane: bar heights 0-100 = wvf / highest(wvf, 50) * 100 (fear) and the same for greed (wvi)."""
+    c, h, l = df["close"], df["high"], df["low"]
+    hc22, lc22 = c.rolling(22).max(), c.rolling(22).min()
+    wvf, wvi = (hc22 - l) / hc22 * 100, (h - lc22) / lc22 * 100
+    return (wvf / wvf.rolling(50).max() * 100).to_numpy(), (wvi / wvi.rolling(50).max() * 100).to_numpy()
+
+
+def vfx_events(df, ind, trace=None):
+    """Signals (+1 long / -1 short) on the CLOSED candle i; entry is at candle i+1's open. Uses only candles <= i.
+    trace: optional list - every fire is appended as a dict (for the self-check)."""
+    fN, gN = vfx_pane(df)
+    fear = np.asarray(ind["fear"], dtype=bool)
+    greed = np.asarray(ind["greed"], dtype=bool) & ~fear
+    hm, day, a = ind["hm"], ind["day"], ind["atr"]
+    O, H, L, C = ind["o"], ind["h"], ind["l"], ind["c"]
+    n = len(H)
+    out = {nm: np.zeros(n, dtype=np.int64) for nm in VFX_NAMES}
+    win = (hm >= 935) & (hm < 1530)
+    rth = (hm >= 930) & (hm < 1600)
+    for side in (1, -1):
+        spk = fear if side == 1 else greed
+        mine = np.nan_to_num(fN if side == 1 else gN)     # the spike side's bar
+        other = np.nan_to_num(gN if side == 1 else fN)
+        in_spk = False
+        s_day = None
+        left = 0
+        for i in range(n):
+            if not rth[i]:
+                continue
+            if spk[i]:
+                if not in_spk or day[i] != s_day:                      # a new spike streak
+                    in_spk, s_day, s_ext, s_ht, s_i = True, day[i], (L[i] if side == 1 else H[i]), 0.0, i
+                    done, mirror_n, bounce, armed4 = set(), 0, 0.0, -1
+                s_ext = min(s_ext, L[i]) if side == 1 else max(s_ext, H[i])
+                s_ht = max(s_ht, mine[i])
+                left = 0
+                continue
+            if in_spk:                                                 # first candle after the streak
+                in_spk, left = False, VFX_WIN
+                if win[i] and day[i] == s_day:
+                    out[VFX_NAMES[5]][i] = side
+            if left <= 0 or day[i] != s_day or not (a[i] > 0):
+                continue
+            left -= 1
+            m, o_ = mine[i], other[i]
+            if 20 <= m <= 70 and 20 <= o_ <= 70 and 0.67 <= (m + 1e-9) / (o_ + 1e-9) <= 1.5:
+                mirror_n += 1
+            # the bounce so far (measured BEFORE this candle, so the retest candle can't be its own bounce)
+            bounced = bounce >= VFX_BOUNCE * a[i]
+            pulled = bounced and ((L[i] <= s_ext + (1 - VFX_PULL) * bounce) if side == 1 else (H[i] >= s_ext - (1 - VFX_PULL) * bounce))
+            dry = m < VFX_DRY * s_ht
+            flip = o_ > m
+            lower = (L[i] < s_ext) if side == 1 else (H[i] > s_ext)
+            if win[i]:
+                fires = [(0, pulled and dry), (1, pulled and dry and flip), (2, pulled and dry and flip and mirror_n >= 3),
+                         (4, lower and m < 0.7 * s_ht)]
+                for k, ok in fires:
+                    if ok and k not in done:
+                        out[VFX_NAMES[k]][i] = side
+                        done.add(k)
+                        if trace is not None:
+                            trace.append(dict(kind=VFX_NAMES[k], side=side, i=i, spike_start=s_i, spike_ext=s_ext, spike_ht=s_ht,
+                                              bounce=bounce, bar_low=L[i], bar_high=H[i], mine=m, other=o_, atr=a[i]))
+                if pulled and dry and flip and armed4 < 0 and 3 not in done:
+                    armed4 = i
+                if armed4 >= 0 and 3 not in done and i - armed4 <= 5 and ((C[i] > O[i]) if side == 1 else (C[i] < O[i])):
+                    out[VFX_NAMES[3]][i] = side
+                    done.add(3)
+            # update the bounce AFTER using it (this candle's extreme counts from the next candle on)
+            bounce = max(bounce, (H[i] - s_ext) if side == 1 else (s_ext - L[i]))
+            # a lower low resets the reference low (the divergence above already used the old one)
+            if lower:
+                s_ext = L[i] if side == 1 else H[i]
+                bounce = 0.0
+    return out
+
+
+def vfx_outcomes(ind, idx, side, holds, flat=1555, stop=3.0):
+    """ATR result per entry (entry = next candle's open): close after N candles counting the entry candle (no stop,
+    capped at the last candle before 15:55), close of that last candle, and the same with a 3 ATR stop (stop first)."""
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    ok_bar = hm < flat
+    # last candle before the flat time for every day
+    last_of = np.full(n, -1)
+    cur = -1
+    for j in range(n - 1, -1, -1):
+        if j == n - 1 or day[j + 1] != day[j]:
+            cur = -1
+        if ok_bar[j] and cur == -1:
+            cur = j
+        last_of[j] = cur
+    res = np.full((len(idx), len(holds) + 2), np.nan)
+    for q, (i, sd) in enumerate(zip(idx, side)):
+        e = i + 1
+        if e >= n or day[e] != day[i] or not ok_bar[e] or not (a[i] > 0):
+            continue
+        last = last_of[e]
+        en, at = o[e], a[i]
+        for k, hb in enumerate(holds):
+            res[q, k] = sd * (c[min(e + hb - 1, last)] - en) / at
+        res[q, len(holds)] = sd * (c[last] - en) / at
+        stp = en - sd * stop * at
+        seg = l[e:last + 1] <= stp if sd == 1 else h[e:last + 1] >= stp
+        hit = np.nonzero(seg)[0]
+        if len(hit):
+            j = e + hit[0]
+            px = min(o[j], stp) if sd == 1 else max(o[j], stp)
+            res[q, len(holds) + 1] = sd * (px - en) / at
+        else:
+            res[q, len(holds) + 1] = res[q, len(holds)]
+    return res
+
+
+def vfx_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    HOLDS = [5, 10, 15, 30, 60]
+    HN = [f"{x} candles" for x in HOLDS] + ["to 15:55", "to 15:55, 3 ATR stop"]
+    rng = np.random.default_rng(3)
+    rows, base = [], []
+    n_years = max((end - start).days / 365.25, 1e-9)
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind, color, mom, sup = super_events(df, 2, "dip")
+            ev = vfx_events(df, ind)
+            c, hh_, ll_ = df["close"], df["high"], df["low"]
+            lo14, hi14 = ll_.rolling(14).min(), hh_.rolling(14).max()
+            K = (100 * (c - lo14) / (hi14 - lo14).replace(0, np.nan)).rolling(3).mean().to_numpy()
+            kw = np.where(sup > 0, K, 100 - K)
+            ev["SUPER (dip)"] = sup
+            ev["SUPER+ (Stoch 20-40 your way)"] = np.where((sup != 0) & (kw >= 20) & (kw <= 40), sup, 0)
+            ev["GAP & GO (confirmed)"] = gap_events(df, df1, ind, 0.3, 935, True)
+            years = np.asarray(df.index.year)
+            for nm, sg in ev.items():
+                idx = np.nonzero(sg)[0]
+                if not len(idx):
+                    continue
+                sd = sg[idx]
+                g = grade_two_sided(ind, idx)
+                R = vfx_outcomes(ind, idx, sd, HOLDS)
+                d = pd.DataFrame(R, columns=HN)
+                d["edge"] = 50.0 * (np.where(sd > 0, g[:, 0], g[:, 1]) - np.where(sd > 0, g[:, 1], g[:, 0]))
+                d["kind"], d["sym"], d["tf"] = nm, sym, tf
+                d["side"] = np.where(sd > 0, "LONG", "SHORT")
+                d["per"] = np.where(df.index[idx] < split, "tr", "te")
+                d["year"] = years[idx]
+                rows.append(d.dropna(subset=[HN[0]]))
+            hm = ind["hm"]
+            pool = np.nonzero((hm >= 935) & (hm < 1530))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("VFX_RANDOM", "8000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                R = vfx_outcomes(ind, ridx, np.full(len(ridx), sdv), HOLDS)
+                d = pd.DataFrame(R, columns=HN)
+                d["sym"], d["tf"], d["side"] = sym, tf, snm
+                d["per"] = np.where(df.index[ridx] < split, "tr", "te")
+                d["year"] = years[ridx]
+                base.append(d.dropna(subset=[HN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | " +
+                  " | ".join(f"{k_.split(' ')[0]} {int((v != 0).sum())}" for k_, v in ev.items()), flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B = pd.concat(base, ignore_index=True)
+    bm_per = B.groupby(["sym", "tf", "side", "per"])[HN].mean()
+    bm_yr = B.groupby(["sym", "tf", "side", "year"])[HN].mean()
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    kinds = list(dict.fromkeys(E["kind"]))
+    yrs = sorted(int(y) for y in E["year"].unique())
+
+    def adj(g, col, by="per"):
+        """Average ATR minus a random entry in the SAME direction on the same chart and the same period (or year)."""
+        if not len(g):
+            return np.nan
+        bm = bm_per if by == "per" else bm_yr
+        keys = ["sym", "tf", "side", by]
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(keys):
+            if kk not in bm.index:
+                continue
+            b = bm.loc[kk, col]
+            if np.isnan(b):
+                continue
+            tot += (gg[col].mean() - b) * len(gg)
+            nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    summ = []
+    for k_ in kinds:
+        g = E[E["kind"] == k_]
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        best = max(HN, key=lambda col: np.nan_to_num(adj(tr, col), nan=-9.0))     # hold picked on TRAIN only
+        ych = [adj(g[g["year"] == y_], best, by="year") for y_ in yrs]
+        charts_pos = sum(1 for _, gg in te.groupby(["sym", "tf"]) if adj(gg, best) > 0)
+        nch = te.groupby(["sym", "tf"]).ngroups
+        summ.append(dict(k=k_, n=len(g), per_yr=len(g) / n_years / max(len(SYMBOLS) * len(ST_TFS), 1),
+                         etr=tr["edge"].mean(), ete=te["edge"].mean(), best=best, atr_te=te[best].mean(),
+                         adj_tr=adj(tr, best), adj_te=adj(te, best), charts=charts_pos, nch=nch, ych=ych,
+                         ypos=sum(1 for v in ych if v > 0), ny=sum(1 for v in ych if not np.isnan(v))))
+    summ.sort(key=lambda z: -(np.nan_to_num(z["adj_te"]) + np.nan_to_num(z["adj_tr"])))
+
+    def real(z):
+        return (z["adj_tr"] > 0.05 and z["adj_te"] > 0.05 and z["etr"] > 1.0 and z["ete"] > 1.0 and z["charts"] >= 6
+                and z["ypos"] >= max(z["ny"] - 1, 1))
+    good = [z for z in summ if real(z)]
+    md = [f"# VIX FIX RETEST + LEADERBOARD - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY - ATR only (you manage the options). "
+          f"Retest = after a spike, price bounces {VFX_BOUNCE:g}+ ATR, then gives back {VFX_PULL:.0%}+ of the bounce within {VFX_WIN} candles (same day); "
+          f"dried up = fear bar under {VFX_DRY:.0%} of the spike's tallest bar. Entry = next open, signals 9:35-15:30. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Edge** = +1-ATR-your-way-first minus the other way, halved (0 = coin flip). **ATR** = average move your way. "
+          "**vs random** = minus a random entry in the SAME direction on the same chart and period (removes the market's drift) - the fair score. "
+          "**Best hold** is picked on 2020-23 only, then checked on 2024-now and every year. **Charts +** = charts (of 8) that beat random in 2024-now. "
+          "**Years +** = years that beat random. **REAL EDGE** = beats random by 0.05+ ATR in both periods, edge above +1 in both, 6+ charts, "
+          "and every year but one.", "",
+          "## The answer in 30 seconds",
+          f"- **Setups with a REAL EDGE: {len(good)}** - " + ("; ".join(
+              f"{z['k']}: {z['adj_te']:+.2f} ATR vs random (2024-now) holding {z['best']}, {z['charts']}/{z['nch']} charts, {z['ypos']}/{z['ny']} years"
+              for z in good) if good else "none passed every check."), "",
+          "## The leaderboard (sorted by the 2020-23 + 2024-now score vs random)",
+          "| Setup | Signals | Per chart per year | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | Best hold (picked on " + pn["tr"] + ") | ATR " + pn["te"] +
+          " | vs random " + pn["tr"] + " | **vs random " + pn["te"] + "** | Charts + | Years + | |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in summ:
+        md.append(f"| {z['k']} | {z['n']} | {z['per_yr']:.0f} | {z['etr']:+.1f} | {z['ete']:+.1f} | {z['best']} | {z['atr_te']:+.2f} | "
+                  f"{z['adj_tr']:+.2f} | **{z['adj_te']:+.2f}** | {z['charts']}/{z['nch']} | {z['ypos']}/{z['ny']} | {'✅ REAL EDGE' if real(z) else ''} |")
+    md += ["", "## Every year (vs random, ATR per trade, at each setup's best hold)",
+           "| Setup | " + " | ".join(str(y_) for y_ in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for z in summ:
+        md.append(f"| {z['k']} | " + " | ".join("-" if np.isnan(v) else f"{v:+.2f}" for v in z["ych"]) + " |")
+    md += ["", f"## Every hold time ({pn['te']}, vs random, ATR)", "| Setup | " + " | ".join(HN) + " |", "|---|" + "---|" * len(HN)]
+    for z in summ:
+        te = E[(E["kind"] == z["k"]) & (E["per"] == "te")]
+        md.append(f"| {z['k']} | " + " | ".join(f"{adj(te, col):+.2f}" for col in HN) + " |")
+    md += ["", f"## Longs vs shorts ({pn['te']}, best hold, vs random)", "| Setup | Longs | ATR vs random | Shorts | ATR vs random |", "|---|---|---|---|---|"]
+    for z in summ:
+        te = E[(E["kind"] == z["k"]) & (E["per"] == "te")]
+        lg, sh = te[te["side"] == "LONG"], te[te["side"] == "SHORT"]
+        md.append(f"| {z['k']} | {len(lg)} | {adj(lg, z['best']):+.2f} | {len(sh)} | {adj(sh, z['best']):+.2f} |")
+    md += ["", f"## Every chart ({pn['te']}, best hold, vs random | signals)", "| Setup | " + " | ".join(f"{s_} {t_}m" for s_ in SYMBOLS for t_ in ST_TFS) + " |",
+           "|---|" + "---|" * (len(SYMBOLS) * len(ST_TFS))]
+    for z in summ:
+        cells = []
+        for s_ in SYMBOLS:
+            for t_ in ST_TFS:
+                gg = E[(E["kind"] == z["k"]) & (E["per"] == "te") & (E["sym"] == s_) & (E["tf"] == t_)]
+                cells.append(f"{adj(gg, z['best']):+.2f} ({len(gg)})" if len(gg) else "-")
+        md.append(f"| {z['k']} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/vfx_{stamp}.md", f"{OUT}/vfx_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
