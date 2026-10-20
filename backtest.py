@@ -1,5 +1,8 @@
 """
-VIX FIX RETEST + THE LEADERBOARD (MODE=vfx, the default) - 2020-now, SPY + QQQ 1/2/3/5m. DATA ONLY, ATR only.
+VF CROSS v2 FIRES AFTER 10 MINUTES (MODE=vfc, the default) - every fire of your VF CROSS v2 indicator (HARD, TURN, MAX,
+  CROSS, long + short, and each one FLIPPED) on SPY + QQQ 1/2/3/5m, 2020-now, scored 5 / 10 / 20 minutes later vs a random
+  entry in the same direction, every year, every chart. DATA ONLY.
+VIX FIX RETEST + THE LEADERBOARD (MODE=vfx) - 2020-now, SPY + QQQ 1/2/3/5m. DATA ONLY, ATR only.
   Your 10/20 chart idea: a FEAR spike (red bars) marks a low, price BOUNCES at least 1 ATR, then PULLS BACK at least
   half of the bounce, but fear has dried up (the fear bar is under half the spike's tallest bar) -> long.
     VF1 = that retest | VF2 = + greed bar taller than fear (the mirror flipped) | VF3 = VF2 + a mirror phase first
@@ -92,7 +95,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "vfx").strip().lower() or "vfx"
+MODE = os.getenv("MODE", "vfc").strip().lower() or "vfc"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -390,6 +393,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "vfc":
+        return vfc_main()
     if MODE == "vfx":
         return vfx_main()
     if MODE == "stoch":
@@ -4278,6 +4283,195 @@ def vfx_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/vfx_{stamp}.md", f"{OUT}/vfx_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VF CROSS v2 FIRES, 10 MINUTES LATER (MODE=vfc)
+VFC_NAMES = ["HARD LONG", "HARD SHORT", "TURN LONG", "TURN SHORT", "MAX LONG (greed maxed)", "MAX SHORT (fear maxed)",
+             "CROSS LONG (after a greed lead)", "CROSS SHORT (after a fear lead)"]
+
+
+def vfc_events(df, ind, hard=15.0, turn_lvl=8.0, turn_min=2.0, turn_cd=5, max_gap=80.0, re_arm=40.0, big=50.0, meet=5.0,
+               look=30, trace=None):
+    """Exactly the VF CROSS v2 rules (inverted defaults) on CLOSED candles. Returns {name: +1/-1 array}."""
+    fN, gN = vfx_pane(df)
+    F, G = np.nan_to_num(fN), np.nan_to_num(gN)
+    d = F - G
+    hm = ind["hm"]
+    n = len(d)
+    sess = (hm >= 930) & (hm < 1600)
+    out = {nm: np.zeros(n, dtype=np.int64) for nm in VFC_NAMES}
+    last_tl, last_ts, last_cf, last_cg = -1000, -1000, -1, -1
+    arm_f, arm_g = True, True
+    for i in range(1, n):
+        # CROSS arming over the last `look` candles incl. this one (Pine ta.highest / ta.highestbars)
+        lo = max(0, i - look + 1)
+        w = d[lo:i + 1]
+        fl = w.max()
+        gl = -w.min()
+        flb = lo + int(np.nonzero(w == fl)[0][-1])          # most recent candle with the max (Pine returns the latest)
+        glb = lo + int(np.nonzero(w == -gl)[0][-1])
+        armF = fl >= big and flb >= glb
+        armG = gl >= big and glb > flb
+        if d[i] < re_arm:
+            arm_f = True
+        if -d[i] < re_arm:
+            arm_g = True
+        if not sess[i]:
+            continue
+        sw = d[i] - d[i - 1]
+        fire = []
+        if d[i - 1] >= 0 and d[i] < 0 and sw <= -hard:
+            fire.append(0)
+        if d[i - 1] <= 0 and d[i] > 0 and sw >= hard:
+            fire.append(1)
+        if G[i - 1] < turn_lvl and G[i] >= G[i - 1] + turn_min and F[i] < F[i - 1] and i - last_tl >= turn_cd:
+            fire.append(2)
+            last_tl = i
+        if F[i - 1] < turn_lvl and F[i] >= F[i - 1] + turn_min and G[i] < G[i - 1] and i - last_ts >= turn_cd:
+            fire.append(3)
+            last_ts = i
+        if arm_f and d[i] >= max_gap:
+            fire.append(5)
+            arm_f = False
+        if arm_g and -d[i] >= max_gap:
+            fire.append(4)
+            arm_g = False
+        if armF and d[i] <= meet and flb > last_cf and flb < i:
+            fire.append(7)
+            last_cf = flb
+        if armG and d[i] >= -meet and glb > last_cg and glb < i:
+            fire.append(6)
+            last_cg = glb
+        for k in fire:
+            out[VFC_NAMES[k]][i] = 1 if k % 2 == 0 else -1
+            if trace is not None:
+                trace.append((VFC_NAMES[k], i))
+    return out
+
+
+def vfc_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("VFC_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    MINS = [5, 10, 20]
+    HN = [f"{m} min" for m in MINS]
+    rng = np.random.default_rng(4)
+    rows, base = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            holds = [max(1, int(round(m / tf))) for m in MINS]
+            ev = vfc_events(df, ind)
+            years = np.asarray(df.index.year)
+            for nm, sg in ev.items():
+                for flip, tag in ((1, ""), (-1, " -> FLIPPED")):
+                    idx = np.nonzero(sg)[0]
+                    if not len(idx):
+                        continue
+                    sd = sg[idx] * flip
+                    R = vfx_outcomes(ind, idx, sd, holds)[:, :len(holds)]
+                    d_ = pd.DataFrame(R, columns=HN)
+                    d_["kind"], d_["sym"], d_["tf"] = nm + tag, sym, tf
+                    d_["side"] = np.where(sd > 0, "LONG", "SHORT")
+                    d_["per"] = np.where(df.index[idx] < split, "tr", "te")
+                    d_["year"] = years[idx]
+                    rows.append(d_.dropna(subset=[HN[0]]))
+            hm = ind["hm"]
+            pool = np.nonzero((hm >= 930) & (hm < 1555))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("VFC_RANDOM", "10000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                R = vfx_outcomes(ind, ridx, np.full(len(ridx), sdv), holds)[:, :len(holds)]
+                d_ = pd.DataFrame(R, columns=HN)
+                d_["sym"], d_["tf"], d_["side"] = sym, tf, snm
+                d_["per"] = np.where(df.index[ridx] < split, "tr", "te")
+                d_["year"] = years[ridx]
+                base.append(d_.dropna(subset=[HN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | holds {holds} candles | " +
+                  " | ".join(f"{k_.split(' (')[0]} {int((v != 0).sum())}" for k_, v in ev.items()), flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B = pd.concat(base, ignore_index=True)
+    bm_per = B.groupby(["sym", "tf", "side", "per"])[HN].mean()
+    bm_yr = B.groupby(["sym", "tf", "side", "year"])[HN].mean()
+    pn = {"tr": f"{start:%Y}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    yrs = sorted(int(y) for y in E["year"].unique())
+
+    def adj(g, col, by="per"):
+        if not len(g):
+            return np.nan
+        bm = bm_per if by == "per" else bm_yr
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", by]):
+            if kk in bm.index and not np.isnan(bm.loc[kk, col]):
+                tot += (gg[col].mean() - bm.loc[kk, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    col = "10 min"
+    summ = []
+    for k_ in dict.fromkeys(E["kind"]):
+        g = E[E["kind"] == k_]
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        ych = [adj(g[g["year"] == y_], col, by="year") for y_ in yrs]
+        cpos = sum(1 for _, gg in te.groupby(["sym", "tf"]) if adj(gg, col) > 0)
+        summ.append(dict(k=k_, n=len(g), win=100 * (g[col] > 0).mean(), atr=g[col].mean(), tr=adj(tr, col), te=adj(te, col),
+                         charts=cpos, nch=te.groupby(["sym", "tf"]).ngroups, ych=ych, ypos=sum(1 for v in ych if v > 0),
+                         ny=sum(1 for v in ych if not np.isnan(v))))
+    summ.sort(key=lambda z: -(np.nan_to_num(z["tr"]) + np.nan_to_num(z["te"])))
+
+    def real(z):
+        return z["tr"] > 0.03 and z["te"] > 0.03 and z["charts"] >= 6 and z["ypos"] >= max(z["ny"] - 1, 1) and z["n"] >= 300
+    good = [z for z in summ if real(z)]
+    md = [f"# VF CROSS v2 FIRES - WHICH HAS THE BEST EDGE AFTER 10 MINUTES - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "Exact VF CROSS v2 rules (HARD 15, TURN under 8 / +2, MAX 80 re-arm 40, CROSS 50 lead / within 5 / 30 candles, 9:30-16:00). "
+          "**Backtest = the candle's CLOSE**, entry at the next open (live the indicator fires on the first tick - could be better or worse). "
+          "**10 min** = 10 candles on 1m, 5 on 2m, 3 on 3m (9 min), 2 on 5m. **ATR** = average move your way. **vs random** = minus a random entry "
+          "in the SAME direction on the same chart and period - the fair score. **-> FLIPPED** = the same fire traded the other way. "
+          f"**REAL EDGE** = beats random by 0.03+ ATR in {pn['tr']} AND {pn['te']}, on 6+ of 8 charts, every year but one, 300+ fires.", "",
+          "## The answer in 30 seconds",
+          f"- **Fires with a REAL EDGE at 10 minutes: {len(good)}**" + (" - " + "; ".join(
+              f"{z['k']}: {z['te']:+.3f} ATR vs random ({pn['te']}), {z['win']:.0f}% green, {z['charts']}/{z['nch']} charts, {z['ypos']}/{z['ny']} years"
+              for z in good) if good else " - none passed every check."),
+          f"- **Best overall** (both periods together): {summ[0]['k']} ({summ[0]['tr']:+.3f} / {summ[0]['te']:+.3f} ATR vs random)", "",
+          "## Every fire at 10 minutes (sorted by both periods vs random)",
+          f"| Fire | Fires | Green after 10 min | Avg ATR | vs random {pn['tr']} | **vs random {pn['te']}** | Charts + | Years + | |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for z in summ:
+        md.append(f"| {z['k']} | {z['n']} | {z['win']:.0f}% | {z['atr']:+.3f} | {z['tr']:+.3f} | **{z['te']:+.3f}** | {z['charts']}/{z['nch']} | "
+                  f"{z['ypos']}/{z['ny']} | {'✅ REAL EDGE' if real(z) else ''} |")
+    md += ["", "## Every year (vs random, ATR at 10 min)", "| Fire | " + " | ".join(str(y_) for y_ in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for z in summ:
+        md.append(f"| {z['k']} | " + " | ".join("-" if np.isnan(v) else f"{v:+.3f}" for v in z["ych"]) + " |")
+    md += ["", f"## 5 / 10 / 20 minutes ({pn['te']}, vs random)", "| Fire | " + " | ".join(HN) + " |", "|---|" + "---|" * len(HN)]
+    for z in summ:
+        te = E[(E["kind"] == z["k"]) & (E["per"] == "te")]
+        md.append(f"| {z['k']} | " + " | ".join(f"{adj(te, c_):+.3f}" for c_ in HN) + " |")
+    md += ["", f"## Every chart at 10 min ({pn['te']}, vs random | fires)", "| Fire | " + " | ".join(f"{s_} {t_}m" for s_ in SYMBOLS for t_ in ST_TFS) + " |",
+           "|---|" + "---|" * (len(SYMBOLS) * len(ST_TFS))]
+    for z in summ:
+        cells = []
+        for s_ in SYMBOLS:
+            for t_ in ST_TFS:
+                gg = E[(E["kind"] == z["k"]) & (E["per"] == "te") & (E["sym"] == s_) & (E["tf"] == t_)]
+                cells.append(f"{adj(gg, col):+.3f} ({len(gg)})" if len(gg) else "-")
+        md.append(f"| {z['k']} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/vfc_{stamp}.md", f"{OUT}/vfc_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
