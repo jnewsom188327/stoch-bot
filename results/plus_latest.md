@@ -1,5 +1,5 @@
-# SUPER + STOCH / VOLUME / MACD - 2026-10-20 09:54 ET
-Data 2020-01-01 to 2026-10-19, SPY, QQQ, 1m, 2m, 3m, 5m. Base = SUPER (dip version). DATA ONLY. Runtime 2 min.
+# SUPER + STOCH / VOLUME / MACD - 2026-10-20 10:10 ET
+Data 2020-01-01 to 2026-10-19, SPY, QQQ, 1m, 2m, 3m, 5m. Base = SUPER (dip version). DATA ONLY. Runtime 3 min.
 **Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip). **Charts better** = charts where the filtered SUPER beat plain SUPER in TEST (2024-now). **Hold** = ATR per trade held to 15:55 (TEST). ✅ = beats plain SUPER by 1.0+ in BOTH periods and on 6+ of 8 charts. Luck check: on RANDOM price data, 1 of ~25 filters passed a looser (0.5) version of this test, so treat a single ✅ with care.
 
 **Plain SUPER: 10,903 signals | TRAIN edge +5.2 | TEST edge +3.4 | hold to 15:55 +0.29 ATR**
