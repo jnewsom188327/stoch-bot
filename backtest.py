@@ -1,5 +1,7 @@
 """
-SUPER + GAP & GO TEST (MODE=super, the default) - does SUPER LONG/SHORT keep its edge if it fires 1 candle sooner
+TTM SQUEEZE + VIX FIX TEST (MODE=ttmvix, the default) - TTM bottom/peak + first blue/red Vix Fix bar, streak ends,
+  or Vix Fix first then TTM turn (your way round and the classic way round), with/without the trend line agreeing.
+SUPER + GAP & GO TEST (MODE=super) - does SUPER LONG/SHORT keep its edge if it fires 1 candle sooner
   (warning after 1 close) or at the sharp dip itself (no color)? + 8 GAP & GO versions (gap size, entry time,
   confirmed). Same grading as the study, exits, rough $ per option.
 TREND LINE STUDY (MODE=study) - line anatomy, 4 entry events (+ faded) on 1/2/3/5m, ~30 conditions
@@ -54,7 +56,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "super").strip().lower() or "super"
+MODE = os.getenv("MODE", "ttmvix").strip().lower() or "ttmvix"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -348,6 +350,8 @@ def main():
         return study_main()
     if MODE == "super":
         return super_main()
+    if MODE == "ttmvix":
+        return ttmvix_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -2493,6 +2497,154 @@ def super_main():
     if sm:
         with open(sm, "a") as f:
             f.write(text + "\n")
+
+
+# ================================================================ TTM + VIX FIX COMBO TEST (MODE=ttmvix, the default)
+# VIX FIX pane: RED bar = fear spike, BLUE bar = greed spike (greed only when not fear). TTM: bottom turn = red->yellow,
+# peak = cyan->blue (same as the TTM Stretch pane). A TTM turn "counts" for 10 candles (until the opposite turn).
+#  U1 LONG = TTM bottomed, then the FIRST BLUE bar | SHORT = TTM peaked, then the FIRST RED bar   (your idea)
+#  U2 LONG = TTM bottomed, then a BLUE streak ENDS  | SHORT = TTM peaked, then a RED streak ENDS
+#  U3 LONG = BLUE bar in the last 10 candles, THEN the TTM bottoms | SHORT = RED bar, then the TTM peaks
+#  C1-C3 = the classic way round (RED fear at a bottom -> long, BLUE greed at a top -> short), same 3 timings
+#  B1 = TTM turn alone | B2 = first Vix Fix bar alone (blue -> long, red -> short)
+#  Each also "+ line agrees" (Trend Flip line green for longs / red for shorts).
+# Graded both ways (exact coin flip): a NEGATIVE edge means the OPPOSITE direction works.
+TV_K = int(os.getenv("TV_K", "10"))
+
+
+def first_in_phase(evt, turn):
+    n = len(evt)
+    cum = np.cumsum(evt.astype(np.int64))
+    idx = np.maximum.accumulate(np.where(turn, np.arange(n), -1))
+    before = np.where(idx >= 0, cum[np.maximum(idx, 0)] - evt[np.maximum(idx, 0)], 0)
+    return evt & (idx >= 0) & (cum - before == 1)
+
+
+def ttmvix_signals(ind, mom, wv_fear, wv_greed):
+    a, hm, st = ind["atr"], ind["hm"], ind["st"]
+    m = mom / a
+    m1, m2 = np.r_[np.nan, m[:-1]], np.r_[np.nan, np.nan, m[:-2]]
+    bot = np.nan_to_num((m1 < 0) & (m1 < m2) & (m >= m1)).astype(bool)
+    top = np.nan_to_num((m1 > 0) & (m1 > m2) & (m <= m1)).astype(bool)
+    sb, stp = bars_since(bot), bars_since(top)
+    up = (sb <= TV_K) & (sb < stp)
+    dn = (stp <= TV_K) & (stp < sb)
+    fear = wv_fear
+    greed = wv_greed & ~wv_fear
+    pf, pg = np.r_[False, fear[:-1]], np.r_[False, greed[:-1]]
+    fFirst, gFirst = fear & ~pf, greed & ~pg
+    fEnd, gEnd = ~fear & pf, ~greed & pg
+    win = (hm >= 935) & (hm < 1530)
+    S = {}
+    S["U1. TTM bottom/peak, then FIRST BLUE (long) / RED (short) bar"] = (up & first_in_phase(gFirst, bot), dn & first_in_phase(fFirst, top))
+    S["U2. TTM bottom/peak, then BLUE / RED streak ENDS"] = (up & first_in_phase(gEnd, bot), dn & first_in_phase(fEnd, top))
+    S["U3. BLUE / RED bar first, THEN the TTM bottoms / peaks"] = (bot & (bars_since(greed) <= TV_K), top & (bars_since(fear) <= TV_K))
+    S["C1. TTM bottom/peak, then FIRST RED (long) / BLUE (short) bar - classic"] = (up & first_in_phase(fFirst, bot), dn & first_in_phase(gFirst, top))
+    S["C2. TTM bottom/peak, then RED / BLUE streak ENDS - classic"] = (up & first_in_phase(fEnd, bot), dn & first_in_phase(gEnd, top))
+    S["C3. RED / BLUE bar first, THEN the TTM bottoms / peaks - classic"] = (bot & (bars_since(fear) <= TV_K), top & (bars_since(greed) <= TV_K))
+    S["B1. TTM bottom (long) / peak (short) alone"] = (bot, top)
+    S["B2. First BLUE bar (long) / first RED bar (short) alone"] = (gFirst, fFirst)
+    out = {}
+    for k, (L, Sh) in S.items():
+        for agree in (False, True):
+            l2, s2 = L & win, Sh & win
+            if agree:
+                l2, s2 = l2 & (st == 1), s2 & (st == -1)
+            ent = np.where(l2 & ~s2, 1, np.where(s2 & ~l2, -1, 0)).astype(np.int64)
+            out[k + (" + line agrees" if agree else "")] = ent
+    return out
+
+
+def ttmvix_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    EXN = ["Opposite color starts", "Hold to 15:55", "+2 / -1 ATR bracket", "TTM momentum peaks (turns against you)", "Time 10 candles"]
+    R, ATRNOW, NAMES = {}, {}, []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            yrs = {"tr": max((dates < split.date()).sum() / 252.0, 1e-9), "te": max((dates >= split.date()).sum() / 252.0, 1e-9)}
+            ind, color, mom, _ = super_events(df, 2, "warn")
+            ATRNOW[(sym, tf)] = float(np.nanmean(ind["atr"][rth & np.isin(np.array(df.index.date), dates[-20:])]))
+            sigs = ttmvix_signals(ind, mom, ind["fear"], ind["greed"])
+            for name, ent in sigs.items():
+                if name not in NAMES:
+                    NAMES.append(name)
+                idx = np.nonzero(ent)[0]
+                side = ent[idx]
+                g = grade_two_sided(ind, idx)
+                ok = ~np.isnan(g[:, 6])
+                idx, side, g = idx[ok], side[ok], g[ok]
+                hs_ = np.where(side > 0, g[:, 0], g[:, 1])
+                ho_ = np.where(side > 0, g[:, 1], g[:, 0])
+                edge = 50.0 * (hs_ - ho_)
+                names, ex = study_exits(ind, color, mom, idx, side)
+                t = df.index[idx]
+                for per in ("tr", "te"):
+                    mk = (t < split) if per == "tr" else (t >= split)
+                    d = dict(n=int(mk.sum()), per_yr=mk.sum() / yrs[per], edge=float(np.mean(edge[mk])) if mk.any() else np.nan)
+                    for nm in EXN:
+                        d[nm] = float(np.nanmean(ex[mk, names.index(nm)])) if mk.any() else np.nan
+                    R[(name, sym, tf, per)] = d
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+
+    def pooled(name, per, key="edge"):
+        cells = [R[(name, s_, tf, per)] for s_ in SYMBOLS for tf in ST_TFS]
+        n = sum(c["n"] for c in cells)
+        return np.nansum([c[key] * c["n"] for c in cells if not np.isnan(c[key])]) / max(n, 1), n
+
+    rows = []
+    for name in NAMES:
+        etr, ntr = pooled(name, "tr")
+        ete, nte = pooled(name, "te")
+        d = 1 if etr >= 0 else -1                       # direction is decided on TRAIN only
+        pos = sum(1 for s_ in SYMBOLS for tf in ST_TFS if d * R[(name, s_, tf, "te")]["edge"] > 0)
+        rows.append(dict(name=name, etr=etr, ete=ete, d=d, pos=pos, n=ntr + nte,
+                         per_yr=np.mean([R[(name, s_, tf, "tr")]["per_yr"] + R[(name, s_, tf, "te")]["per_yr"] for s_ in SYMBOLS for tf in ST_TFS]) / 2))
+    rows.sort(key=lambda x: -min(x["d"] * x["etr"], x["d"] * x["ete"]))
+    nC = len(SYMBOLS) * len(ST_TFS)
+    md = [f"# TTM SQUEEZE + VIX FIX TEST - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip, +5 = ~55% vs 45%). "
+          f"Direction is picked on TRAIN ({pn['tr']}): if the edge is negative, the OPPOSITE trade works -> shown as 'FADE IT'. "
+          f"TEST = {pn['te']}, never used to pick. A TTM turn counts for {TV_K} candles. Exits in ATR per trade (3 ATR safety stop).", "",
+          "## The answer in 30 seconds (ranked by the worse of TRAIN and TEST, in the better direction)",
+          "| Setup | Trade it | Signals/yr per chart | TRAIN edge | TEST edge | Charts positive in TEST |", "|---|---|---|---|---|---|"]
+    for x in rows:
+        md.append(f"| {x['name']} | {'as described' if x['d'] > 0 else '**FADE IT** (opposite)'} | {x['per_yr']:.0f} | "
+                  f"{x['d'] * x['etr']:+.1f} | **{x['d'] * x['ete']:+.1f}** | {x['pos']}/{nC} |")
+    md += ["", "Luck check: anything under about +1.5 or positive on fewer than 6 of 8 charts in TEST is noise. "
+           "For reference, SUPER (dip version) scored TRAIN +5.2 / TEST +3.4 on 8/8 charts.", ""]
+    md += [f"## Every chart (edge as described; TEST exits in ATR / ~$ per option)",
+           "| Setup | Chart | Signals/yr | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | " + " | ".join(f"{nm} (TEST)" for nm in EXN) + " |",
+           "|---|---|---|---|---|" + "---|" * len(EXN)]
+    for x in rows:
+        for s_ in SYMBOLS:
+            for tf in ST_TFS:
+                a_, b_ = R[(x["name"], s_, tf, "tr")], R[(x["name"], s_, tf, "te")]
+                exs = " | ".join(("-" if np.isnan(b_[nm]) else f"{b_[nm]:+.2f} / ${b_[nm] * ATRNOW[(s_, tf)] * DELTA * 100 - 2:+.0f}") for nm in EXN)
+                md.append(f"| {x['name']} | {s_} {tf}m | {(a_['per_yr'] + b_['per_yr']) / 2:.0f} | {a_['edge']:+.1f} | **{b_['edge']:+.1f}** | {exs} |")
+    text = "\n".join(md)
+    print("\n" + text[:15000])
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/ttmvix_{stamp}.md", f"{OUT}/ttmvix_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text[:900000] + "\n")
 
 
 if __name__ == "__main__":
