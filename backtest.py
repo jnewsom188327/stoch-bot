@@ -1,5 +1,7 @@
 """
-HOW FAR DOES VIX FIX STRETCH? (MODE=vst, the default) - every fear / greed max episode: $ stretch at the first max,
+VIX FIX MIRROR -> BREAKAWAY (MODE=mir, the default) - squeeze, both numbers rise together, then one side pulls away.
+  FOLLOW / FADE, 32 settings, hold 1-10 candles, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + move size. DATA ONLY.
+HOW FAR DOES VIX FIX STRETCH? (MODE=vst) - every fear / greed max episode: $ stretch at the first max,
   how much further it went, candles to the extreme, snap back. SPY + QQQ 1/2/3/5m, 2020-now. DATA ONLY.
 VIX FIX WHIPLASH (MODE=wsw) - one side of the Vix Fix pane maxed, then the other side maxes within N candles.
   Measures what a whiplash looks like (gap, how often) and tests FOLLOW / FADE, every T x N, hold 1-10 candles,
@@ -103,7 +105,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "vst").strip().lower() or "vst"
+MODE = os.getenv("MODE", "mir").strip().lower() or "mir"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -401,6 +403,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "mir":
+        return mir_main()
     if MODE == "vst":
         return vst_main()
     if MODE == "wsw":
@@ -5182,6 +5186,233 @@ def vst_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/vst_{stamp}.md", f"{OUT}/vst_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VIX FIX MIRROR -> BREAKAWAY (MODE=mir, the default)
+# "Starting over" = both numbers low (a squeeze). Then both rise TOGETHER (mirror: both >= M and within D of each other
+# for K candles in a row) = price swinging both ways. Then one side pulls away from the other by B+ = the breakaway.
+# FOLLOW = trade the side that pulled away (greed ahead = LONG, fear ahead = SHORT). FADE = the opposite.
+MIR_M = (25, 40)        # mirror: both numbers at least this
+MIR_D = (10, 20)        # ... and within this of each other
+MIR_K = (3, 6)          # ... for this many candles in a row
+MIR_B = (30, 50)        # breakaway: one side ahead of the other by this much
+MIR_R = 20              # "starting over": both under this ...
+MIR_RL = 30             # ... within this many candles before the mirror started (setting "reset" = required)
+MIR_W = 5               # the breakaway must come within this many candles after the mirror
+
+
+def mir_events(F, G, hm, day, M, D, K, B, need_reset, sess_end=1540):
+    """Fire on the CLOSED candle i (9:30 <= time < sess_end), only candles <= i: the gap G - F first reaches +B (LONG) or
+    -B (SHORT) within MIR_W candles after a qualified mirror run (K+ mirror candles in a row, same day; with need_reset a
+    'both under MIR_R' candle within MIR_RL candles before the run started). One fire per mirror run.
+    Returns (side, index of the run's last qualified candle)."""
+    n = len(F)
+    F0, G0 = np.nan_to_num(F), np.nan_to_num(G)
+    d = (G0 - F0).tolist()
+    mir = ((F0 >= M) & (G0 >= M) & (np.abs(F0 - G0) <= D)).tolist()
+    rst = ((F0 < MIR_R) & (G0 < MIR_R)).tolist()
+    newday = np.r_[True, day[1:] != day[:-1]].tolist()
+    inw = ((hm >= 930) & (hm < sess_end)).tolist()
+    side = np.zeros(n, dtype=np.int64)
+    src = np.full(n, -1, dtype=np.int64)
+    run = 0
+    run_start = -1
+    last_reset = -10 ** 9
+    reset_at_start = -10 ** 9
+    qual_last = -10 ** 9
+    qual_run = -1
+    used_run = -2
+    for i in range(n):
+        if newday[i]:
+            run, last_reset, qual_last, qual_run = 0, -10 ** 9, -10 ** 9, -1
+        if mir[i]:
+            if run == 0:
+                run_start, reset_at_start = i, last_reset
+            run += 1
+            if run >= K and (not need_reset or reset_at_start >= run_start - MIR_RL):
+                qual_last, qual_run = i, run_start
+        else:
+            run = 0
+        if rst[i]:
+            last_reset = i
+        if (not newday[i]) and inw[i] and qual_run != used_run and qual_last >= i - MIR_W and not mir[i]:
+            if d[i] >= B and d[i - 1] < B:
+                side[i], src[i], used_run = 1, qual_last, qual_run
+            elif d[i] <= -B and d[i - 1] > -B:
+                side[i], src[i], used_run = -1, qual_last, qual_run
+    return side, src
+
+
+def mir_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("MIR_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("MIR_TFS", "1,2,3,5,15").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rng = np.random.default_rng(9)
+    KN = [f"k{k}" for k in WSW_K]
+    HN = [f"h{k}" for k in WSW_K]
+    GN = [f"g{k}" for k in WSW_K]          # range (high - low) from entry to candle k = how big the move was either way
+    rows, base = [], []
+    combos = [(M, D, K, B, rs) for M in MIR_M for D in MIR_D for K in MIR_K for B in MIR_B for rs in (False, True)]
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            F, G = vfx_pane(df)
+            hm, day = ind["hm"], ind["day"]
+            years = np.asarray(df.index.year)
+            per = np.where(df.index < split, "tr", "te")
+            cnt = []
+            for (M, D, K, B, rs) in combos:
+                sg, src = mir_events(F, G, hm, day, M, D, K, B, rs)
+                idx = np.nonzero(sg)[0]
+                cnt.append(len(idx))
+                if not len(idx):
+                    continue
+                sd = sg[idx]
+                R, Hh, Fv = wsw_outcomes(ind, idx, sd)
+                for dname, mult in (("FOLLOW", 1), ("FADE", -1)):
+                    Rr, Hr = (R, Hh) if mult == 1 else (-R, Fv)
+                    d_ = pd.DataFrame(np.c_[Rr, Hr, Hh + Fv], columns=KN + HN + GN)
+                    d_["set"] = f"M{M} D{D} K{K} B{B}" + (" +reset" if rs else "")
+                    d_["dir"], d_["sym"], d_["tf"] = dname, sym, tf
+                    sdd = sd * mult
+                    d_["side"] = np.where(sdd > 0, "LONG", "SHORT")
+                    tr_ = ind["st"][idx] * sdd
+                    d_["trend"] = np.where(tr_ > 0, "with", np.where(tr_ < 0, "against", "gray"))
+                    d_["per"], d_["year"] = per[idx], years[idx]
+                    rows.append(d_.dropna(subset=[KN[0]]))
+            pool = np.nonzero((hm >= 930) & (hm < 1540))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("MIR_RANDOM", "8000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                Rr, Hr, Fr = wsw_outcomes(ind, ridx, np.full(len(ridx), sdv))
+                d_ = pd.DataFrame(np.c_[Rr, Hr, Hr + Fr], columns=KN + HN + GN)
+                d_["sym"], d_["tf"], d_["side"] = sym, tf, snm
+                d_["per"], d_["year"] = per[ridx], years[ridx]
+                base.append(d_.dropna(subset=[KN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | fires per setting {min(cnt)}-{max(cnt)}", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B_ = pd.concat(base, ignore_index=True)
+    cols = KN + HN + GN
+    bm_per = B_.groupby(["sym", "tf", "side", "per"])[cols].mean()
+    bm_yr = B_.groupby(["sym", "tf", "side", "year"])[cols].mean()
+    pn = {"tr": f"{start:%Y}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    yrs = sorted(int(y) for y in E["year"].unique())
+
+    def adj(g, col, by="per"):
+        if not len(g):
+            return np.nan
+        bm = bm_per if by == "per" else bm_yr
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", by]):
+            if kk in bm.index and not np.isnan(bm.loc[kk, col]):
+                tot += (gg[col].mean() - bm.loc[kk, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    def ratio(g, col):
+        """the fires' average range / the random entries' average range on the same charts (1.00 = normal)"""
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", "per"]):
+            if kk in bm_per.index and bm_per.loc[kk, col] > 0:
+                tot += gg[col].mean() / bm_per.loc[kk, col] * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    summ = []
+    for (st_, dname, tf), g in E.groupby(["set", "dir", "tf"]):
+        if len(g) < 100:
+            continue
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        trk = [adj(tr, k_) for k_ in KN]
+        if all(np.isnan(v) for v in trk):
+            continue
+        bk = int(np.nanargmax(trk))
+        k_, h_ = KN[bk], HN[bk]
+        se_tr = tr[k_].std() / np.sqrt(len(tr)) if len(tr) > 1 else np.nan
+        se_te = te[k_].std() / np.sqrt(len(te)) if len(te) > 1 else np.nan
+        tev = adj(te, k_)
+        ych = [adj(g[g["year"] == y_], k_, by="year") for y_ in yrs]
+        summ.append(dict(s=st_, d=dname, tf=tf, k=WSW_K[bk], n=len(g), tr=trk[bk], te=tev,
+                         ttr=trk[bk] / se_tr if se_tr else np.nan, tte=tev / se_te if se_te else np.nan,
+                         heat=te[h_].mean(), hvr=adj(te, h_), green=100 * (te[k_] > 0).mean() if len(te) else np.nan,
+                         syms=sum(1 for _, gg in te.groupby("sym") if adj(gg, k_) > 0), nsym=te["sym"].nunique(),
+                         ych=ych, ypos=sum(1 for v in ych if v > 0), ny=sum(1 for v in ych if not np.isnan(v)),
+                         tek=[adj(te, kk) for kk in KN], rng=[ratio(g, gg_) for gg_ in GN]))
+    S = pd.DataFrame(summ)
+    S["score"] = S["tr"].fillna(-9) + S["te"].fillna(-9)
+
+    def real(z):
+        return (z["tr"] > 0.01 and z["te"] > 0.01 and z["ttr"] >= 2 and z["tte"] >= 2 and z["syms"] == z["nsym"]
+                and z["ypos"] >= max(z["ny"] - 1, 1) and z["n"] >= 200)
+    S["real"] = S.apply(real, axis=1)
+    good = S[S["real"]].sort_values("score", ascending=False)
+    top = S.sort_values("score", ascending=False).head(15)
+    md = [f"# VIX FIX MIRROR -> BREAKAWAY - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Fires 9:30-15:40. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"**Mirror** = fear and greed BOTH at least M and within D of each other for K candles in a row (price swinging both ways). "
+          f"**+reset** = both were under {MIR_R} (a squeeze, 'starting over') within {MIR_RL} candles before the mirror started. "
+          f"**Breakaway** = within {MIR_W} candles after the mirror, one side gets ahead of the other by B+. Fires on that candle. "
+          "**FOLLOW** = trade the side that pulled ahead (greed ahead = LONG, fear ahead = SHORT); **FADE** = the opposite. "
+          f"Entry = next open, hold k candles (picked on {pn['tr']} only). **$** = per share vs random entries the same way on the same chart. "
+          "**Move size** = the high-low range after the fire divided by a random entry's range (1.00 = normal, 1.30 = 30% bigger move). "
+          f"**REAL EDGE** = +$0.01/share vs random in {pn['tr']} AND {pn['te']}, t >= 2 in BOTH, SPY and QQQ both positive, "
+          "every year but one, 200+ fires.", "",
+          "## The answer in 30 seconds",
+          f"- **REAL EDGE: {len(good)}**" + (" - " + "; ".join(
+              f"{z.tf}m {z.d} {z.s}, hold {z.k} candles ({z.k * z.tf} min): ${z.te:+.3f}/share vs random ({pn['te']}, t {z.tte:.1f}), "
+              f"{z.ypos}/{z.ny} years" for z in good.head(6).itertuples()) if len(good) else " - none passed every check.")]
+    fo = S[S["d"] == "FOLLOW"]
+    md.append(f"- **Does the mirror mean a bigger move is coming?** Move size after the breakaway (all settings, FOLLOW rows), "
+              f"10 candles: " + ", ".join(f"{tf}m x{fo[fo['tf'] == tf]['rng'].map(lambda r: r[-1]).median():.2f}" for tf in tfs if len(fo[fo['tf'] == tf])))
+    md += ["", "## Top 15 settings (sorted by both periods vs random)",
+           f"| Chart | Dir | Setting | Hold | Fires | vs random {pn['tr']} (t) | **vs random {pn['te']}** (t) | Green | Heat (vs random) | Move size 3 / 10 c | SPY+QQQ + | Years + | |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m | {z.d} | {z.s} | {z.k} ({z.k * z.tf} min) | {z.n} | {z.tr:+.3f} ({z.ttr:.1f}) | **{z.te:+.3f}** ({z.tte:.1f}) | "
+                  f"{z.green:.0f}% | ${z.heat:.2f} ({z.hvr:+.3f}) | x{z.rng[2]:.2f} / x{z.rng[4]:.2f} | {z.syms}/{z.nsym} | {z.ypos}/{z.ny} | {'✅' if z.real else ''} |")
+    md += ["", f"## Speed: $ vs random ({pn['te']}) after 1 / 2 / 3 / 5 / 10 candles, best 3 settings per chart"]
+    for d_ in ("FOLLOW", "FADE"):
+        md += ["", f"**{d_}**", "| Chart | Setting | Fires | " + " | ".join(f"{k} c" for k in WSW_K) + " |", "|---|---|---|" + "---|" * len(WSW_K)]
+        for tf in tfs:
+            for z in S[(S["d"] == d_) & (S["tf"] == tf)].sort_values("score", ascending=False).head(3).itertuples():
+                md.append(f"| {tf}m | {z.s} | {z.n} | " + " | ".join(f"{v:+.3f}" for v in z.tek) + " |")
+    md += ["", "## FOLLOW, every setting: $ vs random 2020-23 / 2024-now (at the TRAIN-picked hold)",
+           "| Setting | " + " | ".join(f"{tf}m" for tf in tfs) + " |", "|---|" + "---|" * len(tfs)]
+    for st_ in sorted(S["s"].unique()):
+        cells = []
+        for tf in tfs:
+            r_ = S[(S["d"] == "FOLLOW") & (S["tf"] == tf) & (S["s"] == st_)]
+            cells.append(f"{r_.tr.iloc[0]:+.3f} / {r_.te.iloc[0]:+.3f}" if len(r_) else "-")
+        md.append(f"| {st_} | " + " | ".join(cells) + " |")
+    md += ["", "## Top 15 every year ($ vs random)", "| Setting | " + " | ".join(str(y_) for y_ in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m {z.d} {z.s} k{z.k} | " + " | ".join("-" if np.isnan(v) else f"{v:+.3f}" for v in z.ych) + " |")
+    md += ["", f"## Top 5 split by the trend line ({pn['te']}, $ vs random | fires)", "| Setting | With the line | Against the line | Gray |", "|---|---|---|---|"]
+    for z in top.head(5).itertuples():
+        g = E[(E["set"] == z.s) & (E["dir"] == z.d) & (E["tf"] == z.tf) & (E["per"] == "te")]
+        cells = []
+        for tv in ("with", "against", "gray"):
+            gg = g[g["trend"] == tv]
+            cells.append(f"{adj(gg, f'k{z.k}'):+.3f} ({len(gg)})" if len(gg) else "-")
+        md.append(f"| {z.tf}m {z.d} {z.s} k{z.k} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/mir_{stamp}.md", f"{OUT}/mir_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
