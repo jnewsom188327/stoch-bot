@@ -1,5 +1,7 @@
 """
-TREND FLIP EXPLORE (MODE=explore, the default) - timeframes 1/2/3/5/15m x line settings, faded flips, which
+TREND FLIP STOPS & TARGETS (MODE=brackets, the default) - every target/stop combination (+1/-1 ... +3/-1, wide stops,
+  no stop) for v3.0 and the leads (higher-timeframe agreement, gap and go, yesterday's breakout), vs a coin flip.
+TREND FLIP EXPLORE (MODE=explore) - timeframes 1/2/3/5/15m x line settings, faded flips, which
   timeframes should agree, and other setups (ORB, VWAP reclaim, yesterday's high/low, gap fade), graded entry-only
   against a coin-flip luck line built from real data.
 TREND FLIP ENTRY QUALITY (MODE=quality) - grades only the entry, for trading the exit by hand:
@@ -46,7 +48,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "explore").strip().lower() or "explore"
+MODE = os.getenv("MODE", "brackets").strip().lower() or "brackets"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -334,6 +336,8 @@ def main():
         return quality_main()
     if MODE == "explore":
         return explore_main()
+    if MODE == "brackets":
+        return brackets_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -1542,6 +1546,186 @@ def explore_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/explore_{stamp}.md", f"{OUT}/explore_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ STOPS & TARGETS GRID (MODE=brackets, the default)
+# For v3.0 and the three leads from the explore run, every target / stop combination (in ATR of the chart):
+#   +1/-1, +1/-2, +1/-3, +2/-2, +3/-3, +2/-1, +3/-1, 3 ATR stop + hold to 15:55, and NO stop + hold to 15:55.
+# Each trade may run until 15:55 the same day (unresolved = closed then). Target and stop on the same candle = loss.
+# One trade at a time. Win rate is shown next to the BREAKEVEN win rate (stop / (target + stop)).
+# Coin flip = the same entry times with a random direction (6x). Edge = ATR per trade minus the coin flip's.
+# Real = edge above zero on SPY and QQQ, 2020-23 and 2024-now (4/4), by at least 1 standard error in every cell.
+BRACKETS = [(1, 1), (1, 2), (1, 3), (2, 2), (3, 3), (2, 1), (3, 1), (None, 3), (None, None)]
+BR_SEEDS = int(os.getenv("BR_SEEDS", "6"))
+
+
+def br_name(b):
+    t, s_ = b
+    if t is None and s_ is None:
+        return "NO stop, hold to 15:55"
+    if t is None:
+        return f"-{s_} stop, hold to 15:55"
+    return f"+{t} target / -{s_} stop"
+
+
+def grade_brackets(ind, ent, times, flat=1555):
+    """Returns {bracket: DataFrame(t, win, r)} - each bracket keeps its own one-trade-at-a-time state."""
+    o, h, l, c, atr, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    busy = {b: -1 for b in BRACKETS}
+    rows = {b: [] for b in BRACKETS}
+    # last bar index of each day before the flat time
+    for i in np.nonzero(ent)[0]:
+        e = i + 1
+        if e >= n or day[e] != day[i] or hm[e] >= flat:
+            continue
+        a = atr[i]
+        if not a or np.isnan(a):
+            continue
+        j = e
+        while j + 1 < n and day[j + 1] == day[e] and hm[j + 1] < flat:
+            j += 1
+        sd, en = int(ent[i]), o[e]
+        fav = ((h[e:j + 1] - en) if sd == 1 else (en - l[e:j + 1])) / a
+        adv = ((en - l[e:j + 1]) if sd == 1 else (h[e:j + 1] - en)) / a
+        fin = sd * (c[j] - en) / a
+        for b in BRACKETS:
+            if e <= busy[b]:
+                continue
+            t, st = b
+            hs = np.nonzero(adv >= st)[0] if st is not None else np.array([], dtype=int)
+            ht = np.nonzero(fav >= t)[0] if t is not None else np.array([], dtype=int)
+            ks = hs[0] if len(hs) else 10**9
+            kt = ht[0] if len(ht) else 10**9
+            if ks == 10**9 and kt == 10**9:
+                r, win, k = fin, int(fin > 0), len(fav) - 1
+            elif ks <= kt:
+                r, win, k = -float(st), 0, ks
+            else:
+                r, win, k = float(t), 1, kt
+            busy[b] = e + k
+            rows[b].append((times[e], win, r))
+    return {b: pd.DataFrame(v, columns=["t", "win", "r"]) for b, v in rows.items()}
+
+
+def brackets_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    SETS = [("v3.0", 2), ("v3.0", 3), ("v3.0 + 30m agrees", 2), ("v3.0 + 15m & 1h agree", 3),
+            ("Gap and go", 2), ("Gap and go", 5), ("Yesterday high/low breakout", 2), ("Yesterday high/low breakout", 5)]
+    RES = {}   # (setup, tf, bracket) -> {(sym, per): dict(n, per_yr, win, r, se, coin)}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        df1x = ext_1m(df1)
+        for tf in sorted(set(t for _, t in SETS)):
+            df = to_tf(df1, rth_only=False, mins=tf)
+            hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            yrs = {"tr": max((dates < split.date()).sum() / 252.0, 1e-9), "te": max((dates >= split.date()).sum() / 252.0, 1e-9)}
+            ind = indicators(df, 13, 34, True)
+            lv = daily_levels(df1, df)
+            for name, stf in SETS:
+                if stf != tf:
+                    continue
+                if name == "v3.0":
+                    _, ent = signals(ind, dict(V30, allowL=None))
+                elif name == "v3.0 + 30m agrees":
+                    s30 = tf_state_at_close(df1x, df.index, tf, 30)
+                    _, ent = signals(ind, dict(V30, allowL=s30 == 1, allowS=s30 == -1))
+                elif name == "v3.0 + 15m & 1h agree":
+                    a15, a60 = tf_state_at_close(df1x, df.index, tf, 15), tf_state_at_close(df1x, df.index, tf, 60)
+                    _, ent = signals(ind, dict(V30, allowL=(a15 == 1) & (a60 == 1), allowS=(a15 == -1) & (a60 == -1)))
+                elif name == "Gap and go":
+                    ent = -setup_signals("Gap fade", df, ind, lv, tf)
+                else:
+                    ent = setup_signals("Yesterday high/low BREAKOUT", df, ind, lv, tf)
+                real = grade_brackets(ind, ent, df.index)
+                rng = np.random.default_rng(7 + tf)
+                nz = ent != 0
+                coins = []
+                for _ in range(BR_SEEDS):
+                    e2 = np.zeros_like(ent)
+                    e2[nz] = rng.choice([-1, 1], size=int(nz.sum()))
+                    coins.append(grade_brackets(ind, e2, df.index))
+                for b in BRACKETS:
+                    g = real[b]
+                    for per in ("tr", "te"):
+                        gp = g[g["t"] < split] if per == "tr" else g[g["t"] >= split]
+                        cp = []
+                        for cg in coins:
+                            x = cg[b]
+                            x = x[x["t"] < split] if per == "tr" else x[x["t"] >= split]
+                            if len(x):
+                                cp.append(x["r"].mean())
+                        RES.setdefault((name, tf, b), {})[(sym, per)] = dict(
+                            n=len(gp), per_yr=len(gp) / yrs[per], win=100 * gp["win"].mean() if len(gp) else np.nan,
+                            r=gp["r"].mean() if len(gp) else np.nan,
+                            se=gp["r"].std(ddof=1) / np.sqrt(len(gp)) if len(gp) > 1 else np.nan,
+                            coin=float(np.mean(cp)) if cp else np.nan)
+                print(f"  {sym} {tf}m {name}: {int(nz.sum())} signals ({time.time() - t0:.0f}s)", flush=True)
+        del df1, df1x
+
+    cells = [(s_, p_) for s_ in SYMBOLS for p_ in ("tr", "te")]
+    rows = []
+    for (name, tf, b), r in RES.items():
+        edges = [r[c_]["r"] - r[c_]["coin"] for c_ in cells]
+        zs = [(r[c_]["r"] - r[c_]["coin"]) / r[c_]["se"] if r[c_]["se"] and not np.isnan(r[c_]["se"]) and r[c_]["se"] > 0 else np.nan for c_ in cells]
+        e = np.array(edges, dtype=float)
+        z = np.array(zs, dtype=float)
+        t_, s_ = b
+        be = 100 * s_ / (t_ + s_) if t_ is not None and s_ is not None else np.nan
+        rows.append(dict(name=name, tf=tf, b=b, r=r, e=e, worst=np.nanmin(e), avg=np.nanmean(e), pos=int(np.nansum(e > 0)),
+                         zmin=np.nanmin(z), be=be, win=np.nanmean([r[c_]["win"] for c_ in cells]),
+                         exp=[r[c_]["r"] for c_ in cells], per_yr=np.nanmean([r[c_]["per_yr"] for c_ in cells]),
+                         real=bool(np.all(e > 0) and np.nanmin(z) >= 1.0)))
+    reals = sorted([x for x in rows if x["real"]], key=lambda x: -x["worst"])
+    hdr = " | ".join(f"{s_} {'20-23' if p_ == 'tr' else '24-now'}" for s_, p_ in cells)
+
+    def tab(rs):
+        out = [f"| Target / stop | Trades/yr per symbol | Win rate (avg) | Breakeven win rate | ATR per trade: {hdr} | Edge vs coin flip (worst / avg) | Real? |",
+               "|---|---|---|---|" + "---|" * len(cells) + "---|---|"]
+        for x in rs:
+            ex = " | ".join(f"{v:+.3f}" for v in x["exp"])
+            out.append(f"| {br_name(x['b'])} | {x['per_yr']:.0f} | {x['win']:.1f}% | {'-' if np.isnan(x['be']) else f'{x[chr(98) + chr(101)]:.1f}%'} | {ex} | "
+                       f"**{x['worst']:+.3f}** / {x['avg']:+.3f} | {'✅' if x['real'] else ''} |")
+        return out + [""]
+
+    by_setup = {}
+    for x in rows:
+        by_setup.setdefault((x["name"], x["tf"]), []).append(x)
+    best_each = {k: max(v, key=lambda x: x["worst"]) for k, v in by_setup.items()}
+    md = [f"# Trend Flip STOPS & TARGETS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}. Runtime {(time.time() - t0) / 60:.0f} min. DATA ONLY - no orders.",
+          "Targets and stops are in ATR of the chart. A trade may run until 15:55 the same day. ATR per trade = average result. "
+          "Coin flip = same entry times, random direction. Edge = ATR per trade minus the coin flip. "
+          "✅ Real = edge above zero in all 4 cells (SPY/QQQ x 2020-23/2024-now) by at least 1 standard error.", "",
+          "## The answer in 30 seconds",
+          f"- **Target/stop combinations that beat the coin flip everywhere: {len(reals)} of {len(rows)}**" + (
+              ": " + "; ".join(f"{x['name']} {x['tf']}m with {br_name(x['b'])} (worst edge {x['worst']:+.3f} ATR)" for x in reals[:8])
+              if reals else " - none. No stop or target turns these entries into an edge."),
+          "- Best target/stop for each setup (by worst cell): " + "; ".join(
+              f"{k[0]} {k[1]}m = {br_name(v['b'])} ({v['worst']:+.3f} / avg {v['avg']:+.3f})" for k, v in best_each.items()),
+          "- Read the win rate next to the breakeven win rate: a wide stop wins more often, but only matters if the win rate beats breakeven.", ""]
+    if reals:
+        md += ["## Everything that beat the coin flip in all 4 cells"] + tab(reals)
+    for k, v in by_setup.items():
+        md += [f"## {k[0]} - {k[1]}-minute chart"] + tab(v)
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/brackets_{stamp}.md", f"{OUT}/brackets_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     summ = os.getenv("GITHUB_STEP_SUMMARY")
