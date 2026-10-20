@@ -1,5 +1,8 @@
 """
-TTM SQUEEZE + VIX FIX TEST (MODE=ttmvix, the default) - TTM bottom/peak + first blue/red Vix Fix bar, streak ends,
+TTM + VIX FIX ON THEIR OWN (MODE=solo, the default) - every TTM and Vix Fix signal by itself: turns, turn size,
+  squeeze fire, zero cross, first spike bar, streak ends, streak length, bar height on every candle, TTM stretch stats,
+  and the average price move 1 / 5 / 10 candles later.
+TTM SQUEEZE + VIX FIX TEST (MODE=ttmvix) - TTM bottom/peak + first blue/red Vix Fix bar, streak ends,
   or Vix Fix first then TTM turn (your way round and the classic way round), with/without the trend line agreeing.
 SUPER + GAP & GO TEST (MODE=super) - does SUPER LONG/SHORT keep its edge if it fires 1 candle sooner
   (warning after 1 close) or at the sharp dip itself (no color)? + 8 GAP & GO versions (gap size, entry time,
@@ -56,7 +59,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "ttmvix").strip().lower() or "ttmvix"
+MODE = os.getenv("MODE", "solo").strip().lower() or "solo"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -352,6 +355,8 @@ def main():
         return super_main()
     if MODE == "ttmvix":
         return ttmvix_main()
+    if MODE == "solo":
+        return solo_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -2639,6 +2644,203 @@ def ttmvix_main():
     print("\n" + text[:15000])
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/ttmvix_{stamp}.md", f"{OUT}/ttmvix_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text[:900000] + "\n")
+
+
+# ================================================================ TTM + VIX FIX ON THEIR OWN (MODE=solo, the default)
+# Every signal by itself (no trend line, no combos), SPY + QQQ, 1/2/3/5m. Entry = next open.
+# Edge = graded both ways (exact coin flip; negative = the opposite direction works).
+# Moves = average price change 1 / 5 / 10 candles after entry, in YOUR direction, in ATR (+ points at today's ATR).
+SOLO_HB = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 95), (95, 101)]
+SOLO_TB = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 999)]
+SOLO_SB = [(1, 1), (2, 2), (3, 3), (4, 5), (6, 999)]
+
+
+def fwd_moves(ind, idx, side, ks=(1, 5, 10)):
+    o, c, a, hm, day = ind["o"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    out = {}
+    e = idx + 1
+    okE = e < n
+    for k in ks:
+        j = idx + k
+        ok = okE & (j < n)
+        v = np.full(len(idx), np.nan)
+        ii, ee, jj = idx[ok], e[ok], j[ok]
+        good = (day[np.minimum(jj, n - 1)] == day[ii]) & (day[ee] == day[ii]) & (hm[jj] < 1600)
+        val = (c[jj] - o[ee]) / a[ii] * side[ok]
+        v[np.nonzero(ok)[0][good]] = val[good]
+        out[k] = v
+    return out
+
+
+def solo_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    EV, BARS, DESC, ATRNOW = [], [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind, color, mom, _ = super_events(df, 2, "warn")
+            o, c, a, hm = ind["o"], ind["c"], ind["atr"], ind["hm"]
+            n = len(c)
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            ATRNOW[(sym, tf)] = float(np.nanmean(a[rth & np.isin(np.array(df.index.date), dates[-20:])]))
+            per = np.where(df.index < split, "tr", "te")
+            win = (hm >= 935) & (hm < 1530)
+            m = mom / a
+            m1, m2 = np.r_[np.nan, m[:-1]], np.r_[np.nan, np.nan, m[:-2]]
+            bot = np.nan_to_num((m1 < 0) & (m1 < m2) & (m >= m1)).astype(bool)
+            top = np.nan_to_num((m1 > 0) & (m1 > m2) & (m <= m1)).astype(bool)
+            # squeeze on/off (BB 20/2 inside KC 20/1.5)
+            cs, hs, ls = df["close"], df["high"], df["low"]
+            basis, dev = cs.rolling(20).mean(), 2.0 * cs.rolling(20).std(ddof=0)
+            pc = cs.shift(1)
+            trr = pd.concat([hs - ls, (hs - pc).abs(), (ls - pc).abs()], axis=1).max(axis=1).rolling(20).mean()
+            sq = (((basis - dev) > (basis - 1.5 * trr)) & ((basis + dev) < (basis + 1.5 * trr))).fillna(False).to_numpy()
+            fire = np.r_[False, sq[:-1]] & ~sq
+            sg = np.sign(np.nan_to_num(m))
+            sgp = np.r_[0, sg[:-1]]
+            zc = (sg != 0) & (sgp != 0) & (sg != sgp)
+            # Vix Fix (as the pane): fear = red, greed = blue (greed only when not fear); bar height 0-100
+            hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+            wvf = ((hc22 - ls) / hc22 * 100)
+            wvi = ((hs - lc22) / lc22 * 100)
+            fN = (wvf / wvf.rolling(50).max() * 100).to_numpy()
+            gN = (wvi / wvi.rolling(50).max() * 100).to_numpy()
+            fear = ind["fear"]
+            greed = ind["greed"] & ~fear
+            pf, pg = np.r_[False, fear[:-1]], np.r_[False, greed[:-1]]
+
+            def runlen(x):
+                r = np.zeros(len(x), dtype=np.int64)
+                for i in range(len(x)):
+                    r[i] = r[i - 1] + 1 if x[i] and i > 0 else (1 if x[i] else 0)
+                return r
+            rf, rg = runlen(fear), runlen(greed)
+            fmax = pd.Series(np.where(fear, fN, np.nan)).groupby((~pd.Series(fear)).cumsum()).cummax().to_numpy()
+            gmax = pd.Series(np.where(greed, gN, np.nan)).groupby((~pd.Series(greed)).cumsum()).cummax().to_numpy()
+
+            def add(fam, L, S, bucket=None):
+                idx = np.nonzero(win & (L | S) & ~(L & S))[0]
+                if len(idx) == 0:
+                    return
+                side = np.where(L[idx], 1, -1)
+                g = grade_two_sided(ind, idx)
+                ok = ~np.isnan(g[:, 6])
+                idx, side, g = idx[ok], side[ok], g[ok]
+                edge = 50.0 * (np.where(side > 0, g[:, 0], g[:, 1]) - np.where(side > 0, g[:, 1], g[:, 0]))
+                fm = fwd_moves(ind, idx, side)
+                d = pd.DataFrame({"fam": fam, "bucket": bucket[idx] if bucket is not None else "", "sym": sym, "tf": tf,
+                                  "per": per[idx], "edge": edge, "f1": fm[1], "f5": fm[5], "f10": fm[10]})
+                EV.append(d)
+
+            add("TTM bottom turn = long / peak turn = short", bot, top)
+            tsize = np.where(bot, -m1, np.where(top, m1, np.nan))
+            tb = np.array([next(((f"{lo}-{hi} ATR" if hi < 999 else f"{lo}+ ATR") for lo, hi in SOLO_TB if lo <= v < hi), "") if not np.isnan(v) else "" for v in tsize])
+            add("TTM turn by size (how stretched momentum was at the turn)", bot, top, tb)
+            add("TTM squeeze FIRES -> trade momentum's direction", fire & (m > 0), fire & (m < 0))
+            add("TTM momentum crosses zero (up = long, down = short)", zc & (sg > 0), zc & (sg < 0))
+            add("Vix Fix FIRST red bar = long / FIRST blue bar = short", fear & ~pf, greed & ~pg)
+            fe, ge = ~fear & pf, ~greed & pg
+            add("Vix Fix streak ENDS: after red bars = long / after blue bars = short", fe, ge)
+            sl = np.where(fe, np.r_[0, rf[:-1]], np.where(ge, np.r_[0, rg[:-1]], 0))
+            sb = np.array([next((f"{lo}" if lo == hi else (f"{lo}-{hi}" if hi < 999 else f"{lo}+") for lo, hi in SOLO_SB if lo <= v <= hi), "") + " bars" if v > 0 else "" for v in sl])
+            add("Vix Fix streak ENDS, by how many spike bars in a row", fe, ge, sb)
+            hmax = np.where(fe, np.r_[np.nan, fmax[:-1]], np.where(ge, np.r_[np.nan, gmax[:-1]], np.nan))
+            hb = np.array([next((f"{lo}-{min(hi, 100)}" for lo, hi in SOLO_HB if lo <= v < hi), "") if not np.isnan(v) else "" for v in hmax])
+            add("Vix Fix streak ENDS, by the tallest bar in the streak (0-100)", fe, ge, hb)
+            # every candle: Vix Fix bar height -> next moves (fear height = long, greed height = short) + baseline
+            idx = np.nonzero(win)[0]
+            fmL = fwd_moves(ind, idx, np.ones(len(idx), dtype=np.int64))
+            for nm, h, sd in (("FEAR (red side) bar height -> LONG", fN, 1), ("GREED (blue side) bar height -> SHORT", gN, -1)):
+                hv = h[idx]
+                hbk = np.array([next((f"{lo}-{min(hi, 100)}" for lo, hi in SOLO_HB if lo <= v < hi), "") if not np.isnan(v) else "" for v in hv])
+                BARS.append(pd.DataFrame({"kind": nm, "bucket": hbk, "sym": sym, "tf": tf, "per": per[idx],
+                                          "f1": fmL[1] * sd, "f5": fmL[5] * sd, "f10": fmL[10] * sd}))
+            BARS.append(pd.DataFrame({"kind": "ALL candles (long) = market drift baseline", "bucket": "all", "sym": sym, "tf": tf,
+                                      "per": per[idx], "f1": fmL[1], "f5": fmL[5], "f10": fmL[10]}))
+            # TTM pane stats (like your Stretch Bands table) on this chart
+            tops, bots = m1[top & rth], -m1[bot & rth]
+            wid = np.cumsum(np.r_[1, (sg[1:] != sg[:-1]).astype(int)])
+            wv = pd.DataFrame({"w": wid, "s": sg, "v": np.abs(np.nan_to_num(m))})
+            wmax = wv.groupby("w").agg(s=("s", "first"), v=("v", "max"), L=("v", "size"))
+            wmax = wmax[wmax["L"] >= 2]
+            for lab, arr in (("Top turns (cyan>blue)", tops), ("Bottom turns (red>yellow)", bots),
+                             ("Wave max UP", wmax.loc[wmax["s"] > 0, "v"].to_numpy()), ("Wave max DOWN", wmax.loc[wmax["s"] < 0, "v"].to_numpy())):
+                arr = arr[~np.isnan(arr)]
+                if len(arr):
+                    DESC.append((sym, tf, lab, len(arr), arr.mean(), np.median(arr), np.percentile(arr, 80), arr.max()))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(EV, ignore_index=True)
+    B = pd.concat(BARS, ignore_index=True)
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    nC = len(SYMBOLS) * len(ST_TFS)
+    atr_txt = ", ".join(f"{s_} {tf}m 1 ATR = {ATRNOW[(s_, tf)]:.2f}" for s_ in SYMBOLS for tf in ST_TFS)
+
+    def summarize(g):
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        ctf = te.groupby(["sym", "tf"])["edge"].mean()
+        return dict(n_yr=len(g) / (2 * 6.8) / max(g[["sym", "tf"]].drop_duplicates().shape[0] / 1, 1) * 2,
+                    etr=tr["edge"].mean(), ete=te["edge"].mean(), pos=int((ctf > 0).sum()), npos=len(ctf),
+                    f1=te["f1"].mean(), f5=te["f5"].mean(), f10=te["f10"].mean(), n=len(g))
+
+    md = [f"# TTM SQUEEZE + VIX FIX, EACH ON ITS OWN - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip; +5 = ~55% vs 45%; negative = the opposite "
+          f"direction works). **Next 1 / 5 / 10** = average price move that many candles after entry, in your direction, in ATR "
+          f"({pn['te']}). Real = edge +1.5 or better in BOTH periods and positive on 6+ of {nC} charts. "
+          f"Today's ATRs: {atr_txt}.", "",
+          "## The answer in 30 seconds - every signal on its own",
+          "| Signal | Events | Edge " + pn["tr"] + " | Edge " + pn["te"] + f" | Charts positive (TEST) | Next 1 | Next 5 | Next 10 | Real? |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    bfams = set(E.loc[E["bucket"] != "", "fam"])
+    for fam, g in E[(E["bucket"] == "") & ~E["fam"].isin(bfams)].groupby("fam", sort=False):
+        x = summarize(g)
+        real = x["etr"] >= 1.5 and x["ete"] >= 1.5 and x["pos"] >= 6
+        md.append(f"| {fam} | {x['n']:,} | {x['etr']:+.1f} | **{x['ete']:+.1f}** | {x['pos']}/{x['npos']} | {x['f1']:+.3f} | {x['f5']:+.3f} | {x['f10']:+.3f} | {'✅' if real else ''} |")
+    md += ["", "## Broken down (by size / streak / height)",
+           "| Signal | Bucket | Events | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | Charts positive (TEST) | Next 1 | Next 5 | Next 10 |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for fam, g in E[E["bucket"] != ""].groupby("fam", sort=False):
+        for bk, gb in sorted(g.groupby("bucket"), key=lambda kv: kv[0]):
+            x = summarize(gb)
+            md.append(f"| {fam} | {bk} | {x['n']:,} | {x['etr']:+.1f} | **{x['ete']:+.1f}** | {x['pos']}/{x['npos']} | {x['f1']:+.3f} | {x['f5']:+.3f} | {x['f10']:+.3f} |")
+    md += ["", "## Vix Fix bar height on EVERY candle -> what price did next (raw moves; compare with the ALL candles row = drift)",
+           "| Bar | Height (0-100) | Share of candles | Next 1 " + pn["tr"] + " | Next 1 " + pn["te"] + " | Next 5 TEST | Next 10 TEST | Next 10 minus drift (TEST) |",
+           "|---|---|---|---|---|---|---|---|"]
+    drift = B[(B["kind"].str.startswith("ALL")) & (B["per"] == "te")]["f10"].mean()
+    B = B[B["bucket"] != ""]
+    for kind, g in B.groupby("kind", sort=False):
+        tot = len(g)
+        for bk, gb in sorted(g.groupby("bucket"), key=lambda kv: (kv[0] == "all", float(kv[0].split("-")[0]) if kv[0][0].isdigit() else 0)):
+            tr, te = gb[gb["per"] == "tr"], gb[gb["per"] == "te"]
+            adj = te["f10"].mean() - (drift if "LONG" in kind else -drift) if not kind.startswith("ALL") else 0.0
+            md.append(f"| {kind} | {bk} | {100 * len(gb) / tot:.0f}% | {tr['f1'].mean():+.3f} | {te['f1'].mean():+.3f} | {te['f5'].mean():+.3f} | "
+                      f"{te['f10'].mean():+.3f} | **{adj:+.3f}** |")
+    md += ["", "## TTM momentum stretch on each chart (like your TTM Stretch Bands table, in ATR, regular hours)",
+           "| Chart | | N | Avg | Median | 80% | Max |", "|---|---|---|---|---|---|---|"]
+    for row in DESC:
+        md.append(f"| {row[0]} {row[1]}m | {row[2]} | {row[3]:,} | {row[4]:.2f} | {row[5]:.2f} | {row[6]:.2f} | {row[7]:.2f} |")
+    md += ["", f"Points: multiply ATR moves by the chart's ATR above (e.g. +0.10 ATR on SPY 2m = about {0.1 * ATRNOW.get(('SPY', 2), 0):.2f} pts "
+           f"≈ ${0.1 * ATRNOW.get(('SPY', 2), 0) * DELTA * 100:.0f} per 0.6-delta option, before costs)."]
+    text = "\n".join(md)
+    print("\n" + text[:15000])
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/solo_{stamp}.md", f"{OUT}/solo_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
