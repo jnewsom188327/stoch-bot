@@ -1,5 +1,7 @@
 """
-TTM + VIX FIX ON THEIR OWN (MODE=solo, the default) - every TTM and Vix Fix signal by itself: turns, turn size,
+SUPER + STOCH / VOLUME / MACD (MODE=plus, the default) - each filter on top of SUPER (dip version): Stoch level and
+  cross, relative volume (vs last 20, vs time of day, dip volume), MACD histogram size / turn / side of zero.
+TTM + VIX FIX ON THEIR OWN (MODE=solo) - every TTM and Vix Fix signal by itself: turns, turn size,
   squeeze fire, zero cross, first spike bar, streak ends, streak length, bar height on every candle, TTM stretch stats,
   and the average price move 1 / 5 / 10 candles later.
 TTM SQUEEZE + VIX FIX TEST (MODE=ttmvix) - TTM bottom/peak + first blue/red Vix Fix bar, streak ends,
@@ -59,7 +61,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "solo").strip().lower() or "solo"
+MODE = os.getenv("MODE", "plus").strip().lower() or "plus"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -357,6 +359,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "plus":
+        return plus_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -2847,6 +2851,152 @@ def solo_main():
     if sm:
         with open(sm, "a") as f:
             f.write(text[:900000] + "\n")
+
+
+# ================================================================ SUPER + STOCH / VOLUME / MACD (MODE=plus, the default)
+# Base = SUPER (dip version, as in the indicator): stretched trend (EMA gap >= 1.15 ATR) + sharp TTM dip >= 0.42 ATR.
+# Each filter is tested ON TOP of SUPER, one at a time. Kept only if it improves SUPER in BOTH periods on most charts.
+#  STOCH 14,3,3 : %K level "your way" (longs: K; shorts: 100-K -> low = oversold in your favor), %K crossing %D your way
+#  VOLUME       : signal candle volume vs last 20 candles, vs the same time of day (20-day avg), last 3 candles vs 20
+#  MACD 12,26,9 : histogram size your way (ATR), histogram turning your way, MACD line on your side of zero
+PLUS_BUCKETS = {
+    "Stoch %K your way (0 = fully oversold for longs / overbought for shorts)": [(0, 20), (20, 40), (40, 60), (60, 80), (80, 101)],
+    "Volume vs last 20 candles (1 = normal)": [(0, 0.7), (0.7, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 999)],
+    "Volume vs same time of day (20-day avg)": [(0, 0.7), (0.7, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 999)],
+    "Last 3 candles' volume vs last 20 (the dip's volume)": [(0, 0.7), (0.7, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 999)],
+    "MACD histogram your way (ATR)": [(-999, -0.3), (-0.3, -0.1), (-0.1, 0.1), (0.1, 0.3), (0.3, 999)],
+}
+
+
+def plus_features(df, ind, idx, side):
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    a = ind["atr"]
+    ll, hh = l.rolling(14).min(), h.rolling(14).max()
+    k = (100 * (c - ll) / (hh - ll).replace(0, np.nan)).rolling(3).mean()
+    d = k.rolling(3).mean()
+    K, D = k.to_numpy(), d.to_numpy()
+    vol = v.to_numpy(dtype=float)
+    rv20 = vol / pd.Series(vol).rolling(20).mean().shift(1).to_numpy()
+    hm = ind["hm"]
+    tod = pd.Series(vol).groupby(hm).transform(lambda x: x.rolling(20, min_periods=5).mean().shift(1)).to_numpy()
+    rvtod = vol / tod
+    rv3 = pd.Series(vol).rolling(3).mean().to_numpy() / pd.Series(vol).rolling(20).mean().shift(3).to_numpy()
+    e12, e26 = c.ewm(span=12, adjust=False).mean(), c.ewm(span=26, adjust=False).mean()
+    macd = (e12 - e26).to_numpy()
+    sigl = pd.Series(macd).ewm(span=9, adjust=False).mean().to_numpy()
+    hist = macd - sigl
+    histp = np.r_[np.nan, hist[:-1]]
+    Kp, Dp = np.r_[np.nan, K[:-1]], np.r_[np.nan, D[:-1]]
+    sd = side.astype(float)
+    kw = np.where(sd > 0, K[idx], 100 - K[idx])
+    crossL = (K > D) & (Kp <= Dp)
+    crossS = (K < D) & (Kp >= Dp)
+    recentL = crossL | np.r_[False, crossL[:-1]]
+    recentS = crossS | np.r_[False, crossS[:-1]]
+    F = {
+        "Stoch %K your way (0 = fully oversold for longs / overbought for shorts)": kw,
+        "Stoch %K crossed %D your way (last 2 candles)": np.where(np.where(sd > 0, recentL[idx], recentS[idx]), "yes", "no"),
+        "Volume vs last 20 candles (1 = normal)": rv20[idx],
+        "Volume vs same time of day (20-day avg)": rvtod[idx],
+        "Last 3 candles' volume vs last 20 (the dip's volume)": rv3[idx],
+        "MACD histogram your way (ATR)": hist[idx] / a[idx] * sd,
+        "MACD histogram turning your way": np.where((hist[idx] - histp[idx]) * sd > 0, "yes", "no"),
+        "MACD line on your side of zero": np.where(macd[idx] * sd > 0, "yes", "no"),
+    }
+    return F
+
+
+def plus_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind, color, mom, ent = super_events(df, 2, "dip")
+            idx = np.nonzero(ent)[0]
+            side = ent[idx]
+            g = grade_two_sided(ind, idx)
+            ok = ~np.isnan(g[:, 6])
+            idx, side, g = idx[ok], side[ok], g[ok]
+            edge = 50.0 * (np.where(side > 0, g[:, 0], g[:, 1]) - np.where(side > 0, g[:, 1], g[:, 0]))
+            names, ex = study_exits(ind, color, mom, idx, side)
+            F = plus_features(df, ind, idx, side)
+            d = pd.DataFrame(F)
+            d["edge"] = edge
+            d["hold"] = ex[:, names.index("Hold to 15:55")]
+            d["sym"], d["tf"] = sym, tf
+            d["per"] = np.where(df.index[idx] < split, "tr", "te")
+            rows.append(d)
+            print(f"  {sym} {tf}m: {len(idx)} SUPER signals ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    nC = len(SYMBOLS) * len(ST_TFS)
+    base = {p_: E.loc[E["per"] == p_, "edge"].mean() for p_ in ("tr", "te")}
+    baseh = E.loc[E["per"] == "te", "hold"].mean()
+
+    def line(nm, mk):
+        g = E[mk]
+        etr, ete = g.loc[g["per"] == "tr", "edge"].mean(), g.loc[g["per"] == "te", "edge"].mean()
+        ctf = g[g["per"] == "te"].groupby(["sym", "tf"])["edge"].mean()
+        bt = E[E["per"] == "te"].groupby(["sym", "tf"])["edge"].mean()
+        better = int(sum(1 for k_ in ctf.index if ctf[k_] > bt.get(k_, 0)))
+        helps = etr > base["tr"] + 1.0 and ete > base["te"] + 1.0 and better >= 6
+        return (f"| {nm} | {100 * mk.mean():.0f}% | {etr:+.1f} | **{ete:+.1f}** | {better}/{len(ctf)} | "
+                f"{g.loc[g['per'] == 'te', 'hold'].mean():+.2f} | {'✅ helps' if helps else ''} |"), (helps, ete - base["te"], nm)
+
+    md = [f"# SUPER + STOCH / VOLUME / MACD - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. Base = SUPER (dip version). "
+          f"DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip). **Charts better** = charts where the "
+          f"filtered SUPER beat plain SUPER in TEST ({pn['te']}). **Hold** = ATR per trade held to 15:55 (TEST). "
+          "✅ = beats plain SUPER by 1.0+ in BOTH periods and on 6+ of 8 charts. Luck check: on RANDOM price data, 1 of ~25 "
+          "filters passed a looser (0.5) version of this test, so treat a single ✅ with care.", "",
+          f"**Plain SUPER: {len(E):,} signals | TRAIN edge {base['tr']:+.1f} | TEST edge {base['te']:+.1f} | hold to 15:55 {baseh:+.2f} ATR**", ""]
+    body, res = [], []
+    hdr = ["| Filter | Kept | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | Charts better (TEST) | Hold (TEST) | |", "|---|---|---|---|---|---|---|"]
+    for col in [c_ for c_ in E.columns if c_ not in ("edge", "hold", "sym", "tf", "per")]:
+        body += [f"### {col}"] + hdr
+        v = E[col]
+        if not pd.api.types.is_numeric_dtype(v):
+            for val in sorted(v.dropna().unique()):
+                l_, r_ = line(f"= {val}", (v == val).to_numpy())
+                body.append(l_)
+                res.append((r_[0], r_[1], f"{col} = {val}"))
+        else:
+            x = v.to_numpy(dtype=float)
+            for lo, hi in PLUS_BUCKETS[col]:
+                mk = (x >= lo) & (x < hi)
+                if mk.sum() < 30:
+                    continue
+                lab = f"{lo:g} to {hi:g}" if lo > -999 and hi < 999 else (f"under {hi:g}" if lo <= -999 else f"{lo:g}+")
+                l_, r_ = line(lab, mk)
+                body.append(l_)
+                res.append((r_[0], r_[1], f"{col}: {lab}"))
+        body.append("")
+    good = sorted([r_ for r_ in res if r_[0]], key=lambda z: -z[1])
+    md += ["## The answer in 30 seconds",
+           f"- **Filters that make SUPER better in both periods on most charts: {len(good)}**" +
+           (": " + "; ".join(f"{z[2]} (TEST +{z[1]:.1f} over plain SUPER)" for z in good[:6]) if good else
+            " - none. Stoch, volume and MACD don't improve SUPER."),
+           "- Note: a filter that keeps only a small share of signals can look good by luck - check 'Kept' and 'Charts better'.", ""]
+    text = "\n".join(md + body)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/plus_{stamp}.md", f"{OUT}/plus_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
 
 
 if __name__ == "__main__":
