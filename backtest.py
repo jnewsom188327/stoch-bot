@@ -3,8 +3,13 @@ VIX FIX RETEST + THE LEADERBOARD (MODE=vfx, the default) - 2020-now, SPY + QQQ 1
   Your 10/20 chart idea: a FEAR spike (red bars) marks a low, price BOUNCES at least 1 ATR, then PULLS BACK at least
   half of the bounce, but fear has dried up (the fear bar is under half the spike's tallest bar) -> long.
     VF1 = that retest | VF2 = + greed bar taller than fear (the mirror flipped) | VF3 = VF2 + a mirror phase first
-    VF4 = VF2, then wait for the first green candle (confirmation) | VF5 = true divergence: a LOWER low than the spike
-    low with a fear bar under 70% of the spike | VF0 = reference: the streak ends (tested before).
+    VF4 = VF2, then wait for the first green candle (confirmation) | VF5 = old version: lower low on a GRAY bar only
+    | VF0 = reference: the streak ends (tested before).
+  NUMBERS ONLY (no red / blue, your 10/20 12:15 note) - fear number F (0-100) and greed number G (0-100) of your pane:
+    N1 divergence: price makes a new low below the last F peak's low (30 candles, peak 70+) but F is 10+ below that peak
+    (shorts: new high, G 10+ below its peak) | N2 = 20+ below | N3 = N1 + the next candle turns your way
+    N4 = after a peak, a mirror (F and G both 25+, within 15) for 3+ candles, then the other side takes over by 15+
+    while the peak side is under half its peak | N5 = N4 + price holds above the peak's low (below its high for shorts).
   Shorts = the mirror image (GREED spike, bounce down, pull back up, greed dried up, fear taller than greed).
   On the same ruler: SUPER, SUPER+ and GAP & GO. Edge vs a coin flip, ATR after 5 / 10 / 15 / 30 / 60 candles and to
   15:55, minus a random entry in the same direction, best hold picked on 2020-23 only, every year, chart, side.
@@ -3867,7 +3872,7 @@ VFX_PULL = float(os.getenv("VFX_PULL", "0.5"))    # the retest gives back at lea
 VFX_DRY = float(os.getenv("VFX_DRY", "0.5"))      # fear "dried up" = fear bar under this share of the spike's tallest bar
 VFX_NAMES = ["VF1 retest, fear dried up", "VF2 retest + greed taller than fear (mirror flipped)",
              "VF3 mirror phase first, then VF2", "VF4 VF2 + first green candle (confirmed)",
-             "VF5 true divergence (lower low, fear bar under 70%)", "VF0 reference: spike streak ends (tested before)"]
+             "VF5 lower low on a GRAY bar only (old divergence - missed red-bar divergences)", "VF0 reference: spike streak ends (tested before)"]
 
 
 def vfx_pane(df):
@@ -3948,6 +3953,150 @@ def vfx_events(df, ind, trace=None):
     return out
 
 
+VFX_DIV_WIN = int(os.getenv("VFX_DIV_WIN", "30"))   # the 2nd spike must start within this many candles of the 1st spike's end
+DIV_NAMES = ["DIV-A early: lower low, fear bar 5+ shorter than the last spike",
+             "DIV-B confirmed: 2nd spike = lower low + shorter tallest bar (5+)",
+             "DIV-B15 confirmed, clearly smaller (15+)",
+             "DIV-D double bottom: 2nd spike low within 0.5 ATR + shorter bar (5+)"]
+
+
+def vfx_div_events(df, ind, trace=None):
+    """Spike-vs-spike divergence on your VIX FIX pane, same day. Long = two FEAR spikes, short = two GREED spikes.
+    A spike = a run of red (blue for greed) bars; its height = its tallest bar, its extreme = its lowest low (highest high).
+    Everything is decided on the CLOSED candle i; entry at i+1's open."""
+    fN, gN = vfx_pane(df)
+    fear = np.asarray(ind["fear"], dtype=bool)
+    greed = np.asarray(ind["greed"], dtype=bool) & ~fear
+    hm, day, a = ind["hm"], ind["day"], ind["atr"]
+    H, L = ind["h"], ind["l"]
+    n = len(H)
+    out = {nm: np.zeros(n, dtype=np.int64) for nm in DIV_NAMES}
+    win = (hm >= 935) & (hm < 1530)
+    rth = (hm >= 930) & (hm < 1600)
+    for side in (1, -1):
+        spk = fear if side == 1 else greed
+        bar = np.nan_to_num(fN if side == 1 else gN)
+        cur_day, prev, cur, fired_a = None, None, None, False
+        for i in range(n):
+            if not rth[i]:
+                continue
+            if day[i] != cur_day:                       # new day: forget everything
+                cur_day, prev, cur, fired_a = day[i], None, None, False
+            ext_i = L[i] if side == 1 else H[i]
+            beyond = (lambda x, ref: x < ref) if side == 1 else (lambda x, ref: x > ref)
+            if spk[i]:
+                if cur is None:
+                    cur = dict(start=i, end=i, ext=ext_i, ht=bar[i])
+                else:
+                    cur["end"], cur["ht"] = i, max(cur["ht"], bar[i])
+                    cur["ext"] = min(cur["ext"], ext_i) if side == 1 else max(cur["ext"], ext_i)
+            # DIV-A: first candle (red or gray) that goes beyond the last finished spike's extreme with a shorter bar
+            if (prev is not None and not fired_a and i - prev["end"] <= VFX_DIV_WIN and win[i] and a[i] > 0
+                    and beyond(ext_i, prev["ext"]) and bar[i] <= prev["ht"] - 5 and (cur is None or cur["ht"] <= prev["ht"] - 5)):
+                out[DIV_NAMES[0]][i] = side
+                fired_a = True
+                if trace is not None:
+                    trace.append(dict(kind=DIV_NAMES[0], side=side, i=i, p=dict(prev), c=None if cur is None else dict(cur)))
+            if not spk[i] and cur is not None:          # the spike just ended (candle i is the first one after it)
+                if prev is not None and cur["start"] - prev["end"] <= VFX_DIV_WIN and win[i] and a[i] > 0:
+                    lower = beyond(cur["ext"], prev["ext"])
+                    shorter = cur["ht"] <= prev["ht"] - 5
+                    checks = [(1, lower and shorter), (2, lower and cur["ht"] <= prev["ht"] - 15),
+                              (3, abs(cur["ext"] - prev["ext"]) <= 0.5 * a[i] and shorter)]
+                    for k, ok in checks:
+                        if ok:
+                            out[DIV_NAMES[k]][i] = side
+                            if trace is not None:
+                                trace.append(dict(kind=DIV_NAMES[k], side=side, i=i, p=dict(prev), c=dict(cur)))
+                prev, cur, fired_a = cur, None, False
+    return out
+
+
+# ---- NUMBERS ONLY (no red / blue): fear number F (0-100, top of your pane) and greed number G (0-100, bottom, shown as 0 to -100)
+NUM_WIN = int(os.getenv("NUM_WIN", "30"))     # look back this many candles (same day) for the last peak
+NUM_PEAK = float(os.getenv("NUM_PEAK", "70"))  # a "peak" = the highest number in that window, at least this high
+NUM_NAMES = ["N1 divergence: new low / high, number 10+ below its last peak",
+             "N2 divergence, 20+ below its last peak",
+             "N3 N1 + the next candle turns your way (confirmed)",
+             "N4 mirror (fear = greed) after a peak, then the other side takes over by 15+",
+             "N5 N4 + price holds above the peak's low (below the peak's high for shorts)"]
+
+
+def vfx_num_events(df, ind, trace=None):
+    """Long side uses F at lows, short side uses G at highs. Candle i is CLOSED; entry is i+1's open.
+    Peak = the highest F (G) in the previous NUM_WIN candles of the same day (not counting candle i), at least NUM_PEAK.
+    Peak price = the lowest low (highest high) of the candles whose number is within 2 of that peak value."""
+    fN, gN = vfx_pane(df)
+    F, G = np.nan_to_num(fN), np.nan_to_num(gN)
+    hm, day, a = ind["hm"], ind["day"], ind["atr"]
+    O, H, L, C = ind["o"], ind["h"], ind["l"], ind["c"]
+    n = len(H)
+    out = {nm: np.zeros(n, dtype=np.int64) for nm in NUM_NAMES}
+    rth = (hm >= 930) & (hm < 1600)
+    win = (hm >= 935) & (hm < 1530)
+    day_start = np.zeros(n, dtype=np.int64)
+    for i in range(1, n):
+        day_start[i] = day_start[i - 1] if day[i] == day[i - 1] else i
+    for side in (1, -1):
+        mine = F if side == 1 else G          # the number that peaks at lows (F) or highs (G)
+        other = G if side == 1 else F
+        ext = L if side == 1 else H
+        last_fire = {k: -1 for k in range(5)}   # one fire per peak: a signal can only fire again after a NEW peak forms after its last fire
+        pend3 = {}                            # N1 candle waiting for its confirmation candle
+        for i in range(n):
+            if not (rth[i] and win[i]) or not (a[i] > 0):
+                continue
+            # N3: the candle right after an N1 closes your way (checked before anything else on this candle)
+            for jj, ii in list(pend3.items()):
+                if i == ii + 1 and day[i] == day[ii]:
+                    if ((C[i] > O[i]) if side == 1 else (C[i] < O[i])):
+                        out[NUM_NAMES[2]][i] = side
+                        last_fire[2] = i
+                        if trace is not None:
+                            trace.append(dict(kind=NUM_NAMES[2], side=side, i=i, j=jj, n1=ii))
+                    del pend3[jj]
+                elif i > ii + 1:
+                    del pend3[jj]
+            lo = max(day_start[i], i - NUM_WIN)
+            while lo < i and not rth[lo]:
+                lo += 1
+            if i - lo < 3:
+                continue
+            w = mine[lo:i]
+            pk = float(w.max())
+            if pk < NUM_PEAK:
+                continue
+            near = np.nonzero(w >= pk - 2.0)[0] + lo
+            j = int(near[0])                                       # the peak's id = its first candle
+            if i - int(near[-1]) < 2:                              # the peak is still forming
+                continue
+            pk_px = ext[near].min() if side == 1 else ext[near].max()
+            beyond = (L[i] < pk_px) if side == 1 else (H[i] > pk_px)
+            # N1 / N2: price goes beyond the peak's price, the number is clearly lower than the peak
+            for k, gap in ((0, 10.0), (1, 20.0)):
+                if beyond and mine[i] <= pk - gap and int(near[-1]) > last_fire[k]:
+                    out[NUM_NAMES[k]][i] = side
+                    last_fire[k] = i
+                    if k == 0:
+                        pend3[j] = i
+                    if trace is not None:
+                        trace.append(dict(kind=NUM_NAMES[k], side=side, i=i, j=j, pk=pk, pk_px=pk_px, lo=lo))
+            # N4 / N5: after the peak, a mirror (both numbers 25+ and within 15 of each other) for 3+ candles,
+            # then the other side takes over by 15+ while this side is under half the peak
+            seg_m, seg_o = mine[j:i], other[j:i]
+            mirror_n = int(((seg_m >= 25) & (seg_o >= 25) & (np.abs(seg_m - seg_o) <= 15)).sum())
+            takeover = other[i] - mine[i] >= 15 and mine[i] < 0.5 * pk
+            if mirror_n >= 3 and takeover:
+                holds = (L[i] >= pk_px) if side == 1 else (H[i] <= pk_px)
+                for k, ok in ((3, True), (4, holds)):
+                    if ok and int(near[-1]) > last_fire[k]:
+                        out[NUM_NAMES[k]][i] = side
+                        last_fire[k] = i
+                        if trace is not None:
+                            trace.append(dict(kind=NUM_NAMES[k], side=side, i=i, j=j, pk=pk, pk_px=pk_px, lo=lo, mirror_n=mirror_n))
+    return out
+
+
 def vfx_outcomes(ind, idx, side, holds, flat=1555, stop=3.0):
     """ATR result per entry (entry = next candle's open): close after N candles counting the entry candle (no stop,
     capped at the last candle before 15:55), close of that last candle, and the same with a 3 ATR stop (stop first)."""
@@ -4003,7 +4152,8 @@ def vfx_main():
         for tf in ST_TFS:
             df = to_tf(df1, rth_only=False, mins=tf)
             ind, color, mom, sup = super_events(df, 2, "dip")
-            ev = vfx_events(df, ind)
+            ev = vfx_num_events(df, ind)
+            ev["VF2 (old, color-based) retest + greed taller than fear"] = vfx_events(df, ind)[VFX_NAMES[1]]
             c, hh_, ll_ = df["close"], df["high"], df["low"]
             lo14, hi14 = ll_.rolling(14).min(), hh_.rolling(14).max()
             K = (100 * (c - lo14) / (hi14 - lo14).replace(0, np.nan)).rolling(3).mean().to_numpy()
