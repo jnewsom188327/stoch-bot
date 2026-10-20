@@ -1,5 +1,7 @@
 """
-TRADE THE TURN - LAST 12 MONTHS, 1m (MODE=turn, the default) - the trend line falls steeply, bottoms and its angle turns
+PAUSE OR TURN? - LAST 12 MONTHS, 1m (MODE=pause, the default) - when a steep trend line cools off, which reading (Vix Fix,
+  Stoch, volume, VWAP, TTM, pullback depth, cooling speed, 5m / slow line, time) tells a PAUSE from a TURN. DATA ONLY.
+TRADE THE TURN - LAST 12 MONTHS, 1m (MODE=turn) - the trend line falls steeply, bottoms and its angle turns
   back up = long (mirror = short): slope before x turn size x speed x exits, vs random. DATA ONLY.
 TREND LINE ANGLE SWEEP - EVERY DEGREE 1-40, LAST 12 MONTHS, 1m (MODE=angs) - entry angle x exit angle, both
   ways (crossing up / flattening down), SPY + QQQ (+ any tickers), vs random, with a plateau check. DATA ONLY.
@@ -115,7 +117,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "turn").strip().lower() or "turn"
+MODE = os.getenv("MODE", "pause").strip().lower() or "pause"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -415,6 +417,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "pause":
+        return pause_main()
     if MODE == "turn":
         return turn_main()
     if MODE == "angs":
@@ -6525,6 +6529,194 @@ def turn_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/turn_{stamp}.md", f"{OUT}/turn_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ PAUSE OR TURN? (MODE=pause, the default) - LAST 12 MONTHS, 1m
+# Events = a STEEP trend line (angle 20+ degrees within the last 15 candles) cools off:
+#   COOL  = the angle drops back through 23 deg (the TL ANGLE entry moment)
+#   STALL = the angle drops under 5 deg (the "is it over?" moment)
+# Outcome (fair, symmetric - 50/50 on random prices whatever the readings): PAUSE = price goes +1 ATR in the trend's direction
+# before 1 ATR against it (within 60 candles, same day; both in one candle = TURN); TURN = 1 ATR against first.
+PZ_FEATS = [
+    ("Vix Fix: pullback number (fear in an up-trend, greed in a down-trend, 0-100)", "vf_pull"),
+    ("Vix Fix: trend number (greed in an up-trend, fear in a down-trend, 0-100)", "vf_trend"),
+    ("Vix Fix: trend number minus pullback number", "vf_gap"),
+    ("Stochastic %K trend-side (0 = oversold in an up-trend)", "stoch"),
+    ("Volume: last 3 candles vs the last 20", "vol3"),
+    ("Volume: this candle vs the same time of day (20-day avg)", "voltod"),
+    ("Distance from VWAP, trend side (ATR)", "vwap"),
+    ("TTM momentum, trend side (ATR)", "ttm"),
+    ("TTM momentum slope, trend side (ATR per candle)", "ttms"),
+    ("Pullback depth from the trend's extreme (ATR)", "depth"),
+    ("How fast the angle is cooling (degrees over 3 candles)", "cool3"),
+    ("How steep it got (peak angle, last 15 candles)", "peak"),
+    ("5m trend line angle, trend side (degrees)", "ang5"),
+    ("Slow line (EMA 34) angle, trend side (degrees)", "ang34"),
+    ("Time of day (HHMM)", "tod"),
+]
+
+
+def pause_features(df, df1, ind, ang):
+    o, h, l, c, v = (df[k].to_numpy() for k in ("open", "high", "low", "close", "volume"))
+    a = ind["atr"]
+    F, G = vfx_pane(df)
+    cs = df["close"]
+    hh, ll = df["high"].rolling(14).max(), df["low"].rolling(14).min()
+    k = (100 * (cs - ll) / (hh - ll).replace(0, np.nan)).rolling(3).mean().to_numpy()
+    mid = ((df["high"].rolling(20).max() + df["low"].rolling(20).min()) / 2 + cs.rolling(20).mean()) / 2
+    mom = linreg_last((cs - mid).to_numpy(), 20)
+    vol = pd.Series(v, index=df.index)
+    v3 = (vol.rolling(3).mean() / vol.rolling(20).mean()).to_numpy()
+    tod_key = df.index.hour * 100 + df.index.minute
+    vt = vol.groupby(tod_key).transform(lambda s: s.rolling(20, min_periods=5).mean().shift(1))
+    voltod = (vol / vt).to_numpy()
+    e34 = cs.ewm(span=34, adjust=False).mean().to_numpy()
+    ang34 = np.degrees(np.arctan((e34 - np.r_[np.full(5, np.nan), e34[:-5]]) / (5 * a)))
+    # 5m angle of the LAST CLOSED 5m candle, mapped onto each 1m candle (no peeking)
+    df5 = to_tf(df1, rth_only=False, mins=5)
+    i5 = indicators(df5, 13, 34, True)
+    a5 = pd.Series(ang_series(df5, i5), index=df5.index + pd.Timedelta(minutes=5))      # known at the 5m candle's close
+    a5 = a5[~a5.index.duplicated()].sort_index()
+    close_t = df.index + pd.Timedelta(minutes=1)
+    ang5 = a5.reindex(a5.index.union(close_t)).ffill().reindex(close_t).to_numpy()
+    return dict(F=F, G=G, k=k, mom=mom, v3=v3, voltod=voltod, ang34=ang34, ang5=ang5, vwap=ind["vwap"])
+
+
+def pause_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df = to_tf(df1, rth_only=False, mins=1)
+        ind = indicators(df, 13, 34, True)
+        ang = ang_series(df, ind)
+        X = pause_features(df, df1, ind, ang)
+        o, h, l, c, hm, day, a = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"], ind["atr"]
+        n = len(c)
+        ts = df.index
+        s_ang = pd.Series(ang)
+        pk = s_ang.rolling(15, min_periods=15).max().to_numpy()
+        tr = s_ang.rolling(15, min_periods=15).min().to_numpy()
+        prev = np.r_[np.nan, ang[:-1]]
+        hi20 = df["high"].rolling(20).max().to_numpy()
+        lo20 = df["low"].rolling(20).min().to_numpy()
+        ok = (ts >= yr_start) & (hm >= 935) & (hm < 1530) & np.r_[False, day[1:] == day[:-1]]
+        with np.errstate(invalid="ignore"):
+            ev = {"COOL": ((prev > 23) & (ang <= 23), (prev < -23) & (ang >= -23)),
+                  "STALL": ((pk >= 20) & (prev >= 5) & (ang < 5), (tr <= -20) & (prev <= -5) & (ang > -5))}
+        hl, ll_, cl, hml, dl = h.tolist(), l.tolist(), c.tolist(), hm.tolist(), day.tolist()
+        for evn, (Lm, Sm) in ev.items():
+            for sd, m in ((1, Lm & ok), (-1, Sm & ok)):
+                for i in np.nonzero(m)[0]:
+                    P, A = cl[i], a[i]
+                    ext = hi20[i] if sd == 1 else lo20[i]
+                    res, j = 0, i
+                    while True:
+                        j += 1
+                        if j >= n or dl[j] != dl[i] or hml[j] >= 1555 or j - i > 60:
+                            break
+                        if (sd == 1 and ll_[j] <= P - A) or (sd == -1 and hl[j] >= P + A):
+                            res = -1
+                            break
+                        if (sd == 1 and hl[j] >= P + A) or (sd == -1 and ll_[j] <= P - A):
+                            res = 1
+                            break
+                    j20 = min(i + 20, n - 1)
+                    while dl[j20] != dl[i]:
+                        j20 -= 1
+                    Fv, Gv = X["F"][i], X["G"][i]
+                    rows.append(dict(ev=evn, sym=sym, side=sd, half="H1" if ts[i] < mid else "H2", date=dl[i],
+                                     res=res, r20=sd * (cl[j20] - P) / A,
+                                     vf_pull=Fv if sd == 1 else Gv, vf_trend=Gv if sd == 1 else Fv,
+                                     vf_gap=(Gv - Fv) * sd, stoch=X["k"][i] if sd == 1 else 100 - X["k"][i],
+                                     vol3=X["v3"][i], voltod=X["voltod"][i], vwap=sd * (P - X["vwap"][i]) / A,
+                                     ttm=sd * X["mom"][i] / A, ttms=sd * (X["mom"][i] - X["mom"][i - 1]) / A,
+                                     depth=sd * (ext - P) / A, cool3=sd * (ang[i - 3] - ang[i]),
+                                     peak=pk[i] if sd == 1 else -tr[i], ang5=sd * X["ang5"][i], ang34=sd * X["ang34"][i],
+                                     tod=hml[i]))
+        print(f"  {sym} done ({time.time() - t0:.0f}s) | events {sum(1 for r in rows if r['sym'] == sym)}", flush=True)
+        del df1
+    D = pd.DataFrame(rows)
+    D["pause"] = (D["res"] == 1).astype(float)
+    D["turn"] = (D["res"] == -1).astype(float)
+    md = [f"# PAUSE OR TURN? - LAST 12 MONTHS, 1m - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, 1m. Events 9:35-15:30. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Events** - a steep trend line (EMA 13 angle) cools off: **COOL** = the angle drops back through 23° (the TL ANGLE entry), "
+          "**STALL** = after 20°+ the angle drops under 5° (the 'is it over?' moment). Down-trends = the mirror. "
+          "**PAUSE** = price goes +1 ATR in the trend's direction before 1 ATR against it (within 60 candles; both in the same candle counts "
+          "as TURN). **TURN** = 1 ATR against first. This is fair: on random prices it is 50/50 no matter what any reading says. **Next 20** = price move in the trend's direction 20 candles later (ATR). "
+          "Each reading is split into 5 equal groups using the FIRST half of the year's cut points, then checked on the SECOND half. "
+          "**Spread** = pause % in the best group minus the worst group. A reading that really tells pauses from turns has a big spread "
+          "in BOTH halves, in the same direction.", ""]
+    summ = []
+    for evn in ("COOL", "STALL"):
+        g0 = D[D["ev"] == evn]
+        if not len(g0):
+            continue
+        base_p = 100 * g0["pause"].mean()
+        md += [f"## {evn}: {len(g0):,} events | PAUSE {base_p:.0f}% | TURN {100 * g0['turn'].mean():.0f}% | neither {100 * (g0['res'] == 0).mean():.0f}% | "
+               f"next 20 candles {g0['r20'].mean():+.3f} ATR (H1 {100 * g0[g0['half'] == 'H1']['pause'].mean():.0f}% / H2 {100 * g0[g0['half'] == 'H2']['pause'].mean():.0f}% pause)", ""]
+        for nm, col in PZ_FEATS:
+            g = g0.dropna(subset=[col])
+            h1 = g[g["half"] == "H1"]
+            if len(h1) < 100:
+                continue
+            cuts = np.unique(np.nanquantile(h1[col], [0.2, 0.4, 0.6, 0.8]))
+            g = g.assign(q=np.searchsorted(cuts, g[col].to_numpy(), side="right"))
+            tab = g.groupby(["q", "half"])["pause"].mean().unstack()
+            r20 = g.groupby(["q", "half"])["r20"].mean().unstack()
+            cnt = g.groupby("q").size()
+            if "H1" not in tab or "H2" not in tab or len(tab) < 3:
+                continue
+            sp1 = 100 * (tab["H1"].max() - tab["H1"].min())
+            best = tab["H1"].idxmax()
+            worst = tab["H1"].idxmin()
+            sp2 = 100 * (tab["H2"].get(best, np.nan) - tab["H2"].get(worst, np.nan))   # same groups, never-seen half
+            summ.append(dict(ev=evn, feat=nm, col=col, sp1=sp1, sp2=sp2, best=best, worst=worst, cuts=cuts, tab=tab, r20=r20, cnt=cnt))
+    S = pd.DataFrame(summ)
+    S["score"] = S[["sp1", "sp2"]].min(axis=1)
+    md.insert(4, "## The answer in 30 seconds")
+    lines = []
+    for evn in ("COOL", "STALL"):
+        s_ = S[S["ev"] == evn].sort_values("score", ascending=False).head(3)
+        for z in s_.itertuples():
+            lo_ = "lowest" if z.best < z.worst else "highest"
+            lines.append(f"- **{evn}: {z.feat}** - pause rate {lo_} group vs the other end: {z.sp1:+.0f} points (1st half) / **{z.sp2:+.0f} points** "
+                         f"(2nd half, never seen){' ✅ holds up' if z.sp2 >= 10 and z.sp1 >= 10 else ''}")
+    md[5:5] = lines + ["- **Luck reference:** on RANDOM prices the biggest 2nd-half spread was ~7 points - so a reading needs 10+ points in BOTH halves "
+                       "(✅) to really tell a pause from a turn.", ""]
+    for evn in ("COOL", "STALL"):
+        md += [f"## {evn} - every reading, pause % by group (1 = lowest values ... 5 = highest), 1st half / 2nd half",
+               "| Reading | Group 1 | Group 2 | Group 3 | Group 4 | Group 5 | Spread 1st / **2nd** half |", "|---|---|---|---|---|---|---|"]
+        for z in S[S["ev"] == evn].sort_values("score", ascending=False).itertuples():
+            cells = []
+            edges = [-np.inf] + list(z.cuts) + [np.inf]
+            for q in range(len(edges) - 1):
+                if q in z.tab.index:
+                    rng_ = f"{'<' + format(edges[q + 1], '.2f') if q == 0 else ('>' + format(edges[q], '.2f') if q == len(edges) - 2 else format(edges[q], '.2f') + '-' + format(edges[q + 1], '.2f'))}"
+                    cells.append(f"{rng_}: {100 * z.tab.loc[q, 'H1']:.0f}% / {100 * z.tab.loc[q].get('H2', np.nan):.0f}%")
+                else:
+                    cells.append("-")
+            cells += ["-"] * (5 - len(cells))
+            md.append(f"| {z.feat} | " + " | ".join(cells[:5]) + f" | {z.sp1:+.0f} / **{z.sp2:+.0f}** |")
+        md.append("")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/pause_{stamp}.md", f"{OUT}/pause_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
