@@ -1,5 +1,7 @@
 """
-BOUNCE OFF THE VIX FIX LINES (MODE=bnc, the default) - price touches the red (FEAR 100 / 85) or blue (GREED) line and
+TREND LINE TOUCH - LAST 12 MONTHS (MODE=tlt, the default) - line green/blue + price dips to it = long, red/pink + pops
+  up to it = short. Instant limit / touch / hold entries, holds 1-20 candles, SPY + QQQ 1/2/3/5m, vs random. DATA ONLY.
+BOUNCE OFF THE VIX FIX LINES (MODE=bnc) - price touches the red (FEAR 100 / 85) or blue (GREED) line and
   bounces: touch, close back, next high, bounce $0.25 / $0.50, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + stop. DATA ONLY.
 VIX FIX MIRROR -> BREAKAWAY (MODE=mir) - squeeze, both numbers rise together, then one side pulls away.
   FOLLOW / FADE, 32 settings, hold 1-10 candles, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + move size. DATA ONLY.
@@ -107,7 +109,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "bnc").strip().lower() or "bnc"
+MODE = os.getenv("MODE", "tlt").strip().lower() or "tlt"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -407,6 +409,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "tlt":
+        return tlt_main()
     if MODE == "bnc":
         return bnc_main()
     if MODE == "mir":
@@ -5700,6 +5704,219 @@ def bnc_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/bnc_{stamp}.md", f"{OUT}/bnc_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ TREND LINE TOUCH (MODE=tlt, the default) - LAST YEAR ONLY
+# Long = the line is GREEN (or BLUE = up but fading) and price dips to touch it; short = RED (or PINK) and price pops up to it.
+TLT_K = (1, 2, 3, 5, 10, 20)
+TLT_KINDS = ("INSTANT (limit at the line)", "TOUCH (enter at the close)", "HOLD (touch + closes back on the trend side)")
+TLT_COLORS = {"GREEN / RED (pullback to the line)": ("strong",),
+              "BLUE / PINK (back to a fading line)": ("fade",),
+              "ALL FOUR COLORS": ("strong", "fade")}
+TLT_SLIP = 0.02          # buy-stop / sell-stop fills (fading-line entries) are this much worse than the line
+
+
+def tlt_colors(df, ind):
+    """the 5-color line exactly like your Trend Flip / SUPER line: 2 green, 1 blue, -2 red, -1 pink, 0 gray"""
+    st = ind["st"]
+    fadeL = (st == 1) & ~ind["strongL"]
+    fadeS = (st == -1) & ~ind["strongS"]
+    color = np.where(st == 1, np.where(fadeL, 1, 2), np.where(st == -1, np.where(fadeS, -1, -2), 0))
+    ef = df["close"].ewm(span=13, adjust=False).mean().to_numpy()
+    return color, ef
+
+
+def tlt_events(ind, color, ef, kind, subs, t_from=935, t_to=1530):
+    """Returns (signal candle, entry candle, entry price, side). Uses the line's color at the close of the PREVIOUS
+    candle (what you see before the touch) and only what is known at the time.
+      strong: GREEN line, the previous candle stayed fully ABOVE the line, this candle dips to it -> LONG (RED: mirror -> SHORT)
+      fade:   BLUE line (up but fading = price under it), the previous candle stayed fully BELOW the line, this candle comes
+              back UP to it -> LONG (PINK: mirror -> SHORT)
+    INSTANT = an order sitting at the previous candle's line value: strong = limit, filled when price trades $0.01 through;
+              fade = stop, filled at the line + $0.02 (or the open if it opened through).
+    TOUCH   = the candle touches its own line at the close -> entry at the next open.
+    HOLD    = TOUCH + the candle closes on the trade's side of the line (long: close >= line) -> next open."""
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    win = (hm >= t_from) & (hm < t_to)
+    same = np.r_[False, day[1:] == day[:-1]]
+    nxt_ok = np.r_[day[1:] == day[:-1], False]
+    lev = np.r_[np.nan, ef[:-1]]
+    pcol = np.r_[0, color[:-1]]
+    out = []
+    for sd in (1, -1):
+        for sub in subs:
+            want = 2 if sub == "strong" else 1
+            okc = (pcol * sd) == want
+            from_above = (sd == 1) == (sub == "strong")      # long+strong / short+fade: price comes DOWN to the line
+            if from_above:
+                prev_clear = np.r_[False, l[:-1] > ef[:-1]]
+            else:
+                prev_clear = np.r_[False, h[:-1] < ef[:-1]]
+            base = win & same & okc & prev_clear
+            if kind.startswith("INSTANT"):
+                hit = (l < lev - 0.01) if from_above else (h > lev + 0.01)
+                for i in np.nonzero(base & hit)[0]:
+                    if sub == "strong":           # limit order: at the line or better
+                        px = min(o[i], lev[i]) if sd == 1 else max(o[i], lev[i])
+                    else:                         # stop order: at the line (or the open) + slippage
+                        px = max(o[i], lev[i]) + TLT_SLIP if sd == 1 else min(o[i], lev[i]) - TLT_SLIP
+                    out.append((i, i, px, sd))
+            else:
+                touch = (l <= ef) if from_above else (h >= ef)
+                m = base & touch & nxt_ok
+                if kind.startswith("HOLD"):
+                    m &= (c >= ef) if sd == 1 else (c <= ef)
+                for i in np.nonzero(m)[0]:
+                    out.append((i, i + 1, o[i + 1], sd))
+    if not out:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.int64), np.array([]), np.array([], dtype=np.int64)
+    a = sorted(set(out))
+    return (np.array([x[0] for x in a]), np.array([x[1] for x in a]), np.array([x[2] for x in a], dtype=float),
+            np.array([x[3] for x in a]))
+
+
+def tlt_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("TLT_TFS", "1,2,3,5").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(12)
+    KN = [f"k{k}" for k in TLT_K]
+    rows, base = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            color, ef = tlt_colors(df, ind)
+            a = ind["atr"]
+            ts = df.index
+            inyr = ts >= yr_start
+            half = np.where(ts < mid, "H1", "H2")
+            cnt = []
+            for kind in TLT_KINDS:
+                for cn, cset in TLT_COLORS.items():
+                    si, ei, ep, sd = tlt_events(ind, color, ef, kind, cset)
+                    keep = inyr[si] if len(si) else np.array([], dtype=bool)
+                    si, ei, ep, sd = si[keep], ei[keep], ep[keep], sd[keep]
+                    cnt.append(len(si))
+                    if not len(si):
+                        continue
+                    R, _, _ = bnc_outcomes(ind, ei, ep, sd, ep - sd * 1e9, ks=TLT_K)       # no stop
+                    RS, _, HS = bnc_outcomes(ind, ei, ep, sd, ep - sd * a[si], ks=TLT_K)  # 1 ATR stop
+                    A_ = a[si][:, None]
+                    d_ = pd.DataFrame(np.c_[R, R / A_, RS / A_, HS], columns=KN + [f"a{k}" for k in TLT_K] + [f"s{k}" for k in TLT_K] + [f"x{k}" for k in TLT_K])
+                    d_["kind"], d_["col"], d_["sym"], d_["tf"] = kind, cn, sym, tf
+                    d_["side"] = np.where(sd > 0, "LONG", "SHORT")
+                    d_["half"] = half[si]
+                    d_["date"] = ind["day"][si]
+                    rows.append(d_.dropna(subset=[KN[0]]))
+            pool = np.nonzero(inyr & (ind["hm"] >= 935) & (ind["hm"] < 1530))[0]
+            pool = pool[pool + 1 < len(ts)]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("TLT_RANDOM", "6000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                e_ = ridx + 1
+                R, _, _ = bnc_outcomes(ind, e_, ind["o"][e_], np.full(len(e_), sdv), ind["o"][e_] - sdv * 1e9, ks=TLT_K)
+                RS, _, _ = bnc_outcomes(ind, e_, ind["o"][e_], np.full(len(e_), sdv), ind["o"][e_] - sdv * a[ridx], ks=TLT_K)
+                A_ = a[ridx][:, None]
+                d_ = pd.DataFrame(np.c_[R, R / A_, RS / A_], columns=KN + [f"a{k}" for k in TLT_K] + [f"s{k}" for k in TLT_K])
+                d_["sym"], d_["tf"], d_["side"], d_["half"] = sym, tf, snm, half[ridx]
+                base.append(d_.dropna(subset=[KN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | fires per setting {min(cnt)}-{max(cnt)}", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B_ = pd.concat(base, ignore_index=True)
+    AC = [f"a{k}" for k in TLT_K]
+    SC = [f"s{k}" for k in TLT_K]
+    bm = B_.groupby(["sym", "tf", "side", "half"])[KN + AC + SC].mean()
+
+    def adj(g, col):
+        """average minus the random entries' average (same chart, side and half-year)"""
+        if not len(g):
+            return np.nan
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", "half"]):
+            if kk in bm.index and not np.isnan(bm.loc[kk, col]):
+                tot += (gg[col].mean() - bm.loc[kk, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    # residual = result minus the matched random average -> noise measured DAY BY DAY (trades on the same day overlap)
+    keyc = ["sym", "tf", "side", "half"]
+    bmr = bm.reset_index()
+    E = E.merge(bmr[keyc + AC].rename(columns={c_: "r_" + c_ for c_ in AC}), on=keyc, how="left")
+    for c_ in AC:
+        E["d_" + c_] = E[c_] - E["r_" + c_]
+
+    def tday(g, ac):
+        r = g["d_" + ac].dropna()
+        if len(r) < 2:
+            return np.nan
+        mu = r.mean()
+        dev = (g.loc[r.index, "d_" + ac] - mu).groupby([g.loc[r.index, "sym"], g.loc[r.index, "date"]]).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(r)
+        return mu / se if se > 0 else np.nan
+
+    summ = []
+    for (kind, cn, tf), g in E.groupby(["kind", "col", "tf"]):
+        for k in TLT_K:
+            ac, sc = f"a{k}", f"s{k}"
+            v = adj(g, ac)
+            summ.append(dict(kind=kind, col=cn, tf=tf, k=k, n=len(g), atr=v, t=tday(g, ac),
+                             usd=adj(g, f"k{k}"), h1=adj(g[g["half"] == "H1"], ac), h2=adj(g[g["half"] == "H2"], ac),
+                             spy=adj(g[g["sym"] == "SPY"], ac), qqq=adj(g[g["sym"] == "QQQ"], ac),
+                             lng=adj(g[g["side"] == "LONG"], ac), sht=adj(g[g["side"] == "SHORT"], ac),
+                             green=100 * (g[ac] > 0).mean(), stp=adj(g, sc), stopped=100 * g[f"x{k}"].mean()))
+    S = pd.DataFrame(summ)
+    S["held"] = (S["t"] >= 2) & (S["h1"] > 0) & (S["h2"] > 0) & (S["spy"] > 0) & (S["qqq"] > 0) & (S["n"] >= 200)
+    best = S.sort_values("t", ascending=False)
+    held = best[best["held"]]
+    md = [f"# TREND LINE TOUCH - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d} only, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Signals 9:35-15:30. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Line** = EMA 13 colored like your Trend Flip line: GREEN up, BLUE up but fading, RED down, PINK down but fading (EMA 13/34 + VWAP). "
+          "**LONG** = the line is GREEN and price dips to touch it (the previous candle stayed above it); **SHORT** = the mirror on a RED line. "
+          "**INSTANT** = a limit order at the previous candle's line value, filled when price trades $0.01 through it. **TOUCH** = enter at the "
+          "next open after the touch candle. **HOLD** = the touch candle also closes back on the trend side. **ATR vs random** = result in "
+          "ATR minus random entries the same way on the same chart (the fair score). **t** = edge / noise, noise measured day by day "
+          "because trades on the same day overlap (2+ = unlikely luck). BLUE / PINK = the line is fading (price on the other side of it): "
+          "LONG when price comes back UP to a blue line, SHORT when it comes back DOWN to a pink line (stop order at the line + $0.02). "
+          f"**HELD UP** = t >= 2, positive in BOTH halves of the year (split {mid:%Y-%m-%d}), on SPY AND QQQ, 200+ fires. "
+          "**1 ATR stop** = the same trade with a stop 1 ATR away (checked first in every candle).", "",
+          "## The answer in 30 seconds",
+          f"- **Settings that HELD UP: {held[['kind', 'col', 'tf']].drop_duplicates().shape[0]}**" + (" - best: " + "; ".join(
+              f"{z.tf}m {z.kind.split(' ')[0]} {z.col}, hold {z.k} candles ({z.k * z.tf} min): {z.atr:+.3f} ATR vs random (t {z.t:.1f}), "
+              f"${z.usd:+.3f}/share, H1 {z.h1:+.3f} / H2 {z.h2:+.3f}" for z in held.drop_duplicates(['kind', 'col', 'tf']).head(5).itertuples())
+              if len(held) else " - none."), ""]
+    md += ["## Every setting at its best hold (sorted by t)",
+           "| Chart | Entry | Line color | Fires | Per day | Best hold | **ATR vs random** (t) | $/share vs random | H1 / H2 | SPY / QQQ | Longs / Shorts | Green | With 1 ATR stop (stopped) | |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    ndays = max(1, len(pd.bdate_range(yr_start.date(), end.date())))
+    for (kind, cn, tf), g in best.groupby(["kind", "col", "tf"], sort=False):
+        z = g.iloc[0]
+        md.append(f"| {tf}m | {kind.split(' (')[0]} | {cn} | {z.n} | {z.n / ndays / len(SYMBOLS):.1f} | {z.k} ({z.k * tf} min) | **{z.atr:+.3f}** ({z.t:.1f}) | "
+                  f"{z.usd:+.3f} | {z.h1:+.3f} / {z.h2:+.3f} | {z.spy:+.3f} / {z.qqq:+.3f} | {z.lng:+.3f} / {z.sht:+.3f} | {z.green:.0f}% | "
+                  f"{z.stp:+.3f} ({z.stopped:.0f}%) | {'✅' if z.held else ''} |")
+    md += ["", "## Speed: ATR vs random after 1 / 2 / 3 / 5 / 10 / 20 candles (every setting)",
+           "| Chart | Entry | Line color | " + " | ".join(f"{k} c" for k in TLT_K) + " |", "|---|---|---|" + "---|" * len(TLT_K)]
+    for (kind, cn, tf), g in S.groupby(["kind", "col", "tf"]):
+        md.append(f"| {tf}m | {kind.split(' (')[0]} | {cn} | " + " | ".join(f"{v:+.3f}" for v in g.sort_values("k")["atr"]) + " |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/tlt_{stamp}.md", f"{OUT}/tlt_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
