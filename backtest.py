@@ -1,5 +1,7 @@
 """
-TREND LINE ANGLE - LAST 12 MONTHS, 1m (MODE=ang, the default) - which angles of the trend line (EMA 13) lead to
+TREND LINE ANGLE SWEEP - EVERY DEGREE 1-40, LAST 12 MONTHS, 1m (MODE=angs, the default) - entry angle x exit angle, both
+  ways (crossing up / flattening down), SPY + QQQ (+ any tickers), vs random, with a plateau check. DATA ONLY.
+TREND LINE ANGLE - LAST 12 MONTHS, 1m (MODE=ang) - which angles of the trend line (EMA 13) lead to
   the best moves, and entry / exit rules on the angle, SPY + QQQ, vs random. DATA ONLY.
 TREND LINE TOUCH - LAST 12 MONTHS (MODE=tlt) - line green/blue + price dips to it = long, red/pink + pops
   up to it = short. Instant limit / touch / hold entries, holds 1-20 candles, SPY + QQQ 1/2/3/5m, vs random. DATA ONLY.
@@ -111,7 +113,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "ang").strip().lower() or "ang"
+MODE = os.getenv("MODE", "angs").strip().lower() or "angs"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -411,6 +413,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "angs":
+        return angs_main()
     if MODE == "ang":
         return ang_main()
     if MODE == "tlt":
@@ -6147,6 +6151,162 @@ def ang_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/ang_{stamp}.md", f"{OUT}/ang_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ ANGLE SWEEP (MODE=angs, the default) - every entry degree 1-40
+ANGS_A = tuple(range(1, 41))
+ANGS_E = (-20, -15, -10, -5, 0, 5, 10, 15, 20)
+
+
+def angs_next_true(flag):
+    """index of the first k >= j where flag[k] is True (n if none) - one backwards pass"""
+    n = len(flag)
+    idx = np.where(flag, np.arange(n), n)
+    return np.minimum.accumulate(idx[::-1])[::-1]
+
+
+def angs_exit_fast(ind, ang, idx, sd, E, maxh=ANG_MAXH):
+    """vectorized ang_exit (same rules): entry next open, exit at the close of the first candle whose angle is below E
+    (long) / above -E (short), or after maxh candles, or the first candle at/after 15:55 or the day's last candle."""
+    o, c, hm, day = ind["o"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    cp = (hm >= 1555) | np.r_[day[1:] != day[:-1], True]
+    nxt_cp = angs_next_true(cp)
+    nbL = angs_next_true(np.nan_to_num(ang, nan=1e9) < E)
+    nbS = angs_next_true(np.nan_to_num(ang, nan=-1e9) > -E)
+    e = idx + 1
+    ok = e < n
+    e = np.where(ok, e, n - 1)
+    ok &= (day[e] == day[idx]) & (hm[e] < 1555)
+    nb = np.where(sd == 1, nbL[e], nbS[e])
+    x = np.minimum(np.minimum(nb, nxt_cp[e]), e + maxh - 1)
+    x = np.minimum(x, n - 1)
+    ret = np.where(ok, sd * (c[x] - o[e]), np.nan)
+    return ret, np.where(ok, x - e + 1, np.nan)
+
+
+def angs_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(14)
+    EV, RB = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df = to_tf(df1, rth_only=False, mins=1)
+        ind = indicators(df, 13, 34, True)
+        ang = ang_series(df, ind)
+        hm, day, a = ind["hm"], ind["day"], ind["atr"]
+        ts = df.index
+        half = np.where(ts < mid, "H1", "H2")
+        ry = ts >= yr_start
+        cand = np.nonzero(ry & (hm >= 935) & (hm < 1530) & np.r_[day[1:] == day[:-1], False] & ~np.isnan(ang))[0]
+        rid = np.sort(rng.choice(cand, size=min(len(cand), int(os.getenv("ANGS_RANDOM", "20000"))), replace=False))
+        for E in ANGS_E:
+            for sdv in (1, -1):
+                rr, hh = angs_exit_fast(ind, ang, rid, np.full(len(rid), sdv), E)
+                RB.append(pd.DataFrame(dict(E=E, side=sdv, sym=sym, half=half[rid], r=rr / a[rid])).dropna())
+        for mode in ("up", "dn"):
+            for A in ANGS_A:
+                idx, sd = ang_events(ang, hm, day, A, mode)
+                keep = ry[idx]
+                idx, sd = idx[keep], sd[keep]
+                for E in ANGS_E:
+                    if E >= A:
+                        continue
+                    rr, hh = angs_exit_fast(ind, ang, idx, sd, E)
+                    EV.append(pd.DataFrame(dict(mode=mode, A=A, E=E, side=sd, sym=sym, half=half[idx], date=day[idx],
+                                                r=rr / a[idx], usd=rr, h=hh)).dropna())
+        print(f"  {sym} done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E_ = pd.concat(EV, ignore_index=True)
+    RB_ = pd.concat(RB, ignore_index=True)
+    rb = RB_.groupby(["E", "side", "sym", "half"])["r"].mean()
+    E_["base"] = [rb.get(k, np.nan) for k in zip(E_["E"], E_["side"], E_["sym"], E_["half"])]
+    E_["x"] = E_["r"] - E_["base"]
+    E_ = E_.dropna(subset=["x"])
+
+    def tday(g):
+        x = g["x"]
+        if len(x) < 2:
+            return np.nan
+        dev = (x - x.mean()).groupby([g["sym"], g["date"]]).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(x)
+        return x.mean() / se if se > 0 else np.nan
+
+    syms = list(SYMBOLS)
+    rows = []
+    for (mode, A, Ex), g in E_.groupby(["mode", "A", "E"]):
+        if len(g) < 50:
+            continue
+        per_sym = [g[g["sym"] == s_]["x"].mean() for s_ in syms]
+        rows.append(dict(mode=mode, A=A, E=Ex, n=len(g), vr=g["x"].mean(), t=tday(g), usd=g["usd"].mean(), hold=g["h"].mean(),
+                         win=100 * (g["r"] > 0).mean(), h1=g[g["half"] == "H1"]["x"].mean(), h2=g[g["half"] == "H2"]["x"].mean(),
+                         allsym=all((v > 0) for v in per_sym if not np.isnan(v)), lng=g[g["side"] == 1]["x"].mean(),
+                         sht=g[g["side"] == -1]["x"].mean(), perday=len(g) / max(g.groupby(["sym", "date"]).ngroups, 1)))
+    S = pd.DataFrame(rows)
+    S["held"] = (S["t"] >= 2) & (S["h1"] > 0) & (S["h2"] > 0) & S["allsym"] & (S["n"] >= 200)
+    # plateau score: the average of this cell and its +-2 degree neighbours (same mode and exit) - a lucky single degree scores low
+    S = S.sort_values(["mode", "E", "A"])
+    S["plateau"] = S.groupby(["mode", "E"])["vr"].transform(lambda v: v.rolling(5, center=True, min_periods=3).mean())
+    S["plat_t"] = S.groupby(["mode", "E"])["t"].transform(lambda v: v.rolling(5, center=True, min_periods=3).min())
+    held = S[S["held"]].sort_values("t", ascending=False)
+    plat = S[(S["plat_t"] >= 1.5) & S["held"]].sort_values("plateau", ascending=False)
+    md = [f"# TREND LINE ANGLE SWEEP (every degree) - LAST 12 MONTHS, 1m - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, 1m. Signals 9:35-15:30. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Angle** = EMA 13 move over 5 candles in ATR per candle, as degrees (same as the TL ANGLE indicator). **UP A** = long when the "
+          "angle crosses up through A (short: down through -A). **FLATTEN A** = long when a steeper line comes back down through A "
+          f"(short: mirror). **Exit E** = close the long when the angle closes under E (short: over -E), max {ANG_MAXH} candles, flat 15:55. "
+          "**vs random** = ATR per trade minus random entries the same way with the same exit. **t** = edge / noise, measured day by day. "
+          f"**HELD UP** = t >= 2, positive in both halves of the year (split {mid:%Y-%m-%d}), on every symbol, 200+ trades. "
+          "**Plateau** = the average of this angle and the 2 angles on each side - a real sweet spot is good across neighbours, "
+          "a lucky single degree is not.", "",
+          "## The answer in 30 seconds",
+          f"- **Combinations that HELD UP: {len(held)} of {len(S)}** (by luck alone expect a handful when testing this many).",
+          "- **Best PLATEAUS (good across neighbouring angles too):** " + ("; ".join(
+              f"{'FLATTEN' if z.mode == 'dn' else 'UP'} {z.A}° exit {z.E}°: {z.vr:+.3f} ATR (t {z.t:.1f}), neighbours avg {z.plateau:+.3f}, "
+              f"hold {z.hold:.0f} min, ${z.usd:+.3f}/share" for z in plat.head(5).itertuples()) if len(plat) else "none - no angle range is "
+              "reliably good across its neighbours."),
+          "- **Single best cells:** " + ("; ".join(
+              f"{'FLATTEN' if z.mode == 'dn' else 'UP'} {z.A}° exit {z.E}°: {z.vr:+.3f} (t {z.t:.1f})" for z in held.head(5).itertuples())
+              if len(held) else "none."), ""]
+    for mode, nm in (("dn", "FLATTEN A (a steeper line comes back down through A)"), ("up", "UP A (the angle crosses up through A)")):
+        md += [f"## {nm} - ATR vs random (t), every entry degree x exit", "| Entry A | " + " | ".join(f"exit {e}°" for e in ANGS_E) + " | trades/day (exit -10) |",
+               "|---|" + "---|" * (len(ANGS_E) + 1)]
+        for A in ANGS_A:
+            cells = []
+            for Ex in ANGS_E:
+                r_ = S[(S["mode"] == mode) & (S["A"] == A) & (S["E"] == Ex)]
+                if not len(r_):
+                    cells.append("")
+                    continue
+                z = r_.iloc[0]
+                cells.append(f"{'**' if z.held else ''}{z.vr:+.3f} ({z.t:.1f}){'** ✅' if z.held else ''}")
+            r10 = S[(S["mode"] == mode) & (S["A"] == A) & (S["E"] == -10)]
+            cells.append(f"{r10.perday.iloc[0]:.1f}" if len(r10) else "")
+            md.append(f"| {A}° | " + " | ".join(cells) + " |")
+        md.append("")
+    md += ["## Every combination that held up (details)",
+           "| Entry | Exit | Trades | Per day | Avg hold | Win % | vs random (t) | Plateau | $/share | H1 / H2 | Longs / Shorts |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in held.head(40).itertuples():
+        md.append(f"| {'FLATTEN' if z.mode == 'dn' else 'UP'} {z.A}° | {z.E}° | {z.n} | {z.perday:.1f} | {z.hold:.0f} | {z.win:.0f}% | **{z.vr:+.3f}** ({z.t:.1f}) | "
+                  f"{z.plateau:+.3f} | {z.usd:+.3f} | {z.h1:+.3f} / {z.h2:+.3f} | {z.lng:+.3f} / {z.sht:+.3f} |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/angs_{stamp}.md", f"{OUT}/angs_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
