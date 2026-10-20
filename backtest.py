@@ -1,5 +1,8 @@
 """
-TREND LINE STUDY (MODE=study, the default) - line anatomy, 4 entry events (+ faded) on 1/2/3/5m, ~30 conditions
+SUPER + GAP & GO TEST (MODE=super, the default) - does SUPER LONG/SHORT keep its edge if it fires 1 candle sooner
+  (warning after 1 close) or at the sharp dip itself (no color)? + 8 GAP & GO versions (gap size, entry time,
+  confirmed). Same grading as the study, exits, rough $ per option.
+TREND LINE STUDY (MODE=study) - line anatomy, 4 entry events (+ faded) on 1/2/3/5m, ~30 conditions
   (TTM squeeze, Vix Fix levels, every timeframe's agreement, price action), confluence picked on 2020-23 and checked on
   2024-now, and exits (time, color, warning, TTM peak/zero, bracket, trailing, hold).
 TREND FLIP STOPS & TARGETS (MODE=brackets) - every target/stop combination (+1/-1 ... +3/-1, wide stops,
@@ -51,7 +54,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "study").strip().lower() or "study"
+MODE = os.getenv("MODE", "super").strip().lower() or "super"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -343,6 +346,8 @@ def main():
         return brackets_main()
     if MODE == "study":
         return study_main()
+    if MODE == "super":
+        return super_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -2319,6 +2324,175 @@ def study_main():
     if summ:
         with open(summ, "a") as f:
             f.write(text[:900000] + "\n")
+
+
+# ================================================================ SUPER TIMING TEST (MODE=super, the default)
+# Does SUPER LONG / SHORT keep its edge if it fires EARLIER?
+#   A. SUPER as in the indicator: warning color after 2 closes (weakN=2), stretch >= 1.15 ATR, TTM dip >= 0.42 ATR
+#   B. SUPER after 1 close (weakN=1) - one candle sooner
+#   C. Sharp dip only: stretched trend + TTM dip on ANY candle, no color needed (earliest; first one per 10 candles)
+# Graded both ways (exact coin flip) like the study + the "hold until the opposite color" exit.
+SUP_GAP = float(os.getenv("SUP_GAP", "1.15"))
+SUP_DROP = float(os.getenv("SUP_DROP", "0.42"))
+
+
+def super_events(df, wn, variant):
+    ind = indicators(df, 13, 34, True, weak_n=wn)
+    c, a, st, hm = ind["c"], ind["atr"], ind["st"], ind["hm"]
+    fadeL = (st == 1) & ~ind["strongL"]
+    fadeS = (st == -1) & ~ind["strongS"]
+    color = np.where(st == 1, np.where(fadeL, 1, 2), np.where(st == -1, np.where(fadeS, -1, -2), 0))
+    cs, hs, ls = df["close"], df["high"], df["low"]
+    basis = cs.rolling(20).mean()
+    mid = ((hs.rolling(20).max() + ls.rolling(20).min()) / 2 + basis) / 2
+    mom = linreg_last((cs - mid).to_numpy(), 20)
+    mslope = (mom - np.r_[np.nan, mom[:-1]]) / a
+    ef = cs.ewm(span=13, adjust=False).mean().to_numpy()
+    es = cs.ewm(span=34, adjust=False).mean().to_numpy()
+    spread = (ef - es) / a
+    prev = np.r_[0, color[:-1]]
+    win = (hm >= 935) & (hm < 1530)
+    if variant == "dip":
+        L = win & (color == 2) & (spread >= SUP_GAP) & (mslope <= -SUP_DROP)
+        S = win & (color == -2) & (spread <= -SUP_GAP) & (mslope >= SUP_DROP)
+        ent = np.where(L, 1, np.where(S, -1, 0))
+        last = -10**9
+        for i in np.nonzero(ent)[0]:
+            if i - last < 10:
+                ent[i] = 0
+            else:
+                last = i
+    else:
+        L = win & (color == 1) & (prev == 2) & (spread >= SUP_GAP) & (mslope <= -SUP_DROP)
+        S = win & (color == -1) & (prev == -2) & (spread <= -SUP_GAP) & (mslope >= SUP_DROP)
+        ent = np.where(L, 1, np.where(S, -1, 0))
+    return ind, color, mom, ent
+
+
+GAP_VARS = [("G1. Gap 0.3+ at 9:35 (as in the indicator)", 0.3, 935, False),
+            ("G2. Gap 0.2+ at 9:35", 0.2, 935, False),
+            ("G3. Gap 0.5+ at 9:35", 0.5, 935, False),
+            ("G4. Gap 0.75+ at 9:35", 0.75, 935, False),
+            ("G5. Gap 0.3+ at the 9:30 open candle", 0.3, 930, False),
+            ("G6. Gap 0.3+ at 9:45", 0.3, 945, False),
+            ("G7. Gap 0.3+ at 10:00", 0.3, 1000, False),
+            ("G8. Gap 0.3+ at 9:35, CONFIRMED (gap not filled + right side of VWAP)", 0.3, 935, True)]
+
+
+def gap_events(df, df1, ind, thr, t_from, confirm):
+    lv = daily_levels(df1, df)
+    gap = ((lv["dopen"] - lv["pdc"]) / lv["datr"]).to_numpy()
+    hm, day, c = ind["hm"], ind["day"], ind["c"]
+    first = first_per_day((hm >= t_from) & (hm < 1600), day)
+    sd = np.sign(np.nan_to_num(gap))
+    ok = first & (np.abs(np.nan_to_num(gap)) >= thr)
+    if confirm:
+        ok &= (sd * (c - lv["pdc"].to_numpy()) > 0) & (sd * (c - ind["vwap"]) > 0)
+    return np.where(ok, sd, 0).astype(np.int64)
+
+
+def super_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    VARS = [("A. SUPER now (warning after 2 closes)", 2, "warn"), ("B. SUPER after 1 close (1 candle sooner)", 1, "warn"),
+            ("C. Sharp dip only, no color (earliest)", 2, "dip")]
+    EXN = ["Opposite color starts", "Hold to 15:55", "+2 / -1 ATR bracket"]
+    R = {}
+    ATRNOW = {}
+
+    def record(name, sym, tf, ind, color, mom, ent, yrs):
+        idx = np.nonzero(ent)[0]
+        side = ent[idx]
+        g = grade_two_sided(ind, idx)
+        ok = ~np.isnan(g[:, 6])
+        idx, side, g = idx[ok], side[ok], g[ok]
+        hit_s = np.where(side > 0, g[:, 0], g[:, 1])
+        hit_o = np.where(side > 0, g[:, 1], g[:, 0])
+        edge = 50.0 * (hit_s - hit_o)
+        names, ex = study_exits(ind, color, mom, idx, side)
+        t = ind["times"][idx]
+        for per in ("tr", "te"):
+            m = (t < split) if per == "tr" else (t >= split)
+            d = dict(n=int(m.sum()), per_yr=m.sum() / yrs[per], edge=float(np.mean(edge[m])) if m.any() else np.nan,
+                     hit=float(100 * np.mean(hit_s[m])) if m.any() else np.nan)
+            for nm in EXN:
+                d[nm] = float(np.nanmean(ex[m, names.index(nm)])) if m.any() else np.nan
+            R[(name, sym, tf, per)] = d
+
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            yrs = {"tr": max((dates < split.date()).sum() / 252.0, 1e-9), "te": max((dates >= split.date()).sum() / 252.0, 1e-9)}
+            for name, wn, var in VARS:
+                ind, color, mom, ent = super_events(df, wn, var)
+                ind["times"] = df.index
+                record(name, sym, tf, ind, color, mom, ent, yrs)
+            ind, color, mom, _ = super_events(df, 2, "warn")
+            ind["times"] = df.index
+            mask = rth & np.isin(np.array(df.index.date), dates[-20:])
+            ATRNOW[(sym, tf)] = float(np.nanmean(ind["atr"][mask]))
+            for name, thr, tfrom, conf in GAP_VARS:
+                record(name, sym, tf, ind, color, mom, gap_events(df, df1, ind, thr, tfrom, conf), yrs)
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+
+    def usd(r, sym, tf):
+        return r * ATRNOW[(sym, tf)] * DELTA * 100 - 2.0 if not np.isnan(r) else np.nan
+
+    def block(title, names_):
+        out = [f"## {title} - the answer in 30 seconds"]
+        for name in names_:
+            row = []
+            for per in ("tr", "te"):
+                cells = [R[(name, s_, tf, per)] for s_ in SYMBOLS for tf in ST_TFS]
+                n = sum(c["n"] for c in cells)
+                e = np.nansum([c["edge"] * c["n"] for c in cells]) / max(n, 1)
+                row.append(e)
+            e2m = [R[(name, s_, 2, "te")]["edge"] for s_ in SYMBOLS]
+            best = max(EXN, key=lambda nm: np.nanmean([R[(name, s_, tf, "te")][nm] for s_ in SYMBOLS for tf in ST_TFS]))
+            bv = np.nanmean([R[(name, s_, tf, "te")][best] for s_ in SYMBOLS for tf in ST_TFS])
+            out.append(f"- **{name}**: TRAIN edge {row[0]:+.1f} | **TEST edge {row[1]:+.1f}** | 2m TEST " +
+                       " / ".join(f"{s_} {v:+.1f}" for s_, v in zip(SYMBOLS, e2m)) +
+                       f" | best exit on TEST: {best} ({bv:+.2f} ATR per trade)")
+        out += ["", f"### {title} - every chart",
+                "| Version | Chart | Signals/yr | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | " +
+                " | ".join(f"{nm} {pn['te']} (ATR / ~$ per option)" for nm in EXN) + " |",
+                "|---|---|---|---|---|" + "---|" * len(EXN)]
+        for name in names_:
+            for s_ in SYMBOLS:
+                for tf in ST_TFS:
+                    a_, b_ = R[(name, s_, tf, "tr")], R[(name, s_, tf, "te")]
+                    ex = " | ".join(f"{b_[nm]:+.2f} / ${usd(b_[nm], s_, tf):+.0f}" for nm in EXN)
+                    out.append(f"| {name} | {s_} {tf}m | {(a_['per_yr'] + b_['per_yr']) / 2:.0f} | {a_['edge']:+.1f} | **{b_['edge']:+.1f}** | {ex} |")
+        return out + [""]
+
+    md = [f"# SUPER + GAP & GO TEST - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}. SUPER: stretch >= {SUP_GAP} ATR, TTM dip >= {SUP_DROP} ATR. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip, +6 = ~56% vs 44%). TRAIN = "
+          f"{pn['tr']}, TEST = {pn['te']}. Exits: opposite color starts / hold to 15:55 / +2-1 bracket, 3 ATR safety stop, in ATR per "
+          "trade. **~$ per option** = rough: ATR result x today's chart ATR x 0.6 delta x 100 - $2 costs (no time decay).", ""]
+    md += block("SUPER LONG / SHORT timing", [v[0] for v in VARS])
+    md += block("GAP & GO versions", [v[0] for v in GAP_VARS])
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/super_{stamp}.md", f"{OUT}/super_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
 
 
 if __name__ == "__main__":
