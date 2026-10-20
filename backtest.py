@@ -1,5 +1,8 @@
 """
-TREND FLIP STOPS & TARGETS (MODE=brackets, the default) - every target/stop combination (+1/-1 ... +3/-1, wide stops,
+TREND LINE STUDY (MODE=study, the default) - line anatomy, 4 entry events (+ faded) on 1/2/3/5m, ~30 conditions
+  (TTM squeeze, Vix Fix levels, every timeframe's agreement, price action), confluence picked on 2020-23 and checked on
+  2024-now, and exits (time, color, warning, TTM peak/zero, bracket, trailing, hold).
+TREND FLIP STOPS & TARGETS (MODE=brackets) - every target/stop combination (+1/-1 ... +3/-1, wide stops,
   no stop) for v3.0 and the leads (higher-timeframe agreement, gap and go, yesterday's breakout), vs a coin flip.
 TREND FLIP EXPLORE (MODE=explore) - timeframes 1/2/3/5/15m x line settings, faded flips, which
   timeframes should agree, and other setups (ORB, VWAP reclaim, yesterday's high/low, gap fade), graded entry-only
@@ -48,7 +51,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "brackets").strip().lower() or "brackets"
+MODE = os.getenv("MODE", "study").strip().lower() or "study"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -338,6 +341,8 @@ def main():
         return explore_main()
     if MODE == "brackets":
         return brackets_main()
+    if MODE == "study":
+        return study_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -1732,6 +1737,588 @@ def brackets_main():
     if summ:
         with open(summ, "a") as f:
             f.write(text + "\n")
+
+
+# ================================================================ TREND LINE STUDY (MODE=study, the default)
+# Everything about the Trend Flip line on 1/2/3/5m charts, SPY + QQQ, 2020-now.
+#  1. Line anatomy: how long green / red runs last, how many are chop, how far price moves during them.
+#  2. Entry events (each also FADED): line turns green/red | red(pink) ends -> long, green(blue) ends -> short |
+#     pink appears -> long, blue appears -> short | strong color returns after a warning.
+#  3. ~30 conditions at every event: TTM squeeze state, TTM momentum size/slope/color/zero-cross, Vix Fix fear/greed
+#     level, agreement of every other timeframe (1/2/3/5/15/30/60m), candle body/range, VWAP distance, slow-EMA slope,
+#     previous run length, time of day, quiet day, gap and day direction, volatility.
+#  4. Every event is graded BOTH ways (long and short) over the next 30 candles, so the coin flip is exact:
+#     edge = (+1-before-1 rate your way - the same for the other way) / 2, in percentage points.
+#  5. Confluence: up to 3 conditions picked on 2020-23 ONLY (best edge, enough trades), checked on 2024-now.
+#  6. Exits for the winners: time, line color ends, opposite color, warning color, TTM momentum peak / zero cross,
+#     +2/-1 bracket, 1 ATR trailing stop, hold to 15:55 (all with a 3 ATR safety stop).
+ST_TFS = [int(x) for x in os.getenv("ST_TFS", "1,2,3,5").split(",")]
+ST_HTFS = [1, 2, 3, 5, 15, 30, 60]
+WIN = 30
+EVENTS = ["Line turns GREEN (long) / RED (short)", "RED or PINK ends -> long / GREEN or BLUE ends -> short",
+          "PINK appears -> long / BLUE appears -> short", "Strong color returns after a warning"]
+EV_SHORT = ["Turns green/red", "Red/pink ends", "Pink/blue appears", "Strong again"]
+
+
+def linreg_last(y, n=20):
+    """Pine ta.linreg(y, n, 0): value of the least-squares line at the newest point of each window."""
+    y = np.asarray(y, dtype=float)
+    out = np.full(len(y), np.nan)
+    if len(y) < n:
+        return out
+    x = np.arange(n, dtype=float)
+    xm = x.mean()
+    sxx = ((x - xm) ** 2).sum()
+    yy = np.nan_to_num(y)
+    sy = np.convolve(yy, np.ones(n), "valid")
+    sxy = np.convolve(yy, x[::-1], "valid")        # sum_k x_k * y_(t-n+1+k)
+    slope = (sxy - xm * sy) / sxx
+    inter = sy / n - slope * xm
+    vals = inter + slope * (n - 1)
+    bad = pd.Series(np.isnan(y)).rolling(n).max().to_numpy()[n - 1:] > 0
+    vals[bad] = np.nan
+    out[n - 1:] = vals
+    return out
+
+
+def ttm_waves(m, keep=500):
+    """Like the TTM Stretch Bands pane: typical (median) wave max per side from FINISHED waves only, wave age,
+    and fresh turns (cyan->blue top / red->yellow bottom) on the last 2 bars."""
+    from collections import deque
+    n = len(m)
+    typ = np.full(n, np.nan)
+    age = np.zeros(n, dtype=np.int64)
+    up, dn = deque(maxlen=keep), deque(maxlen=keep)
+    med_up = med_dn = np.nan
+    side, start, wmax = 0, 0, 0.0
+    for i in range(n):
+        v = m[i]
+        if np.isnan(v):
+            continue
+        ns = 1 if v > 0 else -1
+        if ns != side:
+            if side == 1 and i - start >= 2:
+                up.append(wmax)
+                med_up = float(np.median(up))
+            elif side == -1 and i - start >= 2:
+                dn.append(wmax)
+                med_dn = float(np.median(dn))
+            side, start, wmax = ns, i, 0.0
+        wmax = max(wmax, abs(v))
+        typ[i] = med_up if ns == 1 else med_dn
+        age[i] = i - start
+    m1, m2 = np.r_[np.nan, m[:-1]], np.r_[np.nan, np.nan, m[:-2]]
+    top = (m1 > 0) & (m1 > m2) & (m <= m1)
+    bot = (m1 < 0) & (m1 < m2) & (m >= m1)
+    top2, bot2 = top | np.r_[False, top[:-1]], bot | np.r_[False, bot[:-1]]
+    turn = np.where(bot2, 1, np.where(top2, -1, 0))   # +1 = bottom turn (good for longs), -1 = top turn
+    return typ, age, turn
+
+
+def run_lengths(st):
+    """Current run length (bars, incl. this one) and the previous run's length + value, for every bar."""
+    st = np.asarray(st)
+    n = len(st)
+    cur = np.ones(n, dtype=np.int64)
+    prev_len = np.zeros(n, dtype=np.int64)
+    prev_val = np.zeros(n, dtype=np.int64)
+    pl, pv = 0, 0
+    for i in range(1, n):
+        if st[i] == st[i - 1]:
+            cur[i] = cur[i - 1] + 1
+        else:
+            pl, pv = cur[i - 1], st[i - 1]
+        prev_len[i], prev_val[i] = pl, pv
+    return cur, prev_len, prev_val
+
+
+def study_arrays(df, df1, df1x, tf):
+    ind = indicators(df, 13, 34, True)
+    o, h, l, c, a, st, hm = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["st"], ind["hm"]
+    fadeL = (st == 1) & ~ind["strongL"]
+    fadeS = (st == -1) & ~ind["strongS"]
+    color = np.where(st == 1, np.where(fadeL, 1, 2), np.where(st == -1, np.where(fadeS, -1, -2), 0))
+    cs, hs, ls = df["close"], df["high"], df["low"]
+    # TTM squeeze (LazyBear): BB 20/2 inside KC 20/1.5 ; momentum = linreg(close - avg(avg(HH20, LL20), SMA20), 20)
+    basis = cs.rolling(20).mean()
+    dev = 2.0 * cs.rolling(20).std(ddof=0)
+    pc = cs.shift(1)
+    tr = pd.concat([hs - ls, (hs - pc).abs(), (ls - pc).abs()], axis=1).max(axis=1)
+    rma = tr.rolling(20).mean()
+    sq_on = ((basis - dev) > (basis - 1.5 * rma)) & ((basis + dev) < (basis + 1.5 * rma))
+    sq_on = sq_on.fillna(False).to_numpy()
+    mid = ((hs.rolling(20).max() + ls.rolling(20).min()) / 2 + basis) / 2
+    mom = linreg_last((cs - mid).to_numpy(), 20)
+    mom_prev = np.r_[np.nan, mom[:-1]]
+    since_sq = bars_since(sq_on)
+    sq_state = np.where(sq_on, "in squeeze", np.where(since_sq <= 3, "fired 0-3 bars ago",
+                                                       np.where(since_sq <= 10, "fired 4-10 bars ago", "no squeeze in 10+ bars")))
+    sgn = np.sign(np.nan_to_num(mom))
+    cross_dir = np.zeros(len(c), dtype=np.int64)
+    for k in (1, 2, 3):
+        prev = np.r_[[0] * k, sgn[:-k]]
+        cross_dir = np.where((cross_dir == 0) & (sgn != 0) & (prev != 0) & (prev != sgn), sgn, cross_dir)
+    # Vix Fix fear (wvf) / greed (wvi) and their level vs the spike line
+    hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+    wvf = (hc22 - ls) / hc22 * 100
+    wvi = (hs - lc22) / lc22 * 100
+
+    def ratio(w):
+        line = np.minimum(w.rolling(20).mean() + 2 * w.rolling(20).std(ddof=0), w.rolling(50).max() * 0.85)
+        return (w / line.replace(0, np.nan)).to_numpy()
+    cur_len, prev_len, prev_val = run_lengths(st)
+    typ, wage, wturn = ttm_waves(mom / a)
+    lv = daily_levels(df1, df)
+    datr = lv["datr"].to_numpy()
+    yr = ((lv["pdh"] - lv["pdl"]) / lv["datr"]).to_numpy()
+    es = cs.ewm(span=34, adjust=False).mean().to_numpy()
+    ef = cs.ewm(span=13, adjust=False).mean().to_numpy()
+    a_norm = pd.Series(a).ewm(span=20 * int(390 / tf), adjust=False).mean().shift(1).to_numpy()
+    F = dict(
+        mom=mom / a, mslope=(mom - mom_prev) / a, cross_dir=cross_dir, sq_state=sq_state,
+        fear_ratio=ratio(wvf), greed_ratio=ratio(wvi), fear_raw=wvf.to_numpy(), greed_raw=wvi.to_numpy(),
+        fear_ago=bars_since(ind["fear"]), greed_ago=bars_since(ind["greed"] & ~ind["fear"]),
+        fear_n=(wvf / wvf.rolling(50).max() * 100).to_numpy(), greed_n=(wvi / wvi.rolling(50).max() * 100).to_numpy(),
+        stretch=np.abs(mom / a) / typ, wave_age=wage, turn=wturn,
+        vwap=(c - ind["vwap"]) / a, gap=(lv["dopen"].to_numpy() - lv["pdc"].to_numpy()) / datr,
+        daymove=(c - lv["dopen"].to_numpy()) / datr, es_slope=(es - np.r_[[np.nan] * 5, es[:-5]]) / a,
+        body=(c - o) / a, crange=(h - l) / a, spread=(ef - es) / a, yrange=yr, atr_ratio=a / a_norm,
+        cur_len=cur_len, prev_len=prev_len,
+        tod=np.where(hm < 1030, "9:35-10:30", np.where(hm < 1200, "10:30-12:00", np.where(hm < 1400, "12:00-14:00", "14:00-15:30"))))
+    for m in ST_HTFS:
+        if m != tf:
+            F[f"agree_{m}"] = tf_state_at_close(df1x, df.index, tf, m)
+    return ind, color, F, mom
+
+
+def find_events(st, color, hm):
+    prev_st = np.r_[0, st[:-1]]
+    prev_c = np.r_[0, color[:-1]]
+    win = (hm >= 935) & (hm < 1530)
+    ev = []
+    e0 = np.where((st != 0) & (st != prev_st), st, 0)
+    e1 = np.where((prev_st == -1) & (st != -1), 1, np.where((prev_st == 1) & (st != 1), -1, 0))
+    e2 = np.where((color == -1) & (prev_c == -2), 1, np.where((color == 1) & (prev_c == 2), -1, 0))
+    e3 = np.where((color == 2) & (prev_c == 1), 1, np.where((color == -2) & (prev_c == -1), -1, 0))
+    for k, e in enumerate((e0, e1, e2, e3)):
+        idx = np.nonzero(win & (e != 0))[0]
+        ev.append((k, idx, e[idx]))
+    return ev
+
+
+def grade_two_sided(ind, idx, flat=1555):
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    out = np.full((len(idx), 7), np.nan)   # hitL, hitS, r2L, r2S, mfeL, mfeS, valid
+    for q, i in enumerate(idx):
+        e = i + 1
+        if e >= n or day[e] != day[i] or hm[e] >= flat or not a[i] or np.isnan(a[i]):
+            continue
+        j = e
+        last = min(n - 1, e + WIN - 1)
+        while j < last and day[j + 1] == day[e] and hm[j + 1] < flat:
+            j += 1
+        en, at = o[e], a[i]
+        up = (h[e:j + 1] - en) / at
+        dn = (en - l[e:j + 1]) / at
+        fin = (c[j] - en) / at
+
+        def first(x, v):
+            k = np.nonzero(x >= v)[0]
+            return k[0] if len(k) else 10**9
+        u1, d1, u2, d2 = first(up, 1), first(dn, 1), first(up, 2), first(dn, 2)
+        hitL = 1.0 if u1 < d1 else 0.0
+        hitS = 1.0 if d1 < u1 else 0.0
+        r2L = 2.0 if u2 < d1 else (-1.0 if d1 <= u2 and d1 < 10**9 else fin)
+        r2S = 2.0 if d2 < u1 else (-1.0 if u1 <= d2 and u1 < 10**9 else -fin)
+        out[q] = (hitL, hitS, r2L, r2S, up.max(), dn.max(), 1)
+    return out
+
+
+def align(E, side):
+    """Features as seen from the trade's side (+ = in your favor)."""
+    s = side.astype(float)
+    A = pd.DataFrame(index=E.index)
+    A["TTM momentum size (ATR, + = your way)"] = E["mom"] * s
+    A["TTM momentum slope (ATR, + = turning your way)"] = E["mslope"] * s
+    mw, ms = A.iloc[:, 0], A.iloc[:, 1]
+    A["TTM momentum color (vs your trade)"] = np.where(mw > 0, np.where(ms > 0, "with you + rising (cyan for longs)", "with you + fading (blue for longs)"),
+                                                       np.where(ms < 0, "against you + falling (red for longs)", "against you + turning (yellow for longs)"))
+    A["TTM squeeze"] = E["sq_state"]
+    A["TTM momentum crossed zero your way in last 3 bars"] = np.where(E["cross_dir"].to_numpy() * s > 0, "yes", "no")
+    A["Vix Fix spike level YOUR way (fear before long / greed before short; 1 = spike line)"] = np.where(s > 0, E["fear_ratio"], E["greed_ratio"])
+    A["Vix Fix spike level AGAINST you (1 = spike line)"] = np.where(s > 0, E["greed_ratio"], E["fear_ratio"])
+    A["Vix Fix raw number YOUR way"] = np.where(s > 0, E["fear_raw"], E["greed_raw"])
+    A["VIX FIX pane bar YOUR way (0-100 as on your pane; red fear for longs, blue greed for shorts)"] = np.where(s > 0, E["fear_n"], E["greed_n"])
+    A["VIX FIX pane bar AGAINST you (0-100)"] = np.where(s > 0, E["greed_n"], E["fear_n"])
+    A["TTM stretch vs typical wave (1 = median full stretch; + = momentum your way, - = against)"] = np.sign(E["mom"].to_numpy() * s) * E["stretch"].to_numpy()
+    A["TTM wave age (bars since momentum crossed zero)"] = E["wave_age"].astype(float)
+    tv = E["turn"].to_numpy() * s
+    A["TTM turn in the last 2 bars"] = np.where(tv > 0, "turned YOUR way (red>yellow before a long)", np.where(tv < 0, "turned AGAINST you (cyan>blue before a long)", "no fresh turn"))
+    A["Candles since a Vix Fix spike YOUR way"] = np.where(s > 0, E["fear_ago"], E["greed_ago"]).astype(float)
+    A["Distance from VWAP (ATR, + = your side)"] = E["vwap"] * s
+    A["Opening gap (daily ATR, + = your way)"] = E["gap"] * s
+    A["Day's move so far (daily ATR, + = your way)"] = E["daymove"] * s
+    A["Slow EMA 34 slope (ATR per 5 bars, + = your way)"] = E["es_slope"] * s
+    A["Signal candle body (ATR, + = your way)"] = E["body"] * s
+    A["Signal candle range (ATR)"] = E["crange"]
+    A["Fast-slow EMA gap (ATR, + = your way)"] = E["spread"] * s
+    A["Yesterday's range (daily ATR; low = quiet day)"] = E["yrange"]
+    A["Volatility now vs normal (ATR ratio)"] = E["atr_ratio"]
+    A["Length of the current color run (bars)"] = E["cur_len"].astype(float)
+    A["Length of the previous color run (bars)"] = E["prev_len"].astype(float)
+    A["Time of day"] = E["tod"]
+    for m in ST_HTFS:
+        col = f"agree_{m}"
+        if col in E:
+            v = E[col].to_numpy(dtype=float) * s
+            A[f"{'1h' if m == 60 else str(m) + 'm'} trend"] = np.where(np.isnan(E[col].to_numpy(dtype=float)), None,
+                                                                      np.where(v > 0, "agrees", "disagrees"))
+    A["edge"] = 50.0 * (np.where(s > 0, E["hitL"], E["hitS"]) - np.where(s > 0, E["hitS"], E["hitL"]))
+    A["edge_r2"] = 0.5 * (np.where(s > 0, E["r2L"], E["r2S"]) - np.where(s > 0, E["r2S"], E["r2L"]))
+    A["hit"] = 100 * np.where(s > 0, E["hitL"], E["hitS"])
+    A["mfe"] = np.where(s > 0, E["mfeL"], E["mfeS"])
+    for k in ("sym", "tf", "per", "t", "ev"):
+        A[k] = E[k].to_numpy()
+    return A
+
+
+def rules_for(A, tr_mask):
+    """Candidate conditions: category == value, or numeric >= / <= TRAIN quintile cuts."""
+    out = []
+    skip = {"edge", "edge_r2", "hit", "mfe", "sym", "tf", "per", "t", "ev"}
+    for col in A.columns:
+        if col in skip:
+            continue
+        v = A[col]
+        if not pd.api.types.is_numeric_dtype(v):
+            for val in sorted(set(v[tr_mask].dropna())):
+                out.append((f"{col} = {val}", (v == val).to_numpy()))
+        else:
+            x = v.to_numpy(dtype=float)
+            qs = np.unique(np.round(np.nanquantile(x[tr_mask], [0.2, 0.4, 0.6, 0.8]), 3))
+            for q in qs:
+                out.append((f"{col} >= {q:g}", np.nan_to_num(x, nan=-1e18) >= q))
+                out.append((f"{col} <= {q:g}", np.nan_to_num(x, nan=1e18) <= q))
+    return out
+
+
+def cell_edges(A, mask, by=("sym", "per")):
+    g = A[mask].groupby(list(by))["edge"]
+    return g.mean(), g.count(), g.std(ddof=1)
+
+
+def study_exits(ind, color, mom, idx, side, flat=1555):
+    """ATR result of each exit rule for given entries (entry = next open, 3 ATR safety stop, flat 15:55)."""
+    o, h, l, c, a, hm, day, st = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["st"]
+    n = len(o)
+    names = ["Time 5 candles", "Time 10 candles", "Time 15 candles", "Time 30 candles", "Line leaves your color",
+             "Opposite color starts", "Warning color (blue/pink) or color ends", "TTM momentum peaks (turns against you)",
+             "TTM momentum crosses zero against you", "+2 / -1 ATR bracket", "1 ATR trailing stop (on closes)", "Hold to 15:55"]
+    res = np.full((len(idx), len(names)), np.nan)
+    momp = np.r_[np.nan, mom[:-1]]
+    for q, (i, sd) in enumerate(zip(idx, side)):
+        e = i + 1
+        if e >= n or day[e] != day[i] or hm[e] >= flat or not a[i] or np.isnan(a[i]):
+            continue
+        en, at = o[e], a[i]
+        stop = en - sd * 3 * at
+        best = en
+        done = [False] * len(names)
+        j = e
+        while True:
+            last = (j + 1 >= n) or day[j + 1] != day[e] or hm[j + 1] >= flat
+            held = j - e + 1
+            hit_stop = (l[j] <= stop) if sd == 1 else (h[j] >= stop)
+            stop_px = min(o[j], stop) if sd == 1 else max(o[j], stop)
+            best = max(best, c[j]) if sd == 1 else min(best, c[j])
+            r_close = sd * (c[j] - en) / at
+            for k in range(len(names)):
+                if done[k]:
+                    continue
+                if k == 9:   # bracket +2/-1 (intrabar, stop first)
+                    up = sd * ((h[j] if sd == 1 else l[j]) - en) / at
+                    dn = sd * (en - (l[j] if sd == 1 else h[j])) / at
+                    if dn >= 1:
+                        res[q, k], done[k] = -1.0, True
+                    elif up >= 2:
+                        res[q, k], done[k] = 2.0, True
+                    elif last:
+                        res[q, k], done[k] = r_close, True
+                    continue
+                if hit_stop:
+                    res[q, k], done[k] = sd * (stop_px - en) / at, True
+                    continue
+                cond = False
+                if k <= 3:
+                    cond = held >= (5, 10, 15, 30)[k]
+                elif k == 4:
+                    cond = st[j] != sd
+                elif k == 5:
+                    cond = st[j] == -sd
+                elif k == 6:
+                    cond = color[j] != 2 * sd
+                elif k == 7:
+                    cond = held >= 2 and sd * (mom[j] - momp[j]) < 0
+                elif k == 8:
+                    cond = sd * mom[j] < 0 and held >= 2
+                elif k == 10:
+                    cond = sd * (best - c[j]) >= at
+                if cond or last:
+                    res[q, k], done[k] = r_close, True
+            if all(done) or last:
+                break
+            j += 1
+    return names, res
+
+
+def study_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rows, anat, keep = [], [], {}
+    years = {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        df1x = ext_1m(df1)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind, color, F, mom = study_arrays(df, df1, df1x, tf)
+            st, hm, c, a = ind["st"], ind["hm"], ind["c"], ind["atr"]
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            years[(sym, tf, "tr")] = max((dates < split.date()).sum() / 252.0, 1e-9)
+            years[(sym, tf, "te")] = max((dates >= split.date()).sum() / 252.0, 1e-9)
+            # ---- line anatomy (runs of green / red that start in RTH)
+            cur, _, _ = run_lengths(st)
+            ends = np.nonzero(np.r_[st[1:] != st[:-1], True])[0]
+            for e_ in ends:
+                ln = int(cur[e_])
+                s0 = e_ - ln + 1
+                if st[e_] == 0 or not rth[s0] or s0 == 0:
+                    continue
+                move = st[e_] * (c[e_] - c[s0]) / a[s0] if a[s0] else np.nan
+                best = ((ind["h"][s0:e_ + 1].max() - c[s0]) if st[e_] == 1 else (c[s0] - ind["l"][s0:e_ + 1].min())) / a[s0]
+                anat.append((sym, tf, "GREEN" if st[e_] == 1 else "RED", ln, ln * tf, move, best))
+            # ---- events
+            for k, idx, side in find_events(st, color, hm):
+                g = grade_two_sided(ind, idx)
+                ok = ~np.isnan(g[:, 6])
+                idx, side, g = idx[ok], side[ok], g[ok]
+                E = pd.DataFrame({key: (val[idx] if isinstance(val, np.ndarray) else np.asarray(val)[idx]) for key, val in F.items()})
+                E["hitL"], E["hitS"], E["r2L"], E["r2S"], E["mfeL"], E["mfeS"] = g[:, 0], g[:, 1], g[:, 2], g[:, 3], g[:, 4], g[:, 5]
+                E["side"] = side
+                E["sym"], E["tf"], E["ev"] = sym, tf, k
+                E["t"] = df.index[idx]
+                E["per"] = np.where(E["t"] < split, "tr", "te")
+                E["i"] = idx
+                rows.append(E)
+            keep[(sym, tf)] = (ind, color, mom)
+            print(f"  {sym} {tf}m: {len(df):,} candles ({time.time() - t0:.0f}s)", flush=True)
+        del df1, df1x
+    E = pd.concat(rows, ignore_index=True)
+    cells = [(s_, p_) for s_ in SYMBOLS for p_ in ("tr", "te")]
+    pname = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+
+    def fmt_cells(m, cnt=None):
+        return " | ".join((f"{m.get(c_, np.nan):+.1f}" if c_ in m.index else "-") for c_ in cells)
+
+    md = [f"# TREND LINE STUDY - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY - no orders. Runtime {{RT}} min.",
+          "**Edge** = how much more often price went +1 ATR YOUR way before 1 ATR against, than the other way, at the same moment "
+          "(percentage points, over the next 30 candles; 0 = coin flip). Half of the difference, so +5 means e.g. 55% vs 45%. "
+          "**R** = the same idea for a +2 / -1 ATR bracket, in ATR per trade. "
+          f"TRAIN = {pname['tr']} (everything is picked here). TEST = {pname['te']} (never used to pick).", ""]
+
+    # ---- 1. anatomy
+    AN = pd.DataFrame(anat, columns=["sym", "tf", "col", "bars", "mins", "move", "best"])
+    md += ["## 1. Line anatomy - how long green and red runs last (runs starting 9:30-16:00)",
+           "| Chart | Color | Runs | Median length | 80% are shorter than | Chop (2 bars or less) | 10+ bars | Avg move start->end (ATR) | Avg best move (ATR) |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for tf in ST_TFS:
+        for col in ("GREEN", "RED"):
+            x = AN[(AN["tf"] == tf) & (AN["col"] == col)]
+            if len(x) == 0:
+                continue
+            md.append(f"| {tf}m | {col} | {len(x):,} | {x['bars'].median():.0f} bars ({x['mins'].median():.0f} min) | "
+                      f"{x['bars'].quantile(0.8):.0f} bars ({x['mins'].quantile(0.8):.0f} min) | {100 * (x['bars'] <= 2).mean():.0f}% | "
+                      f"{100 * (x['bars'] >= 10).mean():.0f}% | {x['move'].mean():+.2f} | {x['best'].mean():.2f} |")
+    md.append("")
+
+    # ---- 2. events baseline
+    md += ["## 2. The entry events by themselves (edge per cell: " + " | ".join(f"{s_} {pname[p_]}" for s_, p_ in cells) + "). FADED = the same numbers with the sign flipped.",
+           "| Event | Direction | Chart | Events/yr per symbol | Edge per cell | R (+2/-1) per cell |", "|---|---|---|---|---|---|"]
+    variants = []
+    for k in range(4):
+        for faded in (False, True):
+            variants.append((k, faded))
+    for k, faded in [v for v in variants if not v[1]]:
+        sub = E[E["ev"] == k]
+        A = align(sub, -sub["side"].to_numpy() if faded else sub["side"].to_numpy())
+        for tf in ST_TFS:
+            m = A["tf"] == tf
+            e_ = A[m].groupby(["sym", "per"])["edge"].mean()
+            r_ = A[m].groupby(["sym", "per"])["edge_r2"].mean()
+            n_yr = np.mean([((A["tf"] == tf) & (A["sym"] == s_)).sum() / (years[(s_, tf, "tr")] + years[(s_, tf, "te")]) for s_ in SYMBOLS])
+            md.append(f"| {EV_SHORT[k]} | {'FADED' if faded else 'as is'} | {tf}m | {n_yr:.0f} | {fmt_cells(e_)} | "
+                      + " | ".join(f"{r_.get(c_, np.nan):+.3f}" for c_ in cells) + " |")
+    md.append("")
+
+    # ---- 3. single conditions + 4. confluence, per event variant
+    summary, conf_rules = [], {}
+    for k, faded in variants:
+        sub = E[E["ev"] == k]
+        A = align(sub, -sub["side"].to_numpy() if faded else sub["side"].to_numpy()).reset_index(drop=True)
+        tr = (A["per"] == "tr").to_numpy()
+        te = ~tr
+        base_tr, base_te = A.loc[tr, "edge"].mean(), A.loc[te, "edge"].mean()
+        cand = rules_for(A, tr)
+        N0 = tr.sum()
+        singles = []
+        for nm, mk in cand:
+            ntr = (mk & tr).sum()
+            if ntr < max(0.10 * N0, 200):
+                continue
+            etr, ete = A.loc[mk & tr, "edge"].mean(), A.loc[mk & te, "edge"].mean()
+            ce = A[mk].groupby(["sym", "per"])["edge"].mean()
+            ctf = A[mk].groupby(["tf", "per"])["edge"].mean()
+            tf_ok = sum(1 for t_ in ST_TFS if ctf.get((t_, "tr"), -1) > 0 and ctf.get((t_, "te"), -1) > 0)
+            singles.append(dict(nm=nm, mk=mk, etr=etr, ete=ete, share=100 * ntr / N0, ce=ce,
+                                pos=int(sum(ce.get(c_, -1) > 0 for c_ in cells)), tf_ok=tf_ok))
+        # greedy confluence on TRAIN
+        cur = np.ones(len(A), dtype=bool)
+        steps = []
+        for step in range(3):
+            best = None
+            for nm, mk in cand:
+                m2 = cur & mk
+                ntr = (m2 & tr).sum()
+                if ntr < max(0.08 * N0, 300):
+                    continue
+                g = A.loc[m2 & tr]
+                cc = g.groupby(["sym", "tf"])["edge"].mean()
+                if (cc <= 0).any():
+                    continue                                  # must help on every chart in TRAIN
+                sc = g["edge"].mean()
+                if best is None or sc > best[0]:
+                    best = (sc, nm, m2)
+            if best is None or (steps and best[0] < steps[-1]["etr"] + 0.3):
+                break
+            cur = best[2]
+            steps.append(dict(nm=best[1], etr=best[0], ete=A.loc[cur & te, "edge"].mean(), mask=cur.copy(),
+                              ntr=(cur & tr).sum(), nte=(cur & te).sum()))
+        title = f"{EVENTS[k]}{' - FADED' if faded else ''}"
+        conf_rules[(k, faded)] = (title, steps, A)
+        if steps:
+            fm_ = steps[-1]["mask"]
+            ce = A[fm_].groupby(["sym", "per"])["edge"].mean()
+            ctf = A[fm_ & te].groupby(["sym", "tf"])["edge"].mean()
+            se = A.loc[fm_ & te, "edge"].std(ddof=1) / np.sqrt(max((fm_ & te).sum(), 1))
+            summary.append(dict(title=title, k=k, faded=faded, steps=steps, base_tr=base_tr, base_te=base_te, ce=ce,
+                                te_charts=int((ctf > 0).sum()), te_n=len(ctf), z=steps[-1]["ete"] / se if se > 0 else 0,
+                                r2=A.loc[fm_ & te, "edge_r2"].mean()))
+        singles.sort(key=lambda x: -x["etr"])
+        keep[("singles", k, faded)] = (singles, base_tr, base_te)
+
+    # ---- answer block
+    summary.sort(key=lambda x: -x["steps"][-1]["ete"])
+    for x in summary:
+        x["real"] = bool(x["steps"][-1]["ete"] > 0 and x["te_charts"] >= x["te_n"] - 1 and x["z"] >= 2)
+    real = [x for x in summary if x["real"]]
+    top = ["## The answer in 30 seconds",
+           f"- **Recipes that held up on {pname['te']} (never seen): {len(real)} of {len(summary)}**" +
+           ("" if real else " - none of the trend-line recipes held up on new data."),
+           "- Luck reference: the same search on RANDOM price data found recipes with TRAIN edge about +2 to +2.5 that "
+           "fell to about 0 (or below) on TEST. A real recipe needs a clearly positive TEST edge on nearly every chart."]
+    for x in summary[:8]:
+        st_ = x["steps"]
+        top.append(f"- **{x['title']}**: " + " AND ".join(s_["nm"] for s_ in st_) +
+                   f" -> TRAIN edge {st_[-1]['etr']:+.1f} (event alone {x['base_tr']:+.1f}) | **TEST edge {st_[-1]['ete']:+.1f}** "
+                   f"(event alone {x['base_te']:+.1f}), helped on {x['te_charts']}/{x['te_n']} charts in TEST, R(+2/-1) {x['r2']:+.3f} ATR"
+                   f"{' ✅' if x['real'] else ''}")
+    top.append("")
+
+    # ---- 3. tables of single conditions for each event variant (top 15 by TRAIN + the TTM / Vix / timeframe rows)
+    sec3 = ["## 3. Single conditions (picked by TRAIN edge, checked on TEST)",
+            "Cells = edge for " + " | ".join(f"{s_} {pname[p_]}" for s_, p_ in cells) +
+            ". Charts OK = 1/2/3/5m charts where it helped in BOTH periods. Share = % of events kept."]
+    for k, faded in variants:
+        singles, btr, bte = keep[("singles", k, faded)]
+        sec3 += [f"### {EVENTS[k]}{' - FADED' if faded else ''} (event alone: TRAIN {btr:+.1f}, TEST {bte:+.1f})",
+                 "| Condition | Share kept | TRAIN edge | TEST edge | Edge per cell | Cells > 0 | Charts OK |", "|---|---|---|---|---|---|---|"]
+        shown = singles[:15]
+        if not faded and k == 0:
+            extra = [s_ for s_ in singles if s_ not in shown and any(w in s_["nm"] for w in ("TTM", "Vix", "trend ="))]
+            shown = shown + extra
+        for s_ in shown:
+            sec3.append(f"| {s_['nm']} | {s_['share']:.0f}% | {s_['etr']:+.1f} | **{s_['ete']:+.1f}** | {fmt_cells(s_['ce'])} | {s_['pos']}/4 | {s_['tf_ok']}/{len(ST_TFS)} |")
+        sec3.append("")
+
+    # ---- 4. confluence detail
+    sec4 = ["## 4. Confluence recipes step by step (each step picked on TRAIN; must help every chart in TRAIN)"]
+    for (k, faded), (title, steps, A) in conf_rules.items():
+        if not steps:
+            sec4 += [f"### {title}", "No condition helped every chart in TRAIN.", ""]
+            continue
+        tr = (A["per"] == "tr").to_numpy()
+        sec4 += [f"### {title}", "| Step | Add condition | Events kept TRAIN / TEST | TRAIN edge | TEST edge |", "|---|---|---|---|---|",
+                 f"| 0 | (event alone) | {tr.sum():,} / {(~tr).sum():,} | {A.loc[tr, 'edge'].mean():+.1f} | {A.loc[~tr, 'edge'].mean():+.1f} |"]
+        for n_, s_ in enumerate(steps, 1):
+            sec4.append(f"| {n_} | {s_['nm']} | {s_['ntr']:,} / {s_['nte']:,} | {s_['etr']:+.1f} | **{s_['ete']:+.1f}** |")
+        fm_ = steps[-1]["mask"]
+        pt = A[fm_].groupby(["sym", "tf", "per"])["edge"].agg(["mean", "count"])
+        sec4 += ["", "| Chart | TRAIN edge (n) | TEST edge (n) |", "|---|---|---|"]
+        for s0 in SYMBOLS:
+            for t_ in ST_TFS:
+                a_ = pt.loc[(s0, t_, "tr")] if (s0, t_, "tr") in pt.index else None
+                b_ = pt.loc[(s0, t_, "te")] if (s0, t_, "te") in pt.index else None
+                sec4.append(f"| {s0} {t_}m | {a_['mean']:+.1f} ({int(a_['count'])}) | **{b_['mean']:+.1f}** ({int(b_['count'])}) |"
+                            if a_ is not None and b_ is not None else f"| {s0} {t_}m | - | - |")
+        sec4.append("")
+
+    # ---- 5. exits for the event alone and the top recipes
+    sec5 = ["## 5. Exits (ATR per trade; entry at the next open; 3 ATR safety stop; flat 15:55)",
+            "Columns = " + " | ".join(f"{s_} {pname[p_]}" for s_, p_ in cells) + ". Compare rows within a table."]
+    pick = [(0, False, "Line turns green/red (no filter)", None)] + [(x["k"], x["faded"], x["title"] + " - best recipe", x["steps"][-1]["mask"]) for x in summary[:3]]
+    for k, faded, title, mask in pick:
+        sub = E[E["ev"] == k].reset_index(drop=True)
+        side = (-sub["side"] if faded else sub["side"]).to_numpy()
+        if mask is not None:
+            sub, side = sub[mask].reset_index(drop=True), side[mask]
+        allr, names = [], None
+        for (s0, t_), grp in sub.groupby(["sym", "tf"]):
+            ind, color, mom = keep[(s0, t_)]
+            names, r = study_exits(ind, color, mom, grp["i"].to_numpy(), side[grp.index.to_numpy()])
+            d = pd.DataFrame(r, columns=names)
+            d["sym"], d["per"] = s0, grp["per"].to_numpy()
+            allr.append(d)
+        if not allr:
+            continue
+        R = pd.concat(allr)
+        sec5 += [f"### {title} ({len(R):,} trades)", "| Exit | " + " | ".join(f"{s_} {pname[p_]}" for s_, p_ in cells) + " | Avg |",
+                 "|---|" + "---|" * (len(cells) + 1)]
+        mean_rows = []
+        for nm in names:
+            g = R.groupby(["sym", "per"])[nm].mean()
+            mean_rows.append((nm, g, g.mean()))
+        for nm, g, av in sorted(mean_rows, key=lambda x: -x[2]):
+            sec5.append(f"| {nm} | " + " | ".join(f"{g.get(c_, np.nan):+.3f}" for c_ in cells) + f" | **{av:+.3f}** |")
+        sec5.append("")
+
+    text = "\n".join(md[:3]).replace("{RT}", f"{(time.time() - t0) / 60:.0f}") + "\n" + "\n".join(md[3:4] + top + md[4:] + sec4 + sec3 + sec5)
+    print("\n" + text[:20000])
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/study_{stamp}.md", f"{OUT}/study_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text[:900000] + "\n")
 
 
 if __name__ == "__main__":
