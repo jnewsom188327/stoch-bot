@@ -1,5 +1,10 @@
 """
-TREND FLIP v2.7 - LAST 2 YEARS (MODE=v27, the default) - the exact v2.7 setup from the TradingView boxes
+STOCH SCALP PRO - LAST 2 YEARS (MODE=stoch, the default) - your Stoch Pro v1.2 box on SPY + QQQ 1/2/3/5m:
+  Stoch 14-3-3 hook (was under 20 / over 80 in the last 3 bars, crosses %D, still under / over 50), filters
+  trend (EMA 21/50) / VWAP / 5m trend / price candle, fast 5-3-3 and slow 21-5-5, entry at the next open,
+  3-bar cooldown, 0.02 ATR slippage a side, flat 15:55. Every stop x target x hold time, the hold curve,
+  the edge vs a coin flip, and option money (0DTE ATM like the box, 0DTE 1 strike out, 1DTE) with drawdowns.
+TREND FLIP v2.7 - LAST 2 YEARS (MODE=v27) - the exact v2.7 setup from the TradingView boxes
   (13/34 + VWAP line flip, Vix Fix "After spike" within 10 candles, wait up to 5, entry at the next open,
   2 ATR stop, opposite flip exits, flat 15:55) on SPY + QQQ 1/2/3/5m over the last 2 years.
   Tests every hold time (5-60 candles) + the box's Trail / Hybrid / Color exits, the FILTER LAB filters,
@@ -73,7 +78,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "v27").strip().lower() or "v27"
+MODE = os.getenv("MODE", "stoch").strip().lower() or "stoch"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -371,6 +376,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "stoch":
+        return stoch_main()
     if MODE == "v27":
         return v27_main()
     if MODE == "sides":
@@ -3510,6 +3517,330 @@ def v27_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/v27_{stamp}.md", f"{OUT}/v27_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ STOCH SCALP PRO, LAST 2 YEARS (MODE=stoch)
+def stoch_hook(df, kl, ks, ds, look=3, os_=20.0, ob=80.0):
+    c, h, l = df["close"], df["high"], df["low"]
+    lo, hi = l.rolling(kl).min(), h.rolling(kl).max()
+    k = (100 * (c - lo) / (hi - lo).replace(0, np.nan)).rolling(ks).mean()
+    d = k.rolling(ds).mean()
+    up = (k > d) & (k.shift(1) <= d.shift(1))
+    dn = (k < d) & (k.shift(1) >= d.shift(1))
+    lg = up & (k.rolling(look).min() < os_) & (k < 50)
+    sh = dn & (k.rolling(look).max() > ob) & (k > 50)
+    return np.where(lg.fillna(False), 1, np.where(sh.fillna(False), -1, 0)), k.to_numpy()
+
+
+def stoch_sim(ind, sig, stop=3.0, tp=0.0, maxb=40, cd=3, slip=0.02, flat=1555, tf=1):
+    """Pine f_sim of Stoch Pro v1.2: enter at the open after a signal bar, stop first, then target, then time / 15:55."""
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(o)
+    out = []
+    last_x = -10**9
+    k = 0
+    starts = np.nonzero(sig)[0]
+    free = 0
+    hm_end = (hm // 100 * 60 + hm % 100 + tf)
+    hm_end = (hm_end // 60) * 100 + hm_end % 60
+    while k < len(starts):
+        i = starts[k]
+        k += 1
+        e = i + 1
+        if e < free or e >= n or e - last_x < cd or not a[i] or np.isnan(a[i]):
+            continue
+        sd = int(sig[i])
+        en, ea = o[e], a[i]
+        sl = en - sd * stop * ea
+        tpp = en + sd * tp * ea if tp > 0 else np.nan
+        j = e
+        best = worst = 0.0
+        while True:
+            fav = (h[j] - en) if sd == 1 else (en - l[j])
+            adv = (en - l[j]) if sd == 1 else (h[j] - en)
+            best, worst = max(best, fav), max(worst, adv)
+            oc, px = 0, np.nan
+            if (l[j] <= sl) if sd == 1 else (h[j] >= sl):
+                oc, px = 1, (min(o[j], sl) if sd == 1 else max(o[j], sl))
+            elif not np.isnan(tpp) and ((h[j] >= tpp) if sd == 1 else (l[j] <= tpp)):
+                oc, px = 2, (max(o[j], tpp) if sd == 1 else min(o[j], tpp))
+            elif j - e + 1 >= maxb or (hm_end[j] >= flat and hm[j] < 1600) or j + 1 >= n or day[j + 1] != day[j]:
+                oc, px = 3, c[j]
+            if oc:
+                mv = (sd * (px - en) - 2.0 * slip * ea) / ea
+                out.append((i, e, j, sd, en, px, mv, j - e + 1, best / ea, worst / ea, oc))
+                last_x, free = j, j + 1
+                break
+            j += 1
+    return pd.DataFrame(out, columns=["i", "e", "x", "side", "entry", "exit", "r", "held", "best", "worst", "code"])
+
+
+def opt_money(t, df, iv, tf, p_now, atr_now):
+    """0DTE ATM, 0DTE 1 strike out, 1DTE ATM per contract (Black-Scholes, today's price level, $2 costs) + the box's $."""
+    t = t.copy()
+    if not len(t):
+        for kk in ("atm0", "otm0", "atm1", "box"):
+            t[kk] = []
+        return t
+    mod = (df.index.hour * 60 + df.index.minute).to_numpy()
+    e, x = t["e"].to_numpy(), t["x"].to_numpy()
+    S0, S1 = t["entry"].to_numpy(), t["exit"].to_numpy()
+    call = t["side"].to_numpy() == 1
+    rem0 = np.maximum(960.0 - mod[e], 1.0)
+    rem1 = np.maximum(960.0 - (mod[x] + tf), 0.5)
+    sg = np.nan_to_num(iv[e], nan=0.18)
+    scale = p_now / S0 * 100.0
+    ym = 252.0 * 390.0
+    for kk, K, extra in (("atm0", np.round(S0), 0.0), ("otm0", np.where(call, np.floor(S0) + 1.0, np.ceil(S0) - 1.0), 0.0),
+                         ("atm1", np.round(S0), 390.0)):
+        v0 = bs_price(S0, K, (rem0 + extra) / ym, sg, call)
+        v1 = bs_price(S1, K, (rem1 + extra) / ym, sg, call)
+        t[kk] = (v1 - v0) * scale - COST
+    hrs = (t["held"].to_numpy() * tf) / 60.0
+    t["box"] = 0.5 * t["r"].to_numpy() * atr_now * 100.0 - 8.0 * hrs
+    return t
+
+
+def stoch_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yrs_back = float(os.getenv("STOCH_YEARS", "2"))
+    start = end - timedelta(days=int(365.25 * yrs_back) + 40)
+    t_from = pd.Timestamp(end - timedelta(days=int(365.25 * yrs_back))).tz_convert(NY)
+    half = pd.Timestamp(end - timedelta(days=int(365.25 * yrs_back / 2))).tz_convert(NY)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    STOPS, TPS = [1.0, 1.5, 2.0, 3.0], [0.5, 1.0, 2.0, 3.0, 5.0, 0.0]
+    HOLDS = [5, 10, 15, 20, 30, 40, 48, 60]
+    MAIN = [("YOUR Oct 14 box: stop 3, no target, 40 bars", 3.0, 0.0, 40), ("YOUR Oct 15 box: stop 3, TP 5, 40 bars", 3.0, 5.0, 40),
+            ("v1.2 default: stop 2, no target, 40 bars", 2.0, 0.0, 40)]
+    T, META, EQ, CURVE = {}, {}, {}, {}
+    rng = np.random.default_rng(5)
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 21, 50, False)
+            hm = ind["hm"]
+            c, o_ = df["close"].to_numpy(), df["open"].to_numpy()
+            hh_, ll_ = df["high"].to_numpy(), df["low"].to_numpy()
+            ef = df["close"].ewm(span=21, adjust=False).mean().to_numpy()
+            es = df["close"].ewm(span=50, adjust=False).mean().to_numpy()
+            trU, trD = ef > es, ef < es
+            vwU, vwD = c > ind["vwap"], c < ind["vwap"]
+            h5 = htf_state(df, 21, 50, 5)
+            hU, hD = h5 == 1, h5 == -1
+            rg = hh_ - ll_
+            clv = np.where(rg > 0, (c - ll_) / np.where(rg > 0, rg, 1), 0.5)
+            paU, paD = (c > o_) & (clv >= 0.5), (c < o_) & (clv <= 0.5)
+            inT = (hm >= 935) & (hm < 1530) & (df.index >= t_from)
+            hook, K = stoch_hook(df, 14, 3, 3)
+            hkF, _ = stoch_hook(df, 5, 3, 3)
+            hkS, _ = stoch_hook(df, 21, 5, 5)
+
+            def filt(hk, lvl):
+                L = (hk == 1) & inT
+                S_ = (hk == -1) & inT
+                if lvl == 9:                                   # your switches (v1.2 defaults): trend + price
+                    L, S_ = L & trU & paU, S_ & trD & paD
+                else:
+                    if lvl >= 2:
+                        L, S_ = L & trU, S_ & trD
+                    if lvl >= 3:
+                        L, S_ = L & vwU, S_ & vwD
+                    if lvl >= 4:
+                        L, S_ = L & hU, S_ & hD
+                    if lvl >= 5:
+                        L, S_ = L & paU, S_ & paD
+                return np.where(L, 1, np.where(S_, -1, 0))
+            SIG = {"1 hook": filt(hook, 1), "2 +trend": filt(hook, 2), "3 +VWAP": filt(hook, 3), "4 +5m": filt(hook, 4),
+                   "5 +price": filt(hook, 5), "Fast 5-3-3 (trend + price)": filt(hkF, 9), "Slow 21-5-5 (trend + price)": filt(hkS, 9),
+                   "LIVE: trend + price (your switches)": filt(hook, 9)}
+            live = SIG["LIVE: trend + price (your switches)"]
+            lv = daily_levels(df1, df)
+            iv = (lv["datr"] / lv["pdc"]).to_numpy() / 1.6 * np.sqrt(252.0) * 1.15
+            rth = (hm >= 930) & (hm < 1600)
+            dd_ = np.array(df.index.date)
+            last20 = np.array(sorted(set(dd_[rth])))[-20:]
+            atr_now = float(np.nanmean(ind["atr"][rth & np.isin(dd_, last20)]))
+            p_now = float(ind["c"][rth][-1])
+            days = np.array(sorted(set(dd_[rth & (df.index >= t_from)])))
+            META[(sym, tf)] = dict(atr=atr_now, px=p_now, days=days)
+
+            def run_(sg, stop, tp, mb):
+                t = opt_money(stoch_sim(ind, sg, stop, tp, mb, tf=tf), df, iv, tf, p_now, atr_now)
+                t["time"] = df.index[t["e"].to_numpy()] if len(t) else []
+                return t
+            for nm, sg in SIG.items():
+                T[(sym, tf, "lvl", nm)] = run_(sg, 3.0, 0.0, 40)
+                idx = np.nonzero(sg)[0]
+                g = grade_two_sided(ind, idx)
+                okg = ~np.isnan(g[:, 6])
+                sd, g = sg[idx][okg], g[okg]
+                EQ[(sym, tf, nm)] = float(np.mean(50.0 * (np.where(sd > 0, g[:, 0], g[:, 1]) - np.where(sd > 0, g[:, 1], g[:, 0])))) if len(g) else np.nan
+            for nm, stp, tpp, mb in MAIN:
+                T[(sym, tf, "main", nm)] = run_(live, stp, tpp, mb)
+            rnd = np.where(live != 0, rng.choice([-1, 1], size=len(live)), 0)
+            T[(sym, tf, "main", "COIN FLIP: same entries, random direction (stop 3, 40 bars)")] = run_(rnd, 3.0, 0.0, 40)
+            for stp in STOPS:
+                for tpp in TPS:
+                    T[(sym, tf, "grid", (stp, tpp))] = run_(live, stp, tpp, 40)
+            for mb in HOLDS:
+                T[(sym, tf, "hold", mb)] = run_(live, 3.0, 0.0, mb)
+            # hold curve: every live fire, no stop, same day, measured after 3/6/12/24/48 bars
+            idx = np.nonzero(live)[0]
+            cur = {}
+            for hb in (3, 6, 12, 24, 48):
+                mvs, pks, hts = [], [], []
+                for i in idx:
+                    e, x = i + 1, i + hb
+                    if x >= len(c) or dd_[x] != dd_[i] or np.isnan(ind["atr"][i]) or not ind["atr"][i]:
+                        continue
+                    sd = live[i]
+                    a_ = ind["atr"][i]
+                    en = o_[e]
+                    mvs.append(sd * (c[x] - en) / a_)
+                    pks.append(((hh_[e:x + 1].max() - en) if sd == 1 else (en - ll_[e:x + 1].min())) / a_)
+                    hts.append(((en - ll_[e:x + 1].min()) if sd == 1 else (hh_[e:x + 1].max() - en)) / a_)
+                cur[hb] = (len(mvs), np.mean(mvs) if mvs else np.nan, np.mean(pks) if pks else np.nan,
+                           np.mean(hts) if hts else np.nan, 100 * np.mean(np.array(mvs) > 0) if mvs else np.nan)
+            CURVE[(sym, tf)] = cur
+            print(f"  {sym} {tf}m: {int((live != 0).sum())} live signals ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+
+    charts = [(s_, t_) for s_ in SYMBOLS for t_ in ST_TFS]
+
+    def st(t, sym, tf):
+        n = len(t)
+        if not n:
+            return None
+        r = t["r"].to_numpy()
+        gw, gl = r[r > 0].sum(), -r[r < 0].sum()
+        h1, h2 = t[t["time"] < half], t[t["time"] >= half]
+        yrs = max(len(META[(sym, tf)]["days"]) / 252.0, 1e-9)
+
+        def ddv(col):
+            cu = np.cumsum(t[col].to_numpy())
+            return float(np.max(np.maximum.accumulate(np.r_[0, cu])[1:] - cu))
+        run_, mx = 0, 0
+        for v in (r <= 0):
+            run_ = run_ + 1 if v else 0
+            mx = max(mx, run_)
+        dly = t.groupby(pd.DatetimeIndex(t["time"]).date)["atm0"].sum().reindex(META[(sym, tf)]["days"], fill_value=0.0).to_numpy()
+        return dict(n=n, per_yr=n / yrs, win=100 * (r > 0).mean(), avg=r.mean(), pf=gw / gl if gl > 0 else np.inf,
+                    h1=h1["r"].mean() if len(h1) else np.nan, h2=h2["r"].mean() if len(h2) else np.nan,
+                    atm0=t["atm0"].mean(), otm0=t["otm0"].mean(), atm1=t["atm1"].mean(), box=t["box"].mean(),
+                    y0=t["atm0"].sum() / yrs, dd0=ddv("atm0"), dd1=ddv("atm1"), ddb=ddv("box"),
+                    ddr=float(np.max(np.maximum.accumulate(np.r_[0, np.cumsum(r)])[1:] - np.cumsum(r))),
+                    streak=mx, held=t["held"].mean() * tf, daily=dly)
+
+    S = {k_: st(v, k_[0], k_[1]) for k_, v in T.items()}
+
+    def pool(kind, key):
+        rows = [S[(s_, t_, kind, key)] for s_, t_ in charts if S.get((s_, t_, kind, key))]
+        if not rows:
+            return None
+        n = sum(r_["n"] for r_ in rows)
+        w = lambda f: sum(r_[f] * r_["n"] for r_ in rows) / n
+        return dict(n=n, avg=w("avg"), win=w("win"), atm0=w("atm0"), otm0=w("otm0"), atm1=w("atm1"), box=w("box"),
+                    both=sum(1 for r_ in rows if r_["h1"] > 0 and r_["h2"] > 0), pos0=sum(1 for r_ in rows if r_["atm0"] > 0),
+                    pos1=sum(1 for r_ in rows if r_["atm1"] > 0), nc=len(rows))
+
+    def m_(x):
+        return "-" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{'+' if x >= 0 else '-'}${abs(x):,.0f}"
+
+    p1, p2 = f"{t_from:%Y-%m-%d} to {half:%Y-%m-%d}", f"{half:%Y-%m-%d} to {end:%Y-%m-%d}"
+    md = [f"# STOCH SCALP PRO - LAST {yrs_back:g} YEARS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {t_from:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. Same rules as your Stoch Pro v1.2 box "
+          "(Stoch 14-3-3 hook, LIVE = trend + price switches, entry next open, 3-bar cooldown, 0.02 ATR slippage a side, flat 15:55, "
+          f"one trade at a time). DATA ONLY - no orders. Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"**ATR** = average result per trade in ATR. **Year 1 / Year 2** = {p1} | {p2} (an edge must hold in BOTH). "
+          "**$ per contract**: **0DTE ATM** and **0DTE 1 out** (1 strike out of the money) and **1DTE ATM** = Black-Scholes estimate at "
+          "today's prices incl. time decay and $2 costs; **Box $** = your box's own math (delta 0.50 x move - $8/hr theta). "
+          "**Worst DD** = biggest drop of the running total, 1 contract, every trade taken. Rough: real fills and IV moves differ.", ""]
+    ans = ["## The answer in 30 seconds"]
+    for nm, *_ in MAIN + [("COIN FLIP: same entries, random direction (stop 3, 40 bars)",)]:
+        p_ = pool("main", nm)
+        if p_:
+            ans.append(f"- **{nm}**: {p_['n']} trades | win {p_['win']:.0f}% | **{p_['avg']:+.2f} ATR** | both years + on {p_['both']}/{p_['nc']} charts | "
+                       f"0DTE ATM {m_(p_['atm0'])} | 0DTE 1 out {m_(p_['otm0'])} | 1DTE {m_(p_['atm1'])} | box $ {m_(p_['box'])} per trade")
+    gb = max(((stp, tpp) for stp in STOPS for tpp in TPS), key=lambda k_: pool("grid", k_)["atm0"] if pool("grid", k_) else -1e9)
+    pg = pool("grid", gb)
+    ans.append(f"- **Best stop / target for 0DTE (all charts)**: stop {gb[0]:g} ATR / {'no target' if gb[1] == 0 else f'TP {gb[1]:g} ATR'} -> "
+               f"{m_(pg['atm0'])}/trade ATM, {pg['avg']:+.2f} ATR, positive on {pg['pos0']}/{pg['nc']} charts")
+    hb = max(HOLDS, key=lambda k_: pool("hold", k_)["atm0"] if pool("hold", k_) else -1e9)
+    ph = pool("hold", hb)
+    ans.append(f"- **Best max hold for 0DTE (stop 3, no target)**: {hb} candles -> {m_(ph['atm0'])}/trade, {ph['avg']:+.2f} ATR")
+    pc = []
+    for s_, t_ in charts:
+        cand = [(k_, S[(s_, t_, "grid", k_)]) for k_ in ((a_, b_) for a_ in STOPS for b_ in TPS) if S.get((s_, t_, "grid", k_))]
+        cand = [(k_, x) for k_, x in cand if x["n"] >= 30 and x["h1"] > 0 and x["h2"] > 0 and x["atm0"] > 0]
+        if cand:
+            k_, x = max(cand, key=lambda z: z[1]["atm0"])
+            pc.append(f"{s_} {t_}m: **stop {k_[0]:g} / {'no TP' if k_[1] == 0 else f'TP {k_[1]:g}'}** ({x['win']:.0f}% win, {x['avg']:+.2f} ATR, "
+                      f"0DTE {m_(x['atm0'])}/trade, {m_(x['y0'])}/yr, worst DD {m_(-x['dd0'])})")
+        else:
+            pc.append(f"{s_} {t_}m: nothing made money on 0DTE in both years")
+    ans.append("- **Per chart (best 0DTE stop/target that held up in both years)**: " + " | ".join(pc))
+    ans.append("")
+    lvl = ["## Setup levels (stop 3, no target, 40 bars) - all 8 charts",
+           "| Setup | Trades | Win % | Avg ATR | Charts + both years | 0DTE ATM $ | 1DTE $ | Edge vs coin flip (+1 ATR first) |", "|---|---|---|---|---|---|---|---|"]
+    for nm in SIG:
+        p_ = pool("lvl", nm)
+        if p_:
+            eq = np.nanmean([EQ[(s_, t_, nm)] for s_, t_ in charts])
+            lvl.append(f"| {nm} | {p_['n']} | {p_['win']:.0f}% | **{p_['avg']:+.2f}** | {p_['both']}/{p_['nc']} | {m_(p_['atm0'])} | {m_(p_['atm1'])} | {eq:+.1f} |")
+    lvl.append("")
+    grid = ["## Stop x target on your LIVE fires (40-bar max) - all 8 charts: avg ATR | 0DTE ATM $/trade | win %",
+            "| Stop \\ Target | " + " | ".join("none" if x == 0 else f"{x:g} ATR" for x in TPS) + " |", "|---|" + "---|" * len(TPS)]
+    for stp in STOPS:
+        cells = []
+        for tpp in TPS:
+            p_ = pool("grid", (stp, tpp))
+            cells.append(f"{p_['avg']:+.2f} / {m_(p_['atm0'])} / {p_['win']:.0f}%" + (" ★" if (stp, tpp) == gb else "") if p_ else "-")
+        grid.append(f"| {stp:g} ATR | " + " | ".join(cells) + " |")
+    grid.append("")
+    hold = ["## How long to hold (stop 3, no target) - all 8 charts", "| Max hold (candles) | Trades | Win % | Avg ATR | 0DTE ATM $ | 0DTE 1 out $ | 1DTE $ | Charts + both years |",
+            "|---|---|---|---|---|---|---|---|"]
+    for mb in HOLDS:
+        p_ = pool("hold", mb)
+        if p_:
+            hold.append(f"| {mb} | {p_['n']} | {p_['win']:.0f}% | **{p_['avg']:+.2f}** | {m_(p_['atm0'])} | {m_(p_['otm0'])} | {m_(p_['atm1'])} | {p_['both']}/{p_['nc']} |")
+    hold.append("")
+    cv = ["## Hold curve - every LIVE fire, no stop: average move after N candles (close / best / worst, ATR, win %)",
+          "| Chart | 3 | 6 | 12 | 24 | 48 |", "|---|---|---|---|---|---|"]
+    for s_, t_ in charts:
+        cur = CURVE[(s_, t_)]
+        cv.append(f"| {s_} {t_}m | " + " | ".join(f"{cur[hb_][1]:+.2f} / +{cur[hb_][2]:.2f} / -{cur[hb_][3]:.2f} / {cur[hb_][4]:.0f}%" for hb_ in (3, 6, 12, 24, 48)) + " |")
+    cv.append("")
+    det = ["## Every chart - your two box setups",
+           "| Chart | Setup | Trades/yr | Win % | ATR | PF | Year 1 | Year 2 | 0DTE ATM $ | 0DTE 1 out $ | 1DTE $ | Box $ | 0DTE $/yr | Worst DD 0DTE | Worst DD 1DTE | Losing run | Avg hold |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for s_, t_ in charts:
+        for nm, *_ in MAIN[:2] + [("COIN FLIP: same entries, random direction (stop 3, 40 bars)",)]:
+            x = S.get((s_, t_, "main", nm))
+            if x:
+                det.append(f"| {s_} {t_}m | {nm.split(':')[0]} | {x['per_yr']:.0f} | {x['win']:.0f}% | **{x['avg']:+.2f}** | {x['pf']:.2f} | {x['h1']:+.2f} | {x['h2']:+.2f} | "
+                           f"{m_(x['atm0'])} | {m_(x['otm0'])} | {m_(x['atm1'])} | {m_(x['box'])} | {m_(x['y0'])} | {m_(-x['dd0'])} | {m_(-x['dd1'])} | {x['streak']} | {x['held']:.0f} min |")
+    det.append("")
+    mc = ["## Monte Carlo - 10,000 shuffled years, best 0DTE stop/target on each chart (1 contract, ATM)", MC_HEAD]
+    for s_, t_ in charts:
+        cand = [(k_, S[(s_, t_, "grid", k_)]) for k_ in ((a_, b_) for a_ in STOPS for b_ in TPS) if S.get((s_, t_, "grid", k_))]
+        k_, x = max(cand, key=lambda z: z[1]["atm0"])
+        m = monte_carlo(x["daily"], seed=31 + t_ + (0 if s_ == "SPY" else 100))
+        mc.append(mc_row(f"{s_} {t_}m stop {k_[0]:g} / {'no TP' if k_[1] == 0 else f'TP {k_[1]:g}'}", "0DTE ATM", f"{len(META[(s_, t_)]['days'])} days", m, x["per_yr"]))
+    mc.append("")
+    text = "\n".join(md + ans + lvl + grid + hold + cv + mc + det)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/stoch_{stamp}.md", f"{OUT}/stoch_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
