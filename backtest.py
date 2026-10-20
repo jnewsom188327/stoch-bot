@@ -1,5 +1,7 @@
 """
-SUPER + STOCH / VOLUME / MACD (MODE=plus, the default) - each filter on top of SUPER (dip version): Stoch level and
+FILTER TEST (MODE=plus, the default; PLUS_BASE=v40 (default) or super) - each filter on top of the v4.0 signal
+  (or SUPER): Stoch, volume, MACD, VWAP distance, Vix Fix pane height / spike age, TTM momentum / slope / color / squeeze.
+  Filters on top of SUPER (dip version): Stoch level and
   cross, relative volume (vs last 20, vs time of day, dip volume), MACD histogram size / turn / side of zero.
 TTM + VIX FIX ON THEIR OWN (MODE=solo) - every TTM and Vix Fix signal by itself: turns, turn size,
   squeeze fire, zero cross, first spike bar, streak ends, streak length, bar height on every candle, TTM stretch stats,
@@ -2865,6 +2867,12 @@ PLUS_BUCKETS = {
     "Volume vs same time of day (20-day avg)": [(0, 0.7), (0.7, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 999)],
     "Last 3 candles' volume vs last 20 (the dip's volume)": [(0, 0.7), (0.7, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 999)],
     "MACD histogram your way (ATR)": [(-999, -0.3), (-0.3, -0.1), (-0.1, 0.1), (0.1, 0.3), (0.3, 999)],
+    "Distance from VWAP your side (ATR)": [(-999, -1), (-1, 0), (0, 0.5), (0.5, 1), (1, 2), (2, 999)],
+    "VIX FIX pane bar YOUR way (0-100; red before longs, blue before shorts)": [(0, 20), (20, 40), (40, 60), (60, 80), (80, 95), (95, 101)],
+    "VIX FIX pane bar AGAINST you (0-100)": [(0, 20), (20, 40), (40, 60), (60, 80), (80, 95), (95, 101)],
+    "Candles since a Vix Fix spike your way": [(0, 1), (1, 3), (3, 6), (6, 11), (11, 999)],
+    "TTM momentum your way (ATR)": [(-999, -1), (-1, -0.3), (-0.3, 0.3), (0.3, 1), (1, 2), (2, 999)],
+    "TTM momentum slope your way (ATR per candle)": [(-999, -0.3), (-0.3, -0.1), (-0.1, 0.1), (0.1, 0.3), (0.3, 999)],
 }
 
 
@@ -2903,6 +2911,32 @@ def plus_features(df, ind, idx, side):
         "MACD histogram turning your way": np.where((hist[idx] - histp[idx]) * sd > 0, "yes", "no"),
         "MACD line on your side of zero": np.where(macd[idx] * sd > 0, "yes", "no"),
     }
+    if os.getenv("PLUS_BASE", "v40").lower() == "v40":
+        vw = ind["vwap"]
+        F["Distance from VWAP your side (ATR)"] = (c.to_numpy()[idx] - vw[idx]) / a[idx] * sd
+        hc22, lc22 = c.rolling(22).max(), c.rolling(22).min()
+        wvf, wvi = (hc22 - l) / hc22 * 100, (h - lc22) / lc22 * 100
+        fN, gN = (wvf / wvf.rolling(50).max() * 100).to_numpy(), (wvi / wvi.rolling(50).max() * 100).to_numpy()
+        F["VIX FIX pane bar YOUR way (0-100; red before longs, blue before shorts)"] = np.where(sd > 0, fN[idx], gN[idx])
+        F["VIX FIX pane bar AGAINST you (0-100)"] = np.where(sd > 0, gN[idx], fN[idx])
+        fa, ga = bars_since(ind["fear"]), bars_since(ind["greed"] & ~ind["fear"])
+        F["Candles since a Vix Fix spike your way"] = np.where(sd > 0, fa[idx], ga[idx]).astype(float)
+        basis = c.rolling(20).mean()
+        mid = ((h.rolling(20).max() + l.rolling(20).min()) / 2 + basis) / 2
+        mom = linreg_last((c - mid).to_numpy(), 20)
+        mm = mom / a
+        mmp = np.r_[np.nan, mm[:-1]]
+        F["TTM momentum your way (ATR)"] = mm[idx] * sd
+        F["TTM momentum slope your way (ATR per candle)"] = (mm[idx] - mmp[idx]) * sd
+        mw, ms = mm[idx] * sd, (mm[idx] - mmp[idx]) * sd
+        F["TTM color (vs your trade)"] = np.where(mw > 0, np.where(ms > 0, "cyan-type: with you, rising", "blue-type: with you, fading"),
+                                                  np.where(ms > 0, "yellow-type: against you, turning", "red-type: against you, falling"))
+        dev = 2.0 * c.rolling(20).std(ddof=0)
+        pc = c.shift(1)
+        trr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1).rolling(20).mean()
+        sq = (((basis - dev) > (basis - 1.5 * trr)) & ((basis + dev) < (basis + 1.5 * trr))).fillna(False).to_numpy()
+        ss = bars_since(sq)
+        F["TTM squeeze"] = np.where(sq[idx], "in squeeze", np.where(ss[idx] <= 3, "fired 0-3 candles ago", np.where(ss[idx] <= 10, "fired 4-10 ago", "none in 10+")))
     return F
 
 
@@ -2920,6 +2954,8 @@ def plus_main():
         for tf in ST_TFS:
             df = to_tf(df1, rth_only=False, mins=tf)
             ind, color, mom, ent = super_events(df, 2, "dip")
+            if os.getenv("PLUS_BASE", "v40").lower() == "v40":
+                _, ent = signals(ind, dict(V30, allowL=None))
             idx = np.nonzero(ent)[0]
             side = ent[idx]
             g = grade_two_sided(ind, idx)
@@ -2934,7 +2970,7 @@ def plus_main():
             d["sym"], d["tf"] = sym, tf
             d["per"] = np.where(df.index[idx] < split, "tr", "te")
             rows.append(d)
-            print(f"  {sym} {tf}m: {len(idx)} SUPER signals ({time.time() - t0:.0f}s)", flush=True)
+            print(f"  {sym} {tf}m: {len(idx)} signals ({time.time() - t0:.0f}s)", flush=True)
         del df1
     E = pd.concat(rows, ignore_index=True)
     pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
@@ -2952,14 +2988,15 @@ def plus_main():
         return (f"| {nm} | {100 * mk.mean():.0f}% | {etr:+.1f} | **{ete:+.1f}** | {better}/{len(ctf)} | "
                 f"{g.loc[g['per'] == 'te', 'hold'].mean():+.2f} | {'✅ helps' if helps else ''} |"), (helps, ete - base["te"], nm)
 
-    md = [f"# SUPER + STOCH / VOLUME / MACD - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
-          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. Base = SUPER (dip version). "
+    bname = "v4.0 signal (line flip + Vix Fix spike, as v3.0)" if os.getenv("PLUS_BASE", "v40").lower() == "v40" else "SUPER (dip version)"
+    md = [f"# {bname.split(' (')[0]} + FILTERS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. Base = {bname}. "
           f"DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
           "**Edge** = +1-ATR-your-way-first rate minus the other way, halved (0 = coin flip). **Charts better** = charts where the "
-          f"filtered SUPER beat plain SUPER in TEST ({pn['te']}). **Hold** = ATR per trade held to 15:55 (TEST). "
-          "✅ = beats plain SUPER by 1.0+ in BOTH periods and on 6+ of 8 charts. Luck check: on RANDOM price data, 1 of ~25 "
+          f"filtered signal beat the plain signal in TEST ({pn['te']}). **Hold** = ATR per trade held to 15:55 (TEST). "
+          "✅ = beats the plain signal by 1.0+ in BOTH periods and on 6+ of 8 charts. Luck check: on RANDOM price data, 1 of ~25 "
           "filters passed a looser (0.5) version of this test, so treat a single ✅ with care.", "",
-          f"**Plain SUPER: {len(E):,} signals | TRAIN edge {base['tr']:+.1f} | TEST edge {base['te']:+.1f} | hold to 15:55 {baseh:+.2f} ATR**", ""]
+          f"**Plain {bname}: {len(E):,} signals | TRAIN edge {base['tr']:+.1f} | TEST edge {base['te']:+.1f} | hold to 15:55 {baseh:+.2f} ATR**", ""]
     body, res = [], []
     hdr = ["| Filter | Kept | Edge " + pn["tr"] + " | Edge " + pn["te"] + " | Charts better (TEST) | Hold (TEST) | |", "|---|---|---|---|---|---|---|"]
     for col in [c_ for c_ in E.columns if c_ not in ("edge", "hold", "sym", "tf", "per")]:
@@ -2983,9 +3020,9 @@ def plus_main():
         body.append("")
     good = sorted([r_ for r_ in res if r_[0]], key=lambda z: -z[1])
     md += ["## The answer in 30 seconds",
-           f"- **Filters that make SUPER better in both periods on most charts: {len(good)}**" +
-           (": " + "; ".join(f"{z[2]} (TEST +{z[1]:.1f} over plain SUPER)" for z in good[:6]) if good else
-            " - none. Stoch, volume and MACD don't improve SUPER."),
+           f"- **Filters that make it better in both periods on most charts: {len(good)}**" +
+           (": " + "; ".join(f"{z[2]} (TEST +{z[1]:.1f} over the plain signal)" for z in good[:8]) if good else
+            " - none of the filters improve it."),
            "- Note: a filter that keeps only a small share of signals can look good by luck - check 'Kept' and 'Charts better'.", ""]
     text = "\n".join(md + body)
     print("\n" + text)
