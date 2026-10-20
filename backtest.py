@@ -1,5 +1,8 @@
 """
-VF SCALPER +$0.50 IN 20 MINUTES (MODE=vfs, the default) - every fire of the VF Scalper indicator (12 Vix Fix fires) with the
+VIX FIX WHIPLASH (MODE=wsw, the default) - one side of the Vix Fix pane maxed, then the other side maxes within N candles.
+  Measures what a whiplash looks like (gap, how often) and tests FOLLOW / FADE, every T x N, hold 1-10 candles,
+  SPY + QQQ 1/2/3/5m, 2020-now, vs random entries. DATA ONLY.
+VF SCALPER +$0.50 IN 20 MINUTES (MODE=vfs) - every fire of the VF Scalper indicator (12 Vix Fix fires) with the
   trend-line filter off / with / against, target +$0.50 per share, 20-minute time limit, no stop vs $0.25 / $0.50 / $1.00 stops,
   SPY + QQQ 1/2/3/5m, 2020-now, vs random entries the same way, every year and chart. DATA ONLY.
 VF CROSS v2 FIRES AFTER 10 MINUTES (MODE=vfc) - every fire of your VF CROSS v2 indicator (HARD, TURN, MAX,
@@ -98,7 +101,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "vfs").strip().lower() or "vfs"
+MODE = os.getenv("MODE", "wsw").strip().lower() or "wsw"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -396,6 +399,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "wsw":
+        return wsw_main()
     if MODE == "vfs":
         return vfs_main()
     if MODE == "vfc":
@@ -4787,6 +4792,257 @@ def vfs_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/vfs_{stamp}.md", f"{OUT}/vfs_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VIX FIX WHIPLASH (MODE=wsw, the default)
+# One side of the Vix Fix pane maxes out, then within N candles the OTHER side maxes out ("99 greed -> 99 fear").
+# FOLLOW = trade the side that just took over (greed takes over -> LONG, fear takes over -> SHORT); FADE = the opposite.
+WSW_T = (70, 80, 90, 95)          # "maxed out" = the number is at least this
+WSW_N = (1, 2, 3, 5, 8, 12)       # the other side was maxed within the last N candles
+WSW_K = (1, 2, 3, 5, 10)          # hold N candles
+
+
+def wsw_events(F, G, hm, day, T, N, sess_end=1540):
+    """Fire on the CLOSED candle i (9:30 <= time < sess_end), using only candles <= i:
+    LONG  = greed crosses up to >= T now (was < T on i-1) and fear was >= T on one of the previous N candles (same day);
+    SHORT = the mirror (fear crosses up, greed was maxed). One fire per swap: the other side needs a fresh >= T reading
+    after this side's last fire. Both at once = no fire. Returns (side +1/-1/0, gap in candles, index of that last max)."""
+    n = len(F)
+    fH = (np.nan_to_num(F) >= T).tolist()
+    gH = (np.nan_to_num(G) >= T).tolist()
+    newday = np.r_[True, day[1:] != day[:-1]].tolist()
+    inw = ((hm >= 930) & (hm < sess_end)).tolist()
+    side = np.zeros(n, dtype=np.int64)
+    gap = np.full(n, -1, dtype=np.int64)
+    src = np.full(n, -1, dtype=np.int64)
+    lastF = lastG = -10 ** 9
+    firedL = firedS = -10 ** 9
+    for i in range(n):
+        if newday[i]:
+            lastF = lastG = -10 ** 9
+        elif inw[i]:
+            L_ = gH[i] and not gH[i - 1] and lastF >= i - N and lastF > firedL
+            S_ = fH[i] and not fH[i - 1] and lastG >= i - N and lastG > firedS
+            if L_ and not S_:
+                side[i], gap[i], src[i], firedL = 1, i - lastF, lastF, i
+            elif S_ and not L_:
+                side[i], gap[i], src[i], firedS = -1, i - lastG, lastG, i
+        if fH[i]:
+            lastF = i
+        if gH[i]:
+            lastG = i
+    return side, gap, src
+
+
+def wsw_outcomes(ind, idx, sd, ks=WSW_K):
+    """Entry = next candle's open (same day, before 15:55). For each hold k: $ per share at the close of candle k
+    (cut at the last candle before 16:00 that day), the worst move against you (heat) and the best move for you up to then."""
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    K = max(ks)
+    ret = np.full((len(idx), len(ks)), np.nan)
+    heat = np.full((len(idx), len(ks)), np.nan)
+    fav = np.full((len(idx), len(ks)), np.nan)
+    for q, (i, s) in enumerate(zip(idx, sd)):
+        e = i + 1
+        if e >= n or day[e] != day[i] or hm[e] >= 1555:
+            continue
+        en = o[e]
+        last = e
+        while last + 1 < n and day[last + 1] == day[e] and hm[last + 1] < 1600 and last + 1 - e < K:
+            last += 1
+        lo = np.minimum.accumulate(l[e:last + 1])
+        hi = np.maximum.accumulate(h[e:last + 1])
+        for kk, k in enumerate(ks):
+            j = min(k - 1, last - e)
+            ret[q, kk] = s * (c[e + j] - en)
+            heat[q, kk] = (en - lo[j]) if s == 1 else (hi[j] - en)
+            fav[q, kk] = (hi[j] - en) if s == 1 else (en - lo[j])
+    return ret, heat, fav
+
+
+def wsw_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("WSW_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rng = np.random.default_rng(8)
+    KN = [f"k{k}" for k in WSW_K]
+    HN = [f"h{k}" for k in WSW_K]
+    rows, base, anat = [], [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            F, G = vfx_pane(df)
+            hm, day = ind["hm"], ind["day"]
+            years = np.asarray(df.index.year)
+            per = np.where(df.index < split, "tr", "te")
+            ndays = len(np.unique(day[(hm >= 930) & (hm < 1540)]))
+            cnt = []
+            for T in WSW_T:
+                for N in WSW_N:
+                    sg, gp, src = wsw_events(F, G, hm, day, T, N)
+                    idx = np.nonzero(sg)[0]
+                    cnt.append(len(idx))
+                    if not len(idx):
+                        continue
+                    sd = sg[idx]
+                    R, Hh, Fv = wsw_outcomes(ind, idx, sd)
+                    # how far price already moved from the old side's max candle to the fire candle's close
+                    moved = np.array([s * (ind["c"][i] - (ind["l"][a:i + 1].min() if s == 1 else ind["h"][a:i + 1].max()))
+                                      for i, s, a in zip(idx, sd, src[idx])])
+                    for dname, mult in (("FOLLOW", 1), ("FADE", -1)):
+                        sdd = sd * mult
+                        Rr, Hr = (R, Hh) if mult == 1 else (-R, Fv)     # fading = the mirror trade
+                        d_ = pd.DataFrame(np.c_[Rr, Hr], columns=KN + HN)
+                        d_["T"], d_["N"], d_["dir"], d_["sym"], d_["tf"] = T, N, dname, sym, tf
+                        d_["side"] = np.where(sdd > 0, "LONG", "SHORT")
+                        tr_ = ind["st"][idx] * sdd
+                        d_["trend"] = np.where(tr_ > 0, "with", np.where(tr_ < 0, "against", "gray"))
+                        d_["per"], d_["year"] = per[idx], years[idx]
+                        rows.append(d_.dropna(subset=[KN[0]]))
+                    if N == max(WSW_N):
+                        anat.append(pd.DataFrame(dict(T=T, sym=sym, tf=tf, gap=gp[idx], moved=moved,
+                                                      side=np.where(sd > 0, "fear->greed", "greed->fear"), ndays=ndays)))
+            pool = np.nonzero((hm >= 930) & (hm < 1540))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("WSW_RANDOM", "8000"))), replace=False))
+            for sdv, snm in ((1, "LONG"), (-1, "SHORT")):
+                Rr, Hr, _ = wsw_outcomes(ind, ridx, np.full(len(ridx), sdv))
+                d_ = pd.DataFrame(np.c_[Rr, Hr], columns=KN + HN)
+                d_["sym"], d_["tf"], d_["side"] = sym, tf, snm
+                d_["per"], d_["year"] = per[ridx], years[ridx]
+                base.append(d_.dropna(subset=[KN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | fires per setting {min(cnt)}-{max(cnt)}", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B = pd.concat(base, ignore_index=True)
+    A = pd.concat(anat, ignore_index=True)
+    cols = KN + HN
+    bm_per = B.groupby(["sym", "tf", "side", "per"])[cols].mean()
+    bm_yr = B.groupby(["sym", "tf", "side", "year"])[cols].mean()
+    pn = {"tr": f"{start:%Y}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    yrs = sorted(int(y) for y in E["year"].unique())
+
+    def adj(g, col, by="per"):
+        """average minus the random entries' average (matched chart, side, period or year)"""
+        if not len(g):
+            return np.nan
+        bm = bm_per if by == "per" else bm_yr
+        tot, nn = 0.0, 0
+        for kk, gg in g.groupby(["sym", "tf", "side", by]):
+            if kk in bm.index and not np.isnan(bm.loc[kk, col]):
+                tot += (gg[col].mean() - bm.loc[kk, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    summ = []
+    for (T, N, dname, tf), g in E.groupby(["T", "N", "dir", "tf"]):
+        if len(g) < 100:
+            continue
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        trk = [adj(tr, k_) for k_ in KN]
+        if all(np.isnan(v) for v in trk):
+            continue
+        bk = int(np.nanargmax(trk))                       # the hold is picked on 2020-2023 only
+        k_, h_ = KN[bk], HN[bk]
+        ych = [adj(g[g["year"] == y_], k_, by="year") for y_ in yrs]
+        se_tr = tr[k_].std() / np.sqrt(len(tr)) if len(tr) > 1 else np.nan
+        se_te = te[k_].std() / np.sqrt(len(te)) if len(te) > 1 else np.nan
+        summ.append(dict(T=T, N=N, d=dname, tf=tf, k=WSW_K[bk], n=len(g), nte=len(te), usd=g[k_].mean(),
+                         tr=trk[bk], te=adj(te, k_), ttr=trk[bk] / se_tr if se_tr else np.nan,
+                         tte=adj(te, k_) / se_te if se_te else np.nan, heat=te[h_].mean(), hvr=adj(te, h_),
+                         green=100 * (te[k_] > 0).mean() if len(te) else np.nan,
+                         syms=sum(1 for _, gg in te.groupby("sym") if adj(gg, k_) > 0), nsym=te["sym"].nunique(),
+                         ych=ych, ypos=sum(1 for v in ych if v > 0), ny=sum(1 for v in ych if not np.isnan(v)),
+                         tek=[adj(te, kk) for kk in KN]))
+    S = pd.DataFrame(summ)
+    S["score"] = S["tr"].fillna(-9) + S["te"].fillna(-9)
+
+    def real(z):
+        return (z["tr"] > 0.01 and z["te"] > 0.01 and z["ttr"] >= 2 and z["tte"] >= 2 and z["syms"] == z["nsym"]
+                and z["ypos"] >= max(z["ny"] - 1, 1) and z["n"] >= 200)
+    S["real"] = S.apply(real, axis=1)
+    good = S[S["real"]].sort_values("score", ascending=False)
+    top = S.sort_values("score", ascending=False).head(15)
+
+    md = [f"# VIX FIX WHIPLASH - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)} (pre/post market included in the "
+          f"Vix Fix math, like your chart; fires 9:30-15:40 only). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Whiplash** = one side of the pane is maxed (number >= T), then within N candles the OTHER side crosses up to >= T. "
+          "Fires on that candle. **FOLLOW** = trade the side that just took over (greed takes over = LONG, fear takes over = SHORT). "
+          "**FADE** = the opposite. Entry = next open, exit at the close after k candles (the hold is picked on "
+          f"{pn['tr']} only). **$** = per share of SPY / QQQ (x 100 x delta for an option). **vs random** = minus random entries the same way "
+          "on the same chart. **Heat** = how far it went against you first (average). "
+          f"**REAL EDGE** = +$0.01/share vs random in {pn['tr']} AND {pn['te']}, and at least 2x its noise (t >= 2) in BOTH periods, "
+          "SPY and QQQ both positive, every year but one, 200+ fires. **t** = edge / its noise: 2+ = unlikely to be luck.", "",
+          "## The answer in 30 seconds",
+          f"- **REAL EDGE: {len(good)}**" + (" - " + "; ".join(
+              f"{z.tf}m {z.d} T{z.T} within {z.N} candles, hold {z.k} candles ({z.k * z.tf} min): ${z.te:+.3f}/share vs random ({pn['te']}, t {z.tte:.1f}), "
+              f"{z.ypos}/{z.ny} years" for z in good.head(6).itertuples()) if len(good) else " - none passed every check."), ""]
+
+    # ---- anatomy: what a whiplash looks like
+    md += ["## What a whiplash looks like (the 'average' you asked for), 9:30-15:40, other side maxed within 12 candles",
+           "| Chart | Maxed = T | Per day | Gap: median candles (minutes) | Within 1 / 2 / 3 / 5 candles | Price already moved your way (median $) |",
+           "|---|---|---|---|---|---|"]
+    for (tf, T), g in A.groupby(["tf", "T"]):
+        nd = g.drop_duplicates(["sym"])["ndays"].sum()
+        gp = g["gap"]
+        md.append(f"| {tf}m | {T} | {len(g) / max(nd, 1):.1f} | {gp.median():.0f} ({gp.median() * tf:.0f} min) | "
+                  + " / ".join(f"{100 * (gp <= c_).mean():.0f}%" for c_ in (1, 2, 3, 5)) + f" | {g['moved'].median():+.2f} |")
+
+    md += ["", f"## Top 15 settings (sorted by both periods vs random)",
+           f"| Chart | Dir | Maxed T | Within N | Hold | Fires | vs random {pn['tr']} (t) | **vs random {pn['te']}** (t) | Green {pn['te']} | Heat (vs random) | SPY+QQQ + | Years + | |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m | {z.d} | {z.T} | {z.N} | {z.k} ({z.k * z.tf} min) | {z.n} | {z.tr:+.3f} ({z.ttr:.1f}) | **{z.te:+.3f}** ({z.tte:.1f}) | {z.green:.0f}% | "
+                  f"${z.heat:.2f} ({z.hvr:+.3f}) | {z.syms}/{z.nsym} | {z.ypos}/{z.ny} | {'✅' if z.real else ''} |")
+
+    md += ["", f"## Speed: FOLLOW, $ vs random ({pn['te']}) after 1 / 2 / 3 / 5 / 10 candles, best T + N per chart"]
+    for d_ in ("FOLLOW", "FADE"):
+        md += ["", f"**{d_}**", "| Chart | T | N | Fires | " + " | ".join(f"{k} c" for k in WSW_K) + " |", "|---|---|---|---|" + "---|" * len(WSW_K)]
+        for tf in ST_TFS:
+            g = S[(S["d"] == d_) & (S["tf"] == tf)].sort_values("score", ascending=False).head(3)
+            for z in g.itertuples():
+                md.append(f"| {tf}m | {z.T} | {z.N} | {z.n} | " + " | ".join(f"{v:+.3f}" for v in z.tek) + " |")
+
+    md += ["", "## Grid: FOLLOW, $ vs random at the TRAIN-picked hold (2020-23 / 2024-now), every T x N"]
+    for tf in ST_TFS:
+        md += ["", f"**{tf}m**", "| T \\ N | " + " | ".join(str(N) for N in WSW_N) + " |", "|---|" + "---|" * len(WSW_N)]
+        for T in WSW_T:
+            cells = []
+            for N in WSW_N:
+                r_ = S[(S["d"] == "FOLLOW") & (S["tf"] == tf) & (S["T"] == T) & (S["N"] == N)]
+                cells.append(f"{r_.tr.iloc[0]:+.3f} / {r_.te.iloc[0]:+.3f}" if len(r_) else "-")
+            md.append(f"| {T} | " + " | ".join(cells) + " |")
+
+    md += ["", "## Top 15 every year ($ vs random)", "| Setting | " + " | ".join(str(y_) for y_ in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for z in top.itertuples():
+        md.append(f"| {z.tf}m {z.d} T{z.T} N{z.N} k{z.k} | " + " | ".join("-" if np.isnan(v) else f"{v:+.3f}" for v in z.ych) + " |")
+
+    md += ["", f"## Top 5 split by the trend line ({pn['te']}, $ vs random | fires)", "| Setting | With the line | Against the line | Gray |", "|---|---|---|---|"]
+    for z in top.head(5).itertuples():
+        g = E[(E["T"] == z.T) & (E["N"] == z.N) & (E["dir"] == z.d) & (E["tf"] == z.tf) & (E["per"] == "te")]
+        cells = []
+        for tv in ("with", "against", "gray"):
+            gg = g[g["trend"] == tv]
+            cells.append(f"{adj(gg, f'k{z.k}'):+.3f} ({len(gg)})" if len(gg) else "-")
+        md.append(f"| {z.tf}m {z.d} T{z.T} N{z.N} k{z.k} | " + " | ".join(cells) + " |")
+
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/wsw_{stamp}.md", f"{OUT}/wsw_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
