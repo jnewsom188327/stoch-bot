@@ -1,5 +1,8 @@
 """
-TREND FLIP ENTRY QUALITY (MODE=quality, the default) - grades only the entry, for trading the exit by hand:
+TREND FLIP EXPLORE (MODE=explore, the default) - timeframes 1/2/3/5/15m x line settings, faded flips, which
+  timeframes should agree, and other setups (ORB, VWAP reclaim, yesterday's high/low, gap fade), graded entry-only
+  against a coin-flip luck line built from real data.
+TREND FLIP ENTRY QUALITY (MODE=quality) - grades only the entry, for trading the exit by hand:
   every combination of quiet days / entry window / Vix Fix / 15m filter / VWAP rule, TRAIN 2020-23 vs TEST 2024-now.
 TREND FLIP OPTIMIZER + MONTE CARLO (MODE=optimize) - see the OPTIMIZER section at the bottom.
   Every entry and exit idea, on top of the quiet-day filter, picked on 2020-2023 only and checked on 2024-now,
@@ -31,6 +34,7 @@ Results: printed in the run log, shown on the run's Summary page, and saved in t
 """
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -42,7 +46,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "quality").strip().lower() or "quality"
+MODE = os.getenv("MODE", "explore").strip().lower() or "explore"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -175,13 +179,10 @@ def indicators(df, fast, slow, use_vwap, weak_n=2, htf1=15, htf2=60):
 
 
 def bars_since(flag):
-    out = np.full(len(flag), 999, dtype=np.int64)
-    last = -10**9
-    for i, f in enumerate(flag):
-        if f:
-            last = i
-        out[i] = i - last if last > -10**9 else 999
-    return out
+    flag = np.asarray(flag, dtype=bool)
+    idx = np.where(flag, np.arange(len(flag)), -1)
+    last = np.maximum.accumulate(idx) if len(idx) else idx
+    return np.where(last >= 0, np.arange(len(flag)) - last, 999).astype(np.int64)
 
 
 def signals(ind, p):
@@ -331,6 +332,8 @@ def main():
         return optimize_main()
     if MODE == "quality":
         return quality_main()
+    if MODE == "explore":
+        return explore_main()
     test = os.getenv("TEST", "") == "1"
     end = datetime.now(timezone.utc) - timedelta(days=1)
     start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
@@ -1261,6 +1264,284 @@ def quality_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/quality_{stamp}.md", f"{OUT}/quality_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    summ = os.getenv("GITHUB_STEP_SUMMARY")
+    if summ:
+        with open(summ, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ EXPLORE (MODE=explore, the default)
+# Entry-quality grade (same as MODE=quality) for:
+#   A. every chart timeframe (1/2/3/5/15m) x every line setting (EMA 5/13, 8/21, 13/34, 20/50, 34/89), and FADED
+#   B. timeframe agreement: for 1/2/3/5m charts, every other timeframe alone and the common pairs must agree
+#   C. other setups: opening-range breakout 15/30, VWAP reclaim, yesterday's high/low breakout and rejection,
+#      gap fade - each also FADED
+# LUCK LINE (real data): the v3.0 entry times on that chart with a COIN-FLIP direction, 12 times over.
+#   edge = '+1 before -1' minus the coin-flip rate. A result only counts if the edge is above zero on SPY and QQQ,
+#   in 2020-23 and in 2024-now (4 of 4 cells) - ranked by its WORST cell.
+EX_TFS = [int(x) for x in os.getenv("EX_TFS", "1,2,3,5,15").split(",")]
+EX_EMAS = [(5, 13), (8, 21), (13, 34), (20, 50), (34, 89)]
+EX_AGREE_CHARTS = [1, 2, 3, 5]
+EX_HTFS = [1, 2, 3, 5, 15, 30, 60]
+EX_PAIRS = [(1, 15), (1, 5), (5, 15), (5, 30), (15, 60), (5, 60), (1, 60), (3, 15)]
+EX_SETUP_TFS = [2, 3, 5]
+SEEDS = int(os.getenv("SEEDS", "12"))
+
+
+def ext_1m(df1):
+    hm = df1.index.hour * 100 + df1.index.minute
+    return df1[(hm >= 400) & (hm < 2000)]
+
+
+def tf_state_at_close(df1x, chart_index, chart_tf, mins, fast=13, slow=34):
+    """Trend (+1/-1) of the last `mins` candle CLOSED by the time the chart candle closes (no lookahead)."""
+    c = df1x["close"].groupby(df1x.index.floor(f"{mins}min")).last()
+    s = np.where(c.ewm(span=fast, adjust=False).mean() > c.ewm(span=slow, adjust=False).mean(), 1, -1)
+    hs = pd.DataFrame({"end": c.index + pd.Timedelta(minutes=mins), "s": s})
+    bars = pd.DataFrame({"t": chart_index + pd.Timedelta(minutes=chart_tf)})
+    m = pd.merge_asof(bars, hs, left_on="t", right_on="end", direction="backward")
+    return m["s"].fillna(0).astype(int).to_numpy()
+
+
+def daily_levels(df1, chart_df):
+    """Yesterday's RTH high / low / close, today's RTH open, daily ATR - mapped onto every chart candle."""
+    hm1 = df1.index.hour * 100 + df1.index.minute
+    rth = df1[(hm1 >= 930) & (hm1 < 1600)]
+    g = rth.groupby(rth.index.date)
+    d = pd.DataFrame({"o": g["open"].first(), "h": g["high"].max(), "l": g["low"].min(), "c": g["close"].last()})
+    pc = d["c"].shift(1)
+    tr = pd.concat([d["h"] - d["l"], (d["h"] - pc).abs(), (d["l"] - pc).abs()], axis=1).max(axis=1)
+    k = pd.DataFrame({"pdh": d["h"].shift(1), "pdl": d["l"].shift(1), "pdc": pc, "dopen": d["o"],
+                      "datr": tr.ewm(alpha=1 / 14, adjust=False).mean().shift(1)})
+    return k.reindex(pd.Index(chart_df.index.date))
+
+
+def first_per_day(cond, day):
+    cond = pd.Series(np.asarray(cond, dtype=bool))
+    n = cond.astype(int).groupby(np.asarray(day)).cumsum()
+    return (cond & (n == 1)).to_numpy()
+
+
+def setup_signals(name, df, ind, lv, tf):
+    c, h, l, hm, day = ind["c"], ind["h"], ind["l"], ind["hm"], ind["day"]
+    vw = ind["vwap"]
+    close_hm = hm + tf  # rough HHMM of the candle close (minutes < 60 assumed only for window tests below)
+    rth = (hm >= 930) & (hm < 1600)
+    win = (hm >= 935) & (hm < 1530)
+    ent = np.zeros(len(c), dtype=np.int64)
+    if name.startswith("ORB"):
+        mins = 15 if name == "ORB15" else 30
+        end_hm = 945 if mins == 15 else 1000
+        in_or = (hm >= 930) & (hm < end_hm)
+        s = pd.DataFrame({"h": np.where(in_or, h, np.nan), "l": np.where(in_or, l, np.nan), "d": day})
+        orh = s.groupby("d")["h"].transform("max").to_numpy()
+        orl = s.groupby("d")["l"].transform("min").to_numpy()
+        ok = (hm >= end_hm) & (hm < 1200)
+        up = first_per_day(ok & (c > orh), day)
+        dn = first_per_day(ok & (c < orl), day)
+        ent[up] = 1
+        ent[dn & ~up] = -1
+    elif name == "VWAP reclaim":
+        below = c < vw
+        same = np.r_[False, day[1:] == day[:-1]]
+        run = pd.Series(below).groupby((pd.Series(below) != pd.Series(below).shift()).cumsum()).cumcount().to_numpy() + 1
+        prev_run = np.r_[0, run[:-1]]
+        prev_below = np.r_[False, below[:-1]]
+        ok = win & same & (hm >= 945)
+        ent[ok & ~below & prev_below & (prev_run >= 5)] = 1
+        ent[ok & below & ~prev_below & (prev_run >= 5)] = -1
+    elif name == "Yesterday high/low BREAKOUT":
+        pdh, pdl = lv["pdh"].to_numpy(), lv["pdl"].to_numpy()
+        up = first_per_day(win & (c > pdh), day)
+        dn = first_per_day(win & (c < pdl), day)
+        ent[up] = 1
+        ent[dn & ~up] = -1
+    elif name == "Yesterday high/low REJECTION":
+        pdh, pdl = lv["pdh"].to_numpy(), lv["pdl"].to_numpy()
+        sh = first_per_day(win & (h > pdh) & (c < pdh), day)
+        lg = first_per_day(win & (l < pdl) & (c > pdl), day)
+        ent[lg] = 1
+        ent[sh & ~lg] = -1
+    elif name == "Gap fade":
+        gap = (lv["dopen"].to_numpy() - lv["pdc"].to_numpy()) / lv["datr"].to_numpy()
+        first = first_per_day((hm >= 935) & rth, day)
+        ent[first & (gap > 0.3)] = -1
+        ent[first & (gap < -0.3)] = 1
+    return ent
+
+
+SETUPS = ["ORB15", "ORB30", "VWAP reclaim", "Yesterday high/low BREAKOUT", "Yesterday high/low REJECTION", "Gap fade"]
+
+
+def explore_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    R = {}        # (block, config, chart_tf) -> {(sym, per): stats}
+    BASE = {}     # (sym, tf, per) -> coin-flip hit1 mean
+    t0 = time.time()
+
+    def grade(key, sym, ind, ent, times, yrs):
+        g = grade_entries(ind, ent, times)
+        tr, te = g[g["t"] < split], g[g["t"] >= split]
+        R.setdefault(key, {})[(sym, "tr")] = q_stats(tr, yrs[0])
+        R[key][(sym, "te")] = q_stats(te, yrs[1])
+
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        df1x = ext_1m(df1)
+        for tf in sorted(set(EX_TFS) | set(EX_AGREE_CHARTS) | set(EX_SETUP_TFS)):
+            df = to_tf(df1, rth_only=False, mins=tf)
+            hm = (df.index.hour * 100 + df.index.minute).to_numpy()
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            yrs = (max((dates < split.date()).sum() / 252.0, 1e-9), max((dates >= split.date()).sum() / 252.0, 1e-9))
+            p0 = dict(V30, allowL=None)
+            base_ind = indicators(df, 13, 34, True)
+            _, ent_v3 = signals(base_ind, p0)
+            # coin-flip luck line: same entry times, random direction
+            rng = np.random.default_rng(100 + tf)
+            hits = {"tr": [], "te": []}
+            nz = ent_v3 != 0
+            for _ in range(SEEDS):
+                e = np.zeros_like(ent_v3)
+                e[nz] = rng.choice([-1, 1], size=int(nz.sum()))
+                g = grade_entries(base_ind, e, df.index)
+                hits["tr"].append(100 * g[g["t"] < split]["hit1"].mean())
+                hits["te"].append(100 * g[g["t"] >= split]["hit1"].mean())
+            for per in ("tr", "te"):
+                BASE[(sym, tf, per)] = float(np.mean(hits[per]))
+            print(f"  {sym} {tf}m: {len(df):,} candles | coin-flip +1 before -1: "
+                  f"{BASE[(sym, tf, 'tr')]:.1f}% / {BASE[(sym, tf, 'te')]:.1f}%  ({time.time() - t0:.0f}s)", flush=True)
+            # A. timeframe x line setting, normal and faded
+            if tf in EX_TFS:
+                for fs in EX_EMAS:
+                    ind = base_ind if fs == (13, 34) else indicators(df, fs[0], fs[1], True)
+                    _, ent = (None, ent_v3) if fs == (13, 34) else signals(ind, p0)
+                    grade(("A", f"EMA {fs[0]}/{fs[1]}", tf), sym, ind, ent, df.index, yrs)
+                    grade(("A", f"EMA {fs[0]}/{fs[1]} FADED", tf), sym, ind, -ent, df.index, yrs)
+            # B. timeframe agreement (EMA 13/34 line + Vix Fix as v3.0)
+            if tf in EX_AGREE_CHARTS:
+                grade(("B", "no agreement filter", tf), sym, base_ind, ent_v3, df.index, yrs)
+                states = {m: tf_state_at_close(df1x, df.index, tf, m) for m in EX_HTFS if m != tf}
+                sets = [(m,) for m in states] + [pr for pr in EX_PAIRS if tf not in pr]
+                for st_ in sets:
+                    aL = np.ones(len(df), dtype=bool)
+                    aS = np.ones(len(df), dtype=bool)
+                    for m in st_:
+                        aL &= states[m] == 1
+                        aS &= states[m] == -1
+                    _, ent = signals(base_ind, dict(V30, allowL=aL, allowS=aS))
+                    nm = " + ".join(("1h" if m == 60 else f"{m}m") for m in st_) + " agree"
+                    grade(("B", nm, tf), sym, base_ind, ent, df.index, yrs)
+            # C. other setups
+            if tf in EX_SETUP_TFS:
+                lv = daily_levels(df1, df)
+                for su in SETUPS:
+                    ent = setup_signals(su, df, base_ind, lv, tf)
+                    grade(("C", su, tf), sym, base_ind, ent, df.index, yrs)
+                    grade(("C", su + " FADED", tf), sym, base_ind, -ent, df.index, yrs)
+            del df, base_ind
+        del df1, df1x
+
+    syms = SYMBOLS
+    cells = [(s_, p_) for s_ in syms for p_ in ("tr", "te")]
+
+    def row(key):
+        blk, nm, tf = key
+        r = R[key]
+        edges, zs = [], []
+        for (s_, p_) in cells:
+            st = r.get((s_, p_), {})
+            n, h1 = st.get("n", 0), st.get("hit1", np.nan)
+            b = BASE[(s_, tf, p_)]
+            if n == 0 or np.isnan(h1):
+                edges.append(np.nan)
+                zs.append(np.nan)
+                continue
+            edges.append(h1 - b)
+            zs.append((h1 - b) / (100 * np.sqrt(0.25 / n)))
+        per_yr = np.mean([r[(s_, "tr")]["per_yr"] + 0 for s_ in syms if (s_, "tr") in r])
+        per_yr_te = np.mean([r[(s_, "te")]["per_yr"] for s_ in syms if (s_, "te") in r])
+        r2 = [r[c_]["r2"] for c_ in cells if c_ in r and r[c_]["n"]]
+        r1 = [r[c_]["r1"] for c_ in cells if c_ in r and r[c_]["n"]]
+        e = np.array(edges, dtype=float)
+        z = np.array(zs, dtype=float)
+        return dict(key=key, name=nm, tf=tf, blk=blk, per_yr=(per_yr + per_yr_te) / 2, edges=e, worst=np.nanmin(e) if np.isfinite(e).any() else -99,
+                    mean=np.nanmean(e) if np.isfinite(e).any() else -99, pos=int(np.nansum(e > 0)), zmin=np.nanmin(z) if np.isfinite(z).any() else -99,
+                    r1=np.mean(r1) if r1 else np.nan, r2=np.mean(r2) if r2 else np.nan,
+                    h=[r.get(c_, {}).get("hit1", np.nan) for c_ in cells])
+
+    rows = [row(k) for k in R]
+    for x in rows:
+        x["real"] = x["pos"] == len(cells) and x["zmin"] >= 1.0 and x["per_yr"] >= 20
+
+    def tab(rs, title, note=""):
+        out = [f"### {title}"]
+        if note:
+            out.append(note)
+        hdr = " | ".join(f"{s_} {'20-23' if p_ == 'tr' else '24-now'}" for s_, p_ in cells)
+        out += [f"| Setup | Chart | Trades/yr per symbol | +1 before -1: {hdr} | Edge vs coin flip (worst / avg) | Cells above coin flip | 1:1 ATR/trade | 1:2 ATR/trade | Real? |",
+                "|---|---|---|" + "---|" * len(cells) + "---|---|---|---|---|"]
+        for x in rs:
+            hs = " | ".join("-" if np.isnan(v) else f"{v:.1f}%" for v in x["h"])
+            out.append(f"| {x['name']} | {x['tf']}m | {x['per_yr']:.0f} | {hs} | **{x['worst']:+.1f}** / {x['mean']:+.1f} | "
+                       f"{x['pos']}/{len(cells)} | {x['r1']:+.3f} | {x['r2']:+.3f} | {'✅' if x['real'] else ''} |")
+        return out + [""]
+
+    A = sorted([x for x in rows if x["blk"] == "A"], key=lambda x: -x["worst"])
+    B = [x for x in rows if x["blk"] == "B"]
+    C = sorted([x for x in rows if x["blk"] == "C"], key=lambda x: -x["worst"])
+    reals = sorted([x for x in rows if x["real"]], key=lambda x: -x["worst"])
+    best_tf = {}
+    for tf in EX_TFS:
+        cand = [x for x in A if x["tf"] == tf and "FADED" not in x["name"]]
+        if cand:
+            best_tf[tf] = max(cand, key=lambda x: x["worst"])
+    agree_best = {}
+    for tf in EX_AGREE_CHARTS:
+        cand = sorted([x for x in B if x["tf"] == tf], key=lambda x: -x["worst"])
+        if cand:
+            agree_best[tf] = cand
+    base_lines = [f"{s_} {tf}m: {BASE[(s_, tf, 'tr')]:.1f}% / {BASE[(s_, tf, 'te')]:.1f}%" for s_ in syms for tf in EX_TFS if (s_, tf, 'tr') in BASE]
+
+    md = [f"# Trend Flip EXPLORE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(syms)}. Entry-quality grade: does price go +1 ATR your way before 1 ATR against "
+          "(next 30 candles, same candle = loss)? DATA ONLY - no orders. Runtime "
+          f"{(time.time() - t0) / 60:.0f} min.", "",
+          "**Luck line (real data):** the v3.0 entry times with a COIN-FLIP direction. Edge = result minus that. "
+          "✅ Real = above the coin flip on SPY and QQQ in BOTH 2020-23 and 2024-now, by at least 1 standard error in every cell, "
+          "20+ trades a year. Coin-flip rates (2020-23 / 2024-now): " + "; ".join(base_lines), "",
+          "## The answer in 30 seconds",
+          f"- **Ideas that beat the coin flip everywhere: {len(reals)} of {len(rows)}**" + (
+              ": " + "; ".join(f"{x['name']} on {x['tf']}m (worst {x['worst']:+.1f} pts)" for x in reals[:8]) if reals else
+              " - none. Nothing tested here has a reliable direction edge."),
+          "- Best line setting per chart (worst-cell edge): " + "; ".join(
+              f"{tf}m = {x['name']} ({x['worst']:+.1f})" for tf, x in best_tf.items()),
+          "- Best timeframe agreement per chart: " + "; ".join(
+              f"{tf}m = {c[0]['name']} ({c[0]['worst']:+.1f}, vs none {next((y['worst'] for y in c if y['name'] == 'no agreement filter'), float('nan')):+.1f})"
+              for tf, c in agree_best.items()),
+          f"- Best other setup: {C[0]['name']} on {C[0]['tf']}m ({C[0]['worst']:+.1f})" if C else "", ""]
+    if reals:
+        md += tab(reals, "Everything that beat the coin flip in all 4 cells")
+    md += tab(A, "A. Chart timeframe x line setting (v3.0 rules), and faded (sorted by worst cell)")
+    md += ["## B. Which timeframes should agree? (per chart, sorted by worst cell)"]
+    for tf, c in agree_best.items():
+        md += tab(c, f"{tf}-minute chart")
+    md += tab(C, "C. Other setups, and faded (sorted by worst cell)",
+              "ORB = first close beyond the 9:30-9:45 (15) or 9:30-10:00 (30) high/low, until 12:00. VWAP reclaim = close back "
+              "across VWAP after 5+ closes on the other side. Breakout = first close beyond yesterday's high/low. Rejection = "
+              "wick beyond yesterday's high/low but close back inside -> trade back in. Gap fade = gap over 0.3 daily ATR, trade "
+              "toward yesterday's close at 9:35+.")
+    text = "\n".join(md)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/explore_{stamp}.md", f"{OUT}/explore_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     summ = os.getenv("GITHUB_STEP_SUMMARY")
