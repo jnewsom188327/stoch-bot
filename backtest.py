@@ -1,5 +1,15 @@
 """
-FILTER TEST (MODE=plus, the default; PLUS_BASE=v40 (default) or super) - each filter on top of the v4.0 signal
+TREND FLIP v2.7 - LAST 2 YEARS (MODE=v27, the default) - the exact v2.7 setup from the TradingView boxes
+  (13/34 + VWAP line flip, Vix Fix "After spike" within 10 candles, wait up to 5, entry at the next open,
+  2 ATR stop, opposite flip exits, flat 15:55) on SPY + QQQ 1/2/3/5m over the last 2 years.
+  Tests every hold time (5-60 candles) + the box's Trail / Hybrid / Color exits, the FILTER LAB filters,
+  the edge vs a coin flip, and option money: 0DTE and 1DTE 1-strike-out-of-the-money contracts (Black-Scholes
+  estimate at today's prices, $2 costs), with the worst drawdown and a Monte Carlo of bad years.
+LONGS vs SHORTS (MODE=sides) - SUPER, SUPER+ (Stoch %K 20-40 your way) and GAP & GO (confirmed), split
+  into LONGS and SHORTS. Each side is also compared with RANDOM entries in the same direction (because the market
+  went up over 2020-2026, a random long already wins a bit more than half the time - the real question is
+  whether a SUPER LONG beats a random long, and a SUPER SHORT beats a random short).
+FILTER TEST (MODE=plus; PLUS_BASE=v40 (default) or super) - each filter on top of the v4.0 signal
   (or SUPER): Stoch, volume, MACD, VWAP distance, Vix Fix pane height / spike age, TTM momentum / slope / color / squeeze.
   Filters on top of SUPER (dip version): Stoch level and
   cross, relative volume (vs last 20, vs time of day, dip volume), MACD histogram size / turn / side of zero.
@@ -63,7 +73,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "plus").strip().lower() or "plus"
+MODE = os.getenv("MODE", "v27").strip().lower() or "v27"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -361,6 +371,10 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "v27":
+        return v27_main()
+    if MODE == "sides":
+        return sides_main()
     if MODE == "plus":
         return plus_main()
     test = os.getenv("TEST", "") == "1"
@@ -3028,6 +3042,474 @@ def plus_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/plus_{stamp}.md", f"{OUT}/plus_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ LONGS vs SHORTS (MODE=sides)
+def sides_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(SPLIT, tz=NY)
+    t0 = time.time()
+    rng = np.random.default_rng(7)
+    rows, base_rows, atrnow = [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind, color, mom, sup = super_events(df, 2, "dip")
+            ind["times"] = df.index
+            hm = ind["hm"]
+            c, h, l = df["close"], df["high"], df["low"]
+            ll, hh = l.rolling(14).min(), h.rolling(14).max()
+            K = (100 * (c - ll) / (hh - ll).replace(0, np.nan)).rolling(3).mean().to_numpy()
+            kw = np.where(sup > 0, K, 100 - K)
+            plus = np.where((sup != 0) & (kw >= 20) & (kw <= 40), sup, 0)
+            gap = gap_events(df, df1, ind, 0.3, 935, True)
+            rth = (hm >= 930) & (hm < 1600)
+            dates = np.array(sorted(set(pd.Index(df.index.date)[rth])))
+            atrnow[(sym, tf)] = float(np.nanmean(ind["atr"][rth & np.isin(np.array(df.index.date), dates[-20:])]))
+            for kind, ent in (("SUPER", sup), ("SUPER+", plus), ("GAP & GO", gap)):
+                idx = np.nonzero(ent)[0]
+                side = ent[idx]
+                g = grade_two_sided(ind, idx)
+                ok = ~np.isnan(g[:, 6])
+                idx, side, g = idx[ok], side[ok], g[ok]
+                hit_s = np.where(side > 0, g[:, 0], g[:, 1])
+                hit_o = np.where(side > 0, g[:, 1], g[:, 0])
+                names, ex = study_exits(ind, color, mom, idx, side)
+                rows.append(pd.DataFrame(dict(kind=kind, sym=sym, tf=tf, side=np.where(side > 0, "LONG", "SHORT"),
+                                              per=np.where(df.index[idx] < split, "tr", "te"), win=100 * hit_s,
+                                              edge=50.0 * (hit_s - hit_o), opp=ex[:, names.index("Opposite color starts")],
+                                              hold=ex[:, names.index("Hold to 15:55")])))
+            # random entries (same window 9:35-15:30), graded as a long AND as a short
+            pool = np.nonzero((hm >= 935) & (hm < 1530))[0]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("SIDES_RANDOM", "4000"))), replace=False))
+            g = grade_two_sided(ind, ridx)
+            ok = ~np.isnan(g[:, 6])
+            ridx, g = ridx[ok], g[ok]
+            per = np.where(df.index[ridx] < split, "tr", "te")
+            for sd, nm in ((1, "LONG"), (-1, "SHORT")):
+                names, ex = study_exits(ind, color, mom, ridx, np.full(len(ridx), sd))
+                hs, ho = (g[:, 0], g[:, 1]) if sd > 0 else (g[:, 1], g[:, 0])
+                base_rows.append(pd.DataFrame(dict(sym=sym, tf=tf, side=nm, per=per, win=100 * hs, edge=50.0 * (hs - ho),
+                                                   opp=ex[:, names.index("Opposite color starts")],
+                                                   hold=ex[:, names.index("Hold to 15:55")])))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B = pd.concat(base_rows, ignore_index=True)
+    pn = {"tr": f"{START[:4]}-{int(SPLIT[:4]) - 1}", "te": f"{SPLIT[:4]}-now"}
+    nC = len(SYMBOLS) * len(ST_TFS)
+
+    def usd(r_, sym, tf):
+        return r_ * atrnow[(sym, tf)] * DELTA * 100 - 2.0
+
+    def summ(kind, sd):
+        g = E[(E["kind"] == kind) & (E["side"] == sd)]
+        out = {}
+        for p_ in ("tr", "te"):
+            gp, bp = g[g["per"] == p_], B[(B["side"] == sd) & (B["per"] == p_)]
+            out[p_] = dict(n=len(gp), win=gp["win"].mean(), edge=gp["edge"].mean(), bedge=bp["edge"].mean(),
+                           opp=gp["opp"].mean(), hold=gp["hold"].mean(), bhold=bp["hold"].mean())
+        te = g[g["per"] == "te"]
+        bte = B[(B["side"] == sd) & (B["per"] == "te")]
+        ce = te.groupby(["sym", "tf"])["edge"].mean()
+        be = bte.groupby(["sym", "tf"])["edge"].mean()
+        out["beat"] = int(sum(1 for k_ in ce.index if ce[k_] > be.get(k_, 0)))
+        out["charts"] = len(ce)
+        dl = [usd(r_, s_, t_) for s_, t_, r_ in te[["sym", "tf", "hold"]].itertuples(index=False) if not np.isnan(r_)]
+        out["usd"] = float(np.mean(dl)) if dl else np.nan
+        return out
+
+    md = [f"# LONGS vs SHORTS - SUPER, SUPER+, GAP & GO - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {START} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Win %** = hit +1 ATR your way before -1 ATR against you. **Edge** = that minus the other way, halved (0 = coin flip). "
+          "**Random** = random candles 9:35-15:30 traded the SAME direction (longs drift up in a rising market, so a random "
+          "long is not exactly 0). **vs random** = the signal's edge minus random's - this is the fair score. "
+          "**Charts beat random** = charts (of 8) where the signal beat random in TEST. **Hold** = ATR per trade held to "
+          "15:55, **Opp** = held until the opposite color (3 ATR safety stop), ~$ = rough per option (0.6 delta, $2 costs, no time decay). "
+          "Luck check: on RANDOM price data this test showed long-vs-short gaps of up to ~3 by chance, so only a gap that "
+          "holds in BOTH periods on 6+ of 8 charts counts.", ""]
+    ans = ["## The answer in 30 seconds"]
+    tbl = ["## Every number", "| Signal | Side | Period | Signals | Win % | Edge | Random edge | **vs random** | Opp (ATR) | Hold (ATR) | Random hold |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for kind in ("SUPER+", "SUPER", "GAP & GO"):
+        S = {sd: summ(kind, sd) for sd in ("LONG", "SHORT")}
+        parts = []
+        for sd in ("LONG", "SHORT"):
+            t_, r_ = S[sd]["te"], S[sd]["tr"]
+            parts.append(f"{sd}S {t_['edge'] - t_['bedge']:+.1f} vs random in TEST ({r_['edge'] - r_['bedge']:+.1f} in TRAIN), "
+                         f"beat random on {S[sd]['beat']}/{S[sd]['charts']} charts, hold {t_['hold']:+.2f} ATR ≈ ${S[sd]['usd']:+.0f}, "
+                         f"{t_['n']} signals")
+            for p_ in ("tr", "te"):
+                d = S[sd][p_]
+                tbl.append(f"| {kind} | {sd} | {pn[p_]} | {d['n']} | {d['win']:.0f}% | {d['edge']:+.1f} | {d['bedge']:+.1f} | "
+                           f"**{d['edge'] - d['bedge']:+.1f}** | {d['opp']:+.2f} | {d['hold']:+.2f} | {d['bhold']:+.2f} |")
+        def strong(sd):
+            return ((S[sd]["te"]["edge"] - S[sd]["te"]["bedge"]) > 1.0 and (S[sd]["tr"]["edge"] - S[sd]["tr"]["bedge"]) > 1.0
+                    and S[sd]["beat"] >= 6)
+        good = [sd for sd in S if strong(sd)]
+        if len(good) == 2:
+            verdict = "both sides beat random (1.0+ in both periods, 6+ of 8 charts)"
+        elif len(good) == 1:
+            verdict = f"**{good[0]}S are better** - only {good[0]}S beat random by 1.0+ in both periods on 6+ of 8 charts"
+        else:
+            verdict = "no clear winner - neither side beats random by 1.0+ in both periods on 6+ of 8 charts (differences could be luck)"
+        small = [sd for sd in S if S[sd]["te"]["n"] < 100]
+        ans.append(f"- **{kind}**: {verdict}. " + " | ".join(parts) +
+                   (f" - few TEST signals for {', '.join(small)}, so treat with care" if small else ""))
+    ans.append("")
+    per_chart = ["## TEST edge vs random, every chart", "| Signal | Side | " + " | ".join(f"{s_} {t_}m" for s_ in SYMBOLS for t_ in ST_TFS) + " |",
+                 "|---|---|" + "---|" * nC]
+    for kind in ("SUPER+", "SUPER", "GAP & GO"):
+        for sd in ("LONG", "SHORT"):
+            cells = []
+            for s_ in SYMBOLS:
+                for t_ in ST_TFS:
+                    g = E[(E["kind"] == kind) & (E["side"] == sd) & (E["per"] == "te") & (E["sym"] == s_) & (E["tf"] == t_)]
+                    b = B[(B["side"] == sd) & (B["per"] == "te") & (B["sym"] == s_) & (B["tf"] == t_)]
+                    cells.append(f"{g['edge'].mean() - b['edge'].mean():+.1f} ({len(g)})" if len(g) else "-")
+            per_chart.append(f"| {kind} | {sd} | " + " | ".join(cells) + " |")
+    text = "\n".join(md + ans + tbl + [""] + per_chart + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/sides_{stamp}.md", f"{OUT}/sides_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ TREND FLIP v2.7, LAST 2 YEARS (MODE=v27)
+def v27_gate(st, sig, okL, okS, inT, W):
+    """Pine f_gate: the flip arms a trade; it fires when the filter passes (same candle or up to W later, same color)."""
+    ent = np.zeros(len(st), dtype=np.int64)
+    arm, armB = 0, 0
+    for i in range(len(st)):
+        if sig[i] != 0:
+            arm, armB = sig[i], 0
+        elif arm != 0:
+            armB += 1
+        if arm != 0 and (st[i] != arm or armB > W or not inT[i]):
+            arm = 0
+        if arm != 0 and (okL[i] if arm == 1 else okS[i]):
+            ent[i] = arm
+            arm = 0
+    return ent
+
+
+def v27_sim(ind, sig, ent, mode, hold=15, stop=2.0, arm=2.0, dist=2.0, grace=2, min_hold=15, max_hold=60, flat=1555):
+    """Pine f_sim, one trade at a time. mode 1 time, 2 color, 3 hybrid, 4 trail."""
+    o, h, l, c, a, hm, day, st = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["st"]
+    n = len(o)
+    out = []
+    starts = np.nonzero(ent)[0]
+    k, free = 0, 0
+    while k < len(starts):
+        i = starts[k]
+        k += 1
+        e = i + 1
+        if i < free or e >= n or day[e] != day[i]:
+            continue
+        sd = int(ent[i])
+        en = o[e]
+        ea = a[e - 1] if not np.isnan(a[e - 1]) else a[e]
+        if not ea or np.isnan(ea):
+            continue
+        stp = en - sd * stop * ea
+        best, worst, bestj, lost, trl, ft = 0.0, 0.0, e, 0, np.nan, 0
+        j = e
+        while True:
+            held = j - e + 1
+            lost = lost + 1 if st[j] != sd else 0
+            fav = (h[j] - en) if sd == 1 else (en - l[j])
+            adv = (en - l[j]) if sd == 1 else (h[j] - en)
+            if ft == 0:
+                ft = -1 if adv >= ea else (1 if fav >= ea else 0)
+            if fav > best:
+                best, bestj = fav, j
+            worst = max(worst, adv)
+            last = j + 1 >= n or day[j + 1] != day[j]
+            code, px = 0, np.nan
+            if (l[j] <= stp) if sd == 1 else (h[j] >= stp):
+                code, px = 1, (min(o[j], stp) if sd == 1 else max(o[j], stp))
+            else:
+                if mode == 4 and best >= arm * ea:
+                    nt = en + sd * best - sd * dist * ea
+                    trl = nt if np.isnan(trl) else (max(trl, nt) if sd == 1 else min(trl, nt))
+                too_long = False if mode == 2 else (held >= max_hold if mode in (3, 4) else held >= hold)
+                color_out = lost >= grace if mode == 2 else ((held >= min_hold and lost >= grace) if mode == 3 else False)
+                trail_out = mode == 4 and not np.isnan(trl) and ((c[j] <= trl) if sd == 1 else (c[j] >= trl))
+                if trail_out:
+                    code = 4
+                elif color_out:
+                    code = 3
+                elif sig[j] == -sd:
+                    code = 5
+                elif too_long:
+                    code = 2
+                elif hm[j] >= flat or last:
+                    code = 6
+                if code:
+                    px = c[j]
+            if code:
+                out.append((i, e, j, sd, en, px, sd * (px - en) / ea, held, best / ea, worst / ea, bestj - e + 1, ft, code))
+                free = j + 1
+                break
+            j += 1
+    cols = ["i", "e", "x", "side", "entry", "exit", "r", "held", "best", "worst", "tbest", "first", "code"]
+    return pd.DataFrame(out, columns=cols)
+
+
+def v27_money(t, df, iv, tf, p_now):
+    """0DTE / 1DTE option $ per contract (1 strike out of the money, today's price level, $2 costs)."""
+    t = t.copy()
+    if not len(t):
+        t["d0"] = []
+        t["d1"] = []
+        return t
+    mod = (df.index.hour * 60 + df.index.minute).to_numpy()
+    e, x = t["e"].to_numpy(), t["x"].to_numpy()
+    S0, S1 = t["entry"].to_numpy(), t["exit"].to_numpy()
+    call = t["side"].to_numpy() == 1
+    K = np.where(call, np.floor(S0) + 1.0, np.ceil(S0) - 1.0)
+    rem0 = np.maximum(960.0 - mod[e], 1.0)
+    rem1 = np.maximum(960.0 - (mod[x] + tf), 0.5)
+    sg = np.nan_to_num(iv[e], nan=0.18)
+    scale = p_now / S0 * 100.0
+    ym = 252.0 * 390.0
+    for kk, extra in (("d0", 0.0), ("d1", 390.0)):
+        v0 = bs_price(S0, K, (rem0 + extra) / ym, sg, call)
+        v1 = bs_price(S1, K, (rem1 + extra) / ym, sg, call)
+        t[kk] = (v1 - v0) * scale - COST
+    return t
+
+
+def v27_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yrs_back = float(os.getenv("V27_YEARS", "2"))
+    start = end - timedelta(days=int(365.25 * yrs_back) + 40)        # +40 days of warm-up for the indicators
+    t_from = pd.Timestamp(end - timedelta(days=int(365.25 * yrs_back))).tz_convert(NY)
+    half = pd.Timestamp(end - timedelta(days=int(365.25 * yrs_back / 2))).tz_convert(NY)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    HOLDS = [5, 10, 15, 20, 25, 30, 40, 60]
+    EXITS = [(f"Time: hold {hh}", dict(mode=1, hold=hh)) for hh in HOLDS] + [
+        ("Trail 2/2 (max 60)", dict(mode=4)), ("Hybrid 15-60", dict(mode=3)), ("Color lost 2", dict(mode=2))]
+    rng = np.random.default_rng(11)
+    R = {}            # (sym, tf, exit) -> trades
+    F = {}            # (sym, tf, filter) -> trades (Time 15)
+    EQ = {}           # (sym, tf, filter) -> entry quality edge
+    META = {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            st, hm = ind["st"], ind["hm"]
+            inT = (hm >= 935) & (hm < 1530) & (df.index >= t_from)
+            prev = np.r_[0, st[:-1]]
+            sig = np.where(inT & (st != 0) & (st != prev), st, 0)
+            c, hh_, ll_ = df["close"], df["high"], df["low"]
+            lo14, hi14 = ll_.rolling(14).min(), hh_.rolling(14).max()
+            K = (100 * (c - lo14) / (hi14 - lo14).replace(0, np.nan)).rolling(3).mean()
+            D = K.rolling(3).mean()
+            K, D = K.to_numpy(), D.to_numpy()
+            basis = c.rolling(20).mean()
+            mid = ((hh_.rolling(20).max() + ll_.rolling(20).min()) / 2 + basis) / 2
+            mom = linreg_last((c - mid).to_numpy(), 20)
+            momp = np.r_[np.nan, mom[:-1]]
+            fa, ga = bars_since(ind["fear"]), bars_since(ind["greed"])
+            ones = np.ones(len(st), dtype=bool)
+            FILT = [("No filter (trend line only)", ones, ones), ("Stoch Room (L<80 / S>20)", K < 80, K > 20),
+                    ("Stoch Agree (%K vs %D)", K > D, K < D), ("TTM Agrees (momentum side)", mom > 0, mom < 0),
+                    ("TTM Rising (momentum turning)", mom > momp, mom < momp),
+                    ("VF Not stretched", ~ind["greed"], ~ind["fear"]), ("YOURS: VF After spike (10 c)", fa <= 10, ga <= 10)]
+            ents = {}
+            for nm, okL, okS in FILT:
+                ents[nm] = v27_gate(st, sig, np.nan_to_num(okL, nan=0).astype(bool), np.nan_to_num(okS, nan=0).astype(bool), inT, 5)
+            ent = ents["YOURS: VF After spike (10 c)"]
+            ents["YOURS, flip candle only (no wait)"] = v27_gate(st, sig, fa <= 10, ga <= 10, inT, 0)
+            lv = daily_levels(df1, df)
+            iv = (lv["datr"] / lv["pdc"]).to_numpy() / 1.6 * np.sqrt(252.0) * 1.15
+            rth = (hm >= 930) & (hm < 1600)
+            dd_ = np.array(df.index.date)
+            last20 = np.array(sorted(set(dd_[rth])))[-20:]
+            atr_now = float(np.nanmean(ind["atr"][rth & np.isin(dd_, last20)]))
+            p_now = float(ind["c"][rth][-1])
+            days = np.array(sorted(set(dd_[rth & (df.index >= t_from)])))
+            META[(sym, tf)] = dict(atr=atr_now, px=p_now, days=days)
+            for nm, kw in EXITS:
+                t = v27_money(v27_sim(ind, sig, ent, **kw), df, iv, tf, p_now)
+                t["time"] = df.index[t["e"].to_numpy()] if len(t) else []
+                R[(sym, tf, nm)] = t
+                # coin flip: the same entry times, random direction (5 draws)
+                if nm == "Time: hold 15":
+                    cf = []
+                    for _ in range(5):
+                        rnd = np.where(ent != 0, rng.choice([-1, 1], size=len(ent)), 0)
+                        cf.append(v27_sim(ind, sig, rnd, **kw)["r"].mean())
+                    META[(sym, tf)]["coin"] = float(np.nanmean(cf))
+            for nm, e_ in ents.items():
+                t = v27_money(v27_sim(ind, sig, e_, mode=1, hold=15), df, iv, tf, p_now)
+                t["time"] = df.index[t["e"].to_numpy()] if len(t) else []
+                F[(sym, tf, nm)] = t
+                idx = np.nonzero(e_)[0]
+                g = grade_two_sided(ind, idx)
+                okg = ~np.isnan(g[:, 6])
+                sd = e_[idx][okg]
+                g = g[okg]
+                EQ[(sym, tf, nm)] = (float(np.mean(50.0 * (np.where(sd > 0, g[:, 0], g[:, 1]) - np.where(sd > 0, g[:, 1], g[:, 0])))) if len(g) else np.nan,
+                                     float(100 * np.mean(np.where(sd > 0, g[:, 0], g[:, 1]))) if len(g) else np.nan)
+            print(f"  {sym} {tf}m: {int((ent != 0).sum())} signals ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+
+    def stat(t, sym, tf):
+        n = len(t)
+        if not n:
+            return None
+        r = t["r"].to_numpy()
+        gw, gl = r[r > 0].sum(), -r[r < 0].sum()
+        h1, h2 = t[t["time"] < half], t[t["time"] >= half]
+        cum0 = np.cumsum(t["d0"].to_numpy())
+        dd0 = float(np.max(np.maximum.accumulate(np.r_[0, cum0])[1:] - cum0)) if n else 0.0
+        cum1 = np.cumsum(t["d1"].to_numpy())
+        dd1 = float(np.max(np.maximum.accumulate(np.r_[0, cum1])[1:] - cum1)) if n else 0.0
+        cumr = np.cumsum(r)
+        ddr = float(np.max(np.maximum.accumulate(np.r_[0, cumr])[1:] - cumr))
+        lose = (r <= 0).astype(int)
+        run_, mx = 0, 0
+        for v in lose:
+            run_ = run_ + 1 if v else 0
+            mx = max(mx, run_)
+        yrs = max(len(META[(sym, tf)]["days"]) / 252.0, 1e-9)
+        dly = t.groupby(pd.DatetimeIndex(t["time"]).date)["d0"].sum().reindex(META[(sym, tf)]["days"], fill_value=0.0).to_numpy()
+        return dict(n=n, per_yr=n / yrs, win=100 * (r > 0).mean(), avg=r.mean(), pf=gw / gl if gl > 0 else np.inf,
+                    h1=h1["r"].mean() if len(h1) else np.nan, h2=h2["r"].mean() if len(h2) else np.nan,
+                    d0=t["d0"].mean(), d1=t["d1"].mean(), y0=t["d0"].sum() / yrs, y1=t["d1"].sum() / yrs,
+                    dd0=dd0, dd1=dd1, ddr=ddr, streak=mx, held=t["held"].mean() * tf, best=t["best"].mean(),
+                    tbest=t["tbest"].mean() * tf, worst=t["worst"].mean(), daily=dly)
+
+    S = {k: stat(v, k[0], k[1]) for k, v in R.items()}
+    SF = {k: stat(v, k[0], k[1]) for k, v in F.items()}
+    charts = [(s_, t_) for s_ in SYMBOLS for t_ in ST_TFS]
+    exn = [e_[0] for e_ in EXITS]
+    p1 = f"{t_from:%Y-%m-%d} to {half:%Y-%m-%d}"
+    p2 = f"{half:%Y-%m-%d} to {end:%Y-%m-%d}"
+
+    def money(x):
+        return "-" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{'+' if x >= 0 else '-'}${abs(x):,.0f}"
+
+    md = [f"# TREND FLIP v2.7 - LAST {yrs_back:g} YEARS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {t_from:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. Setup = your v2.7 box: "
+          "13/34 + VWAP flip, Vix Fix After spike within 10 candles (wait up to 5), entry at the next open, 2 ATR stop, "
+          f"opposite flip exits, flat 15:55, one trade at a time. DATA ONLY - no orders. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**ATR** = average result per trade in ATR (same as the box). **Year 1 / Year 2** = average ATR in each half "
+          f"({p1} | {p2}) - an edge must hold in BOTH. **0DTE / 1DTE $** = per contract, 1 strike out of the money, "
+          "Black-Scholes estimate at TODAY's price level incl. time decay and $2 costs (rough: real fills and IV moves differ). "
+          "**Worst DD** = biggest peak-to-bottom drop of the running total (1 contract, every trade taken). "
+          "**Coin flip** = the same entry times with a random direction, same exit.", ""]
+    # ---- answer in 30 seconds
+    ans = ["## The answer in 30 seconds"]
+    pooled = []
+    for nm in exn:
+        rows = [S[(s_, t_, nm)] for s_, t_ in charts if S[(s_, t_, nm)]]
+        if not rows:
+            continue
+        n = sum(r_["n"] for r_ in rows)
+        avg = sum(r_["avg"] * r_["n"] for r_ in rows) / n
+        both = sum(1 for r_ in rows if r_["h1"] > 0 and r_["h2"] > 0)
+        d0 = sum(r_["d0"] * r_["n"] for r_ in rows) / n
+        d1 = sum(r_["d1"] * r_["n"] for r_ in rows) / n
+        pos0 = sum(1 for r_ in rows if r_["d0"] > 0)
+        pooled.append((nm, n, avg, both, len(rows), d0, d1, pos0))
+    coin = np.nanmean([META[k_].get("coin", np.nan) for k_ in charts])
+    bestA = max(pooled, key=lambda z: z[2])
+    best0 = max(pooled, key=lambda z: z[5])
+    best1 = max(pooled, key=lambda z: z[6])
+    ans.append(f"- **Best hold by ATR**: {bestA[0]} - {bestA[2]:+.2f} ATR per trade over {bestA[1]} trades, positive in both years on "
+               f"{bestA[3]}/{bestA[4]} charts. Coin flip with the same entries (hold 15): {coin:+.2f} ATR.")
+    ans.append(f"- **Best for 0DTE options**: {best0[0]} - {money(best0[5])} per trade per contract, positive on {best0[7]}/8 charts.")
+    ans.append(f"- **Best for 1DTE options**: {best1[0]} - {money(best1[6])} per trade per contract.")
+    pc = []
+    for s_, t_ in charts:
+        cand = [(nm, S[(s_, t_, nm)]) for nm in exn if S[(s_, t_, nm)] and S[(s_, t_, nm)]["n"] >= 20]
+        good = [(nm, x) for nm, x in cand if x["h1"] > 0 and x["h2"] > 0 and x["d0"] > 0]
+        if good:
+            nm, x = max(good, key=lambda z: z[1]["d0"])
+            pc.append(f"{s_} {t_}m: **{nm}** ({x['avg']:+.2f} ATR, 0DTE {money(x['d0'])}/trade, worst DD {money(-x['dd0'])})")
+        else:
+            pc.append(f"{s_} {t_}m: no exit was positive in both years AND on 0DTE")
+    ans.append("- **Per chart (best exit that made money in both years and on 0DTE)**: " + " | ".join(pc))
+    ans.append("")
+    # ---- pooled exits
+    tbl = ["## Every exit, all 8 charts together", "| Exit | Trades | Avg ATR | Charts + in both years | 0DTE $/trade | 1DTE $/trade | Charts + on 0DTE |",
+           "|---|---|---|---|---|---|---|"]
+    for nm, n, avg, both, nc, d0, d1, pos0 in pooled:
+        tbl.append(f"| {nm} | {n} | **{avg:+.2f}** | {both}/{nc} | {money(d0)} | {money(d1)} | {pos0}/{nc} |")
+    tbl.append("")
+    # ---- per chart detail
+    det = ["## Every chart, every exit",
+           "| Chart | Exit | Trades/yr | Win % | ATR | PF | Year 1 | Year 2 | 0DTE $/trade | 1DTE $/trade | 0DTE $/yr | Worst DD 0DTE | Worst DD ATR | Losing run | Avg hold |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for s_, t_ in charts:
+        for nm in exn:
+            x = S[(s_, t_, nm)]
+            if not x:
+                continue
+            det.append(f"| {s_} {t_}m | {nm} | {x['per_yr']:.0f} | {x['win']:.0f}% | **{x['avg']:+.2f}** | {x['pf']:.2f} | {x['h1']:+.2f} | {x['h2']:+.2f} | "
+                       f"{money(x['d0'])} | {money(x['d1'])} | {money(x['y0'])} | {money(-x['dd0'])} | {x['ddr']:.1f} | {x['streak']} | {x['held']:.0f} min |")
+    det.append("")
+    # ---- how long to hold: the best move
+    mv = ["## How long to hold - the average trade's best move (hold 60 run, ATR)",
+          "| Chart | Coin flip ATR (hold 15) | Best move | ...reached after | Worst move against | Entry quality: +1 ATR first | Edge vs coin flip |",
+          "|---|---|---|---|---|---|---|"]
+    for s_, t_ in charts:
+        x = S[(s_, t_, "Time: hold 60")]
+        eq = EQ[(s_, t_, "YOURS: VF After spike (10 c)")]
+        if x:
+            mv.append(f"| {s_} {t_}m | {META[(s_, t_)].get('coin', np.nan):+.2f} | +{x['best']:.2f} | {x['tbest']:.0f} min | -{x['worst']:.2f} | {eq[1]:.0f}% | {eq[0]:+.1f} |")
+    mv.append("")
+    # ---- filter lab
+    fl = ["## FILTER LAB (exit = Time hold 15, like your box) - all 8 charts",
+          "| Filter | Trades | Avg ATR | Charts + in both years | 0DTE $/trade | Edge vs coin flip (+1 ATR first, 0 = coin flip) |", "|---|---|---|---|---|---|"]
+    for nm in list(ents.keys()):
+        rows = [SF[(s_, t_, nm)] for s_, t_ in charts if SF[(s_, t_, nm)]]
+        if not rows:
+            continue
+        n = sum(r_["n"] for r_ in rows)
+        avg = sum(r_["avg"] * r_["n"] for r_ in rows) / n
+        both = sum(1 for r_ in rows if r_["h1"] > 0 and r_["h2"] > 0)
+        d0 = sum(r_["d0"] * r_["n"] for r_ in rows) / n
+        edge = np.nanmean([EQ[(s_, t_, nm)][0] for s_, t_ in charts])
+        fl.append(f"| {nm} | {n} | **{avg:+.2f}** | {both}/{len(rows)} | {money(d0)} | {edge:+.1f} |")
+    fl.append("")
+    # ---- Monte Carlo for the best 0DTE exit per chart
+    mc = ["## Monte Carlo - 10,000 shuffled years of the best 0DTE exit on each chart (1 contract)", MC_HEAD]
+    for s_, t_ in charts:
+        cand = [(nm, S[(s_, t_, nm)]) for nm in exn if S[(s_, t_, nm)]]
+        nm, x = max(cand, key=lambda z: z[1]["d0"])
+        m = monte_carlo(x["daily"], seed=17 + t_ + (0 if s_ == "SPY" else 100))
+        mc.append(mc_row(f"{s_} {t_}m {nm}", "0DTE", f"{len(META[(s_, t_)]['days'])} days", m, x["per_yr"]))
+    mc.append("")
+    text = "\n".join(md + ans + tbl + mv + fl + mc + det)
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/v27_{stamp}.md", f"{OUT}/v27_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
