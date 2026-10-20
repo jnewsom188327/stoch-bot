@@ -1,4 +1,4 @@
-# TREND LINE ANGLE SWEEP (every degree) - LAST 12 MONTHS, 1m - 2026-10-20 18:12 ET
+# TREND LINE ANGLE SWEEP (every degree) - LAST 12 MONTHS, 1m - 2026-10-20 18:49 ET
 Data 2025-10-19 to 2026-10-19, SPY, QQQ, IWM, 1m. Signals 9:35-15:30. DATA ONLY. Runtime 1 min.
 **Angle** = EMA 13 move over 5 candles in ATR per candle, as degrees (same as the TL ANGLE indicator). **UP A** = long when the angle crosses up through A (short: down through -A). **FLATTEN A** = long when a steeper line comes back down through A (short: mirror). **Exit E** = close the long when the angle closes under E (short: over -E), max 60 candles, flat 15:55. **vs random** = ATR per trade minus random entries the same way with the same exit. **t** = edge / noise, measured day by day. **HELD UP** = t >= 2, positive in both halves of the year (split 2026-04-19), on every symbol, 200+ trades. **Plateau** = the average of this angle and the 2 angles on each side - a real sweet spot is good across neighbours, a lucky single degree is not.
 
