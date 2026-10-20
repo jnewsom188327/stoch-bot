@@ -1,5 +1,7 @@
 """
-TREND LINE TOUCH - LAST 12 MONTHS (MODE=tlt, the default) - line green/blue + price dips to it = long, red/pink + pops
+TREND LINE ANGLE - LAST 12 MONTHS, 1m (MODE=ang, the default) - which angles of the trend line (EMA 13) lead to
+  the best moves, and entry / exit rules on the angle, SPY + QQQ, vs random. DATA ONLY.
+TREND LINE TOUCH - LAST 12 MONTHS (MODE=tlt) - line green/blue + price dips to it = long, red/pink + pops
   up to it = short. Instant limit / touch / hold entries, holds 1-20 candles, SPY + QQQ 1/2/3/5m, vs random. DATA ONLY.
 BOUNCE OFF THE VIX FIX LINES (MODE=bnc) - price touches the red (FEAR 100 / 85) or blue (GREED) line and
   bounces: touch, close back, next high, bounce $0.25 / $0.50, SPY + QQQ 1/2/3/5/15m, 2020-now, vs random + stop. DATA ONLY.
@@ -109,7 +111,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "tlt").strip().lower() or "tlt"
+MODE = os.getenv("MODE", "ang").strip().lower() or "ang"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -409,6 +411,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "ang":
+        return ang_main()
     if MODE == "tlt":
         return tlt_main()
     if MODE == "bnc":
@@ -5917,6 +5921,232 @@ def tlt_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/tlt_{stamp}.md", f"{OUT}/tlt_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ TREND LINE ANGLE (MODE=ang, the default) - LAST 12 MONTHS, 1m
+# Angle of the trend line (EMA 13) = how far it moved over the last N candles, in ATR per candle, as degrees:
+#   0 = flat, 45 = rising 1 ATR per candle, negative = falling. A fixed scale (the screen angle changes with zoom).
+ANG_N = int(os.getenv("ANG_N", "5"))
+ANG_K = (1, 3, 5, 10, 20)
+ANG_BINS = [-999, -40, -30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 40, 999]
+ANG_ENTRY_UP = (0, 10, 20, 30, 40)       # long when the angle crosses UP through A (short: crosses DOWN through -A)
+ANG_ENTRY_DN = (40, 30, 20, 10)          # long when a steep line flattens: crosses DOWN through A from above (short: mirror)
+ANG_EXIT = (30, 20, 10, 0, -10)          # exit a long when the angle closes below E (short: above -E); E must be < A
+ANG_MAXH = 60
+
+
+def ang_series(df, ind, n=ANG_N):
+    ef = df["close"].ewm(span=13, adjust=False).mean().to_numpy()
+    a = ind["atr"]
+    slope = (ef - np.r_[np.full(n, np.nan), ef[:-n]]) / (n * a)
+    return np.degrees(np.arctan(slope))
+
+
+def ang_events(ang, hm, day, A, mode, t_from=935, t_to=1530):
+    """signal candle indices + side. up: angle crosses up through A (long) / down through -A (short).
+    dn: angle crosses down through A from above (long) / up through -A from below (short). Known at the candle's close."""
+    prev = np.r_[np.nan, ang[:-1]]
+    ok = (hm >= t_from) & (hm < t_to) & np.r_[False, day[1:] == day[:-1]] & np.r_[day[1:] == day[:-1], False]
+    if mode == "up":
+        L = ok & (prev < A) & (ang >= A)
+        S = ok & (prev > -A) & (ang <= -A)
+    else:
+        L = ok & (prev > A) & (ang <= A)
+        S = ok & (prev < -A) & (ang >= -A)
+    idx = np.r_[np.nonzero(L)[0], np.nonzero(S)[0]]
+    sd = np.r_[np.ones(L.sum(), dtype=np.int64), -np.ones(S.sum(), dtype=np.int64)]
+    o = np.argsort(idx, kind="stable")
+    return idx[o], sd[o]
+
+
+def ang_exit(ind, ang, idx, sd, E, maxh=ANG_MAXH):
+    """entry = next open; exit at the close of the first candle whose angle is below E (long) / above -E (short),
+    or after maxh candles, or 15:55 / the day's last candle. Returns ($ per share, candles held)."""
+    o, c, hm, day = ind["o"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    ret = np.full(len(idx), np.nan)
+    hold = np.full(len(idx), np.nan)
+    for q, (i, s) in enumerate(zip(idx, sd)):
+        e = i + 1
+        if e >= n or day[e] != day[i] or hm[e] >= 1555:
+            continue
+        j = e
+        while True:
+            if (s == 1 and ang[j] < E) or (s == -1 and ang[j] > -E) or j - e + 1 >= maxh or hm[j] >= 1555 \
+                    or j + 1 >= n or day[j + 1] != day[j]:
+                break
+            j += 1
+        ret[q] = s * (c[j] - o[e])
+        hold[q] = j - e + 1
+    return ret, hold
+
+
+def ang_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("ANG_TFS", "1").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(13)
+    KN = [f"k{k}" for k in ANG_K]
+    MAP, EV, RB = [], [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            ang = ang_series(df, ind)
+            ang3, ang10 = ang_series(df, ind, 3), ang_series(df, ind, 10)
+            hm, day, a = ind["hm"], ind["day"], ind["atr"]
+            ts = df.index
+            half = np.where(ts < mid, "H1", "H2")
+            # ---- A. the map: every candle 9:35-15:30 in the last year, long result after k candles (entry next open)
+            cand = np.nonzero((ts >= yr_start) & (hm >= 935) & (hm < 1530) & np.r_[day[1:] == day[:-1], False] & ~np.isnan(ang))[0]
+            R, _, _ = wsw_outcomes(ind, cand, np.ones(len(cand), dtype=np.int64), ks=ANG_K)
+            d_ = pd.DataFrame(R / a[cand][:, None], columns=KN)
+            d_["ang"], d_["ang3"], d_["ang10"] = ang[cand], ang3[cand], ang10[cand]
+            d_["chg"] = ang[cand] - np.r_[np.full(5, np.nan), ang[:-5]][cand]     # steepening (+) / flattening (-) over 5 candles
+            d_["sym"], d_["tf"], d_["half"], d_["date"] = sym, tf, half[cand], day[cand]
+            d_["usd5"] = R[:, ANG_K.index(5)]
+            MAP.append(d_.dropna(subset=[KN[0]]))
+            # ---- B. entries (angle crosses) x exits (angle drops back under E), vs random entries with the SAME exit
+            ry = ts >= yr_start
+            rid = np.sort(rng.choice(cand, size=min(len(cand), int(os.getenv("ANG_RANDOM", "6000"))), replace=False))
+            for E in ANG_EXIT:
+                for sdv in (1, -1):
+                    rr, hh = ang_exit(ind, ang, rid, np.full(len(rid), sdv), E)
+                    RB.append(pd.DataFrame(dict(E=E, side=sdv, sym=sym, tf=tf, half=half[rid], r=rr / a[rid], h=hh)).dropna())
+            for mode, As in (("up", ANG_ENTRY_UP), ("dn", ANG_ENTRY_DN)):
+                for A in As:
+                    idx, sd = ang_events(ang, hm, day, A, mode)
+                    keep = ry[idx]
+                    idx, sd = idx[keep], sd[keep]
+                    for E in ANG_EXIT:
+                        if E >= A:
+                            continue
+                        rr, hh = ang_exit(ind, ang, idx, sd, E)
+                        EV.append(pd.DataFrame(dict(mode=mode, A=A, E=E, side=sd, sym=sym, tf=tf, half=half[idx], date=day[idx],
+                                                    r=rr / a[idx], usd=rr, h=hh)).dropna())
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | {len(cand):,} candles", flush=True)
+        del df1
+    M = pd.concat(MAP, ignore_index=True)
+    E_ = pd.concat(EV, ignore_index=True)
+    RB_ = pd.concat(RB, ignore_index=True)
+
+    def tday(x, dates, syms):
+        """t-stat with the noise measured day by day (candles / trades on the same day overlap)"""
+        x = pd.Series(np.asarray(x, dtype=float))
+        if len(x) < 2:
+            return np.nan
+        mu = x.mean()
+        dev = (x - mu).groupby([np.asarray(syms), np.asarray(dates)]).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(x)
+        return mu / se if se > 0 else np.nan
+
+    md = [f"# TREND LINE ANGLE - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d} only, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Candles 9:35-15:30. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"**Angle** = how far the trend line (EMA 13) moved over the last {ANG_N} candles, in ATR per candle, as degrees: 0 = flat, "
+          "45 = rising 1 ATR every candle, negative = falling (a fixed scale - your screen angle changes with zoom; the indicator will show "
+          "this exact number). **vs random** = the average move after candles with that angle minus the average after ALL candles (ATR). "
+          "LONG column: + = price went up more than usual; SHORT = the same number flipped. **t** = edge / noise, measured day by day "
+          f"(2+ = unlikely luck). **H1 / H2** = first / second half of the year (split {mid:%Y-%m-%d}).", ""]
+    # ---- A. map
+    for k in ANG_K:
+        M[f"x{k}"] = M[f"k{k}"] - M.groupby(["sym", "tf", "half"])[f"k{k}"].transform("mean")
+    M["bin"] = pd.cut(M["ang"], ANG_BINS, right=False)
+    md += [f"## A. The map: angle now -> what price did next ({ANG_N}-candle angle, LONG result vs random, ATR)",
+           "| Angle | Candles | Share | 1 c | 3 c | **5 c** (t) | 10 c | 20 c | 5 c H1 / H2 | 5 c SPY / QQQ | Best for |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    tot = len(M)
+    for b, g in M.groupby("bin", observed=True):
+        lo, hi = b.left, b.right
+        nm = (f"under {hi:.0f}°" if lo < -900 else f"{lo:.0f}° and up" if hi > 900 else f"{lo:.0f}° to {hi:.0f}°")
+        v = {k: g[f"x{k}"].mean() for k in ANG_K}
+        t5 = tday(g["x5"], g["date"], g["sym"])
+        h1, h2 = g[g["half"] == "H1"]["x5"].mean(), g[g["half"] == "H2"]["x5"].mean()
+        sp, qq = g[g["sym"] == "SPY"]["x5"].mean(), g[g["sym"] == "QQQ"]["x5"].mean()
+        best = ("LONGS" if v[5] > 0 else "SHORTS") if abs(t5) >= 2 and np.sign(h1) == np.sign(h2) == np.sign(v[5]) else "-"
+        md.append(f"| {nm} | {len(g):,} | {100 * len(g) / tot:.0f}% | {v[1]:+.3f} | {v[3]:+.3f} | **{v[5]:+.3f}** ({t5:.1f}) | {v[10]:+.3f} | {v[20]:+.3f} | "
+                  f"{h1:+.3f} / {h2:+.3f} | {sp:+.3f} / {qq:+.3f} | {best} |")
+    # angle x steepening / flattening
+    M["cb"] = pd.cut(M["chg"], [-999, -10, -3, 3, 10, 999], labels=["flattening fast", "flattening", "steady", "steepening", "steepening fast"])
+    M["bin3"] = pd.cut(M["ang"], [-999, -20, -10, -3, 3, 10, 20, 999], labels=["under -20°", "-20 to -10°", "-10 to -3°", "flat (-3 to 3°)", "3 to 10°", "10 to 20°", "20° and up"])
+    md += ["", "## A2. Angle x is it steepening or flattening (change over the last 5 candles) - LONG result vs random after 5 candles, ATR (t)",
+           "| Angle \\ change | " + " | ".join(M["cb"].cat.categories) + " |", "|---|" + "---|" * len(M["cb"].cat.categories)]
+    for b3, g3 in M.groupby("bin3", observed=True):
+        cells = []
+        for cb in M["cb"].cat.categories:
+            g = g3[g3["cb"] == cb]
+            cells.append(f"{g['x5'].mean():+.3f} ({tday(g['x5'], g['date'], g['sym']):.1f})" if len(g) >= 300 else "-")
+        md.append(f"| {b3} | " + " | ".join(cells) + " |")
+    # other lookbacks
+    md += ["", "## A3. Same map with a faster (3-candle) and slower (10-candle) angle - LONG vs random after 5 candles, ATR (t)",
+           "| Angle | 3-candle angle | 10-candle angle |", "|---|---|---|"]
+    for col_ in ("ang3", "ang10"):
+        M["b_" + col_] = pd.cut(M[col_], ANG_BINS, right=False)
+    for b in M["bin"].cat.categories:
+        cells = []
+        for col_ in ("ang3", "ang10"):
+            g = M[M["b_" + col_] == b]
+            cells.append(f"{g['x5'].mean():+.3f} ({tday(g['x5'], g['date'], g['sym']):.1f}) n {len(g):,}" if len(g) >= 300 else "-")
+        lo, hi = b.left, b.right
+        nm = (f"under {hi:.0f}°" if lo < -900 else f"{lo:.0f}° and up" if hi > 900 else f"{lo:.0f}° to {hi:.0f}°")
+        md.append(f"| {nm} | " + " | ".join(cells) + " |")
+    # ---- B. entries + exits
+    rb = RB_.groupby(["E", "side", "sym", "tf", "half"])["r"].mean()
+    rows = []
+    for (mode, A, Ex), g in E_.groupby(["mode", "A", "E"]):
+        base = np.array([rb.get((Ex, s, sy, tf, hf), np.nan) for s, sy, tf, hf in zip(g["side"], g["sym"], g["tf"], g["half"])])
+        x = g["r"].to_numpy() - base
+        ok = ~np.isnan(x)
+        g = g[ok]
+        x = x[ok]
+        if len(g) < 50:
+            continue
+        nd = g.groupby(["sym", "date"]).ngroups
+        rows.append(dict(mode=mode, A=A, E=Ex, n=len(g), perday=len(g) / max(nd, 1), hold=g["h"].mean(), win=100 * (g["r"] > 0).mean(),
+                         atr=g["r"].mean(), usd=g["usd"].mean(), vr=x.mean(), t=tday(x, g["date"], g["sym"]),
+                         h1=x[(g["half"] == "H1").to_numpy()].mean(), h2=x[(g["half"] == "H2").to_numpy()].mean(),
+                         spy=x[(g["sym"] == "SPY").to_numpy()].mean(), qqq=x[(g["sym"] == "QQQ").to_numpy()].mean(),
+                         lng=x[(g["side"] == 1).to_numpy()].mean(), sht=x[(g["side"] == -1).to_numpy()].mean()))
+    Bt = pd.DataFrame(rows)
+    Bt["held"] = (Bt["t"] >= 2) & (Bt["h1"] > 0) & (Bt["h2"] > 0) & (Bt["spy"] > 0) & (Bt["qqq"] > 0) & (Bt["n"] >= 200)
+    Bt = Bt.sort_values("t", ascending=False)
+    held = Bt[Bt["held"]]
+    md[4:4] = ["## The answer in 30 seconds",
+               f"- **Entry + exit rules that HELD UP: {len(held)}**" + (" - best: " + "; ".join(
+                   (f"long when the angle {'crosses UP through' if z.mode == 'up' else 'drops DOWN through'} {z.A}° "
+                    f"(short: {'down through' if z.mode == 'up' else 'up through'} -{z.A}°), exit when it closes back under {z.E}° "
+                    f"(short: over {-z.E}°): {z.vr:+.3f} ATR vs random (t {z.t:.1f}), avg hold {z.hold:.0f} min, ${z.usd:+.3f}/share")
+                   for z in held.head(4).itertuples()) if len(held) else " - none."),
+               "- **The map (section A)** shows which angles price tends to keep going from (LONGS / SHORTS in the last column) - "
+               "only angles with t 2+ and the same sign in both halves of the year are marked.", ""]
+    md += ["", "## B. Enter on an angle, exit on an angle (every combination, sorted by t)",
+           "**Entry UP A** = long when the angle crosses up through A (short: down through -A). **Entry FLATTEN A** = long when a steeper "
+           f"line comes back down through A (short: mirror). **Exit E** = close the long when the angle closes under E (short: over -E), "
+           f"max {ANG_MAXH} candles, flat 15:55. vs random = minus random entries the same way with the SAME exit rule. **HELD UP** = t >= 2, "
+           "positive in both halves, on SPY and QQQ, 200+ trades.",
+           "| Entry | Exit | Trades | Per day | Avg hold (candles) | Win % | ATR / trade | $/share | **vs random** (t) | H1 / H2 | SPY / QQQ | Longs / Shorts | |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in Bt.itertuples():
+        md.append(f"| {'UP' if z.mode == 'up' else 'FLATTEN'} {z.A}° | under {z.E}° | {z.n} | {z.perday:.1f} | {z.hold:.0f} | {z.win:.0f}% | {z.atr:+.3f} | "
+                  f"{z.usd:+.3f} | **{z.vr:+.3f}** ({z.t:.1f}) | {z.h1:+.3f} / {z.h2:+.3f} | {z.spy:+.3f} / {z.qqq:+.3f} | {z.lng:+.3f} / {z.sht:+.3f} | "
+                  f"{'✅' if z.held else ''} |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/ang_{stamp}.md", f"{OUT}/ang_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
