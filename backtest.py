@@ -1,5 +1,7 @@
 """
-23-DEGREE SIGNALS -> PRICE JUMPS BY MULTI-TIMEFRAME VIX FIX - LAST 12 MONTHS, 1m (MODE=jump, the default) - how often a
+FIB LEVELS vs FAKE LEVELS - LAST 12 MONTHS, 1m + 5m (MODE=fib, the default) - pullbacks in a trend-line swing to the fib
+  levels (23.6/38.2/50/61.8/78.6) vs fake levels in between (30/45/55/70/86), same rules, vs random + the classic bracket. DATA ONLY.
+23-DEGREE SIGNALS -> PRICE JUMPS BY MULTI-TIMEFRAME VIX FIX - LAST 12 MONTHS, 1m (MODE=jump) - how often a
   TL ANGLE signal is followed by a +1 / +2 ATR jump, split by whether the Vix Fix on 1m / 5m / 15m agrees. DATA ONLY.
 PAUSE OR TURN? - LAST 12 MONTHS, 1m (MODE=pause) - when a steep trend line cools off, which reading (Vix Fix,
   Stoch, volume, VWAP, TTM, pullback depth, cooling speed, 5m / slow line, time) tells a PAUSE from a TURN. DATA ONLY.
@@ -119,7 +121,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "jump").strip().lower() or "jump"
+MODE = os.getenv("MODE", "fib").strip().lower() or "fib"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -419,6 +421,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "fib":
+        return fib_main()
     if MODE == "jump":
         return jump_main()
     if MODE == "pause":
@@ -6912,6 +6916,291 @@ def jump_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/jump_{stamp}.md", f"{OUT}/jump_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ FIB LEVELS vs FAKE LEVELS (MODE=fib) - LAST 12 MONTHS
+# A swing = the trend line (EMA 13/34 + VWAP) turns GREEN -> swing LOW = lowest low of the last FIB_LB candles (today only),
+# swing HIGH = the highest high since. The high keeps updating while price makes new highs; after a real pullback
+# (38.2%+) and a new high, the pullback low becomes the new swing low. The swing dies when price breaks the low, at the
+# day's end, or FIB_MAXAGE candles after the high. Short side = the exact mirror on a RED line.
+# Levels are measured down from the high: 23.6 / 38.2 / 50 / 61.8 / 78.6 = the FIB levels, and fake levels in between
+# (30 / 45 / 55 / 70 / 86) run through EXACTLY the same rules. If fib levels are special they must beat their neighbors.
+FIB_REAL = (0.236, 0.382, 0.5, 0.618, 0.786)
+FIB_FAKE = (0.30, 0.45, 0.55, 0.70, 0.86)
+FIB_K = (1, 2, 3, 5, 10, 20)
+FIB_LB = int(os.getenv("FIB_LB", "30"))
+FIB_MINLEG = float(os.getenv("FIB_MINLEG", "3"))     # swing must be at least this many ATR tall
+FIB_MAXAGE = int(os.getenv("FIB_MAXAGE", "60"))
+FIB_MAXH = 60                                         # bracket trade time limit (candles)
+
+
+def fib_events(ind, sd, ratios, minleg=FIB_MINLEG, lb=FIB_LB, maxage=FIB_MAXAGE, t_from=935, t_to=1530):
+    """First touch of each level per swing. Uses only the swing known at the close of the PREVIOUS candle.
+    Returns list of (touch candle, ratio, level price, swing low, swing high) in REAL prices."""
+    if sd == 1:
+        h, l, st = ind["h"], ind["l"], ind["st"]
+    else:                                   # mirror: a short on real prices = a long on negated prices
+        h, l, st = -ind["l"], -ind["h"], -ind["st"]
+    hm, day, a = ind["hm"], ind["day"], ind["atr"]
+    n = len(h)
+    hl, ll, sl, hml, dl, al = h.tolist(), l.tolist(), st.tolist(), hm.tolist(), day.tolist(), a.tolist()
+    out = []
+    active = False
+    L = H = 0.0
+    iH = 0
+    pl = 1e18
+    touched = set()
+    d0 = 0                                  # first candle of today's 9:30+ session
+    for i in range(1, n):
+        if dl[i] != dl[i - 1]:
+            active = False
+        if hml[i] < 930 or hml[i] >= 1555:
+            active = False
+            d0 = i + 1
+            continue
+        # 1) touches on this candle (swing as known at the previous close)
+        if active:
+            ok = t_from <= hml[i] < t_to and (H - L) >= minleg * al[i - 1] and i - iH <= maxage
+            for r in ratios:
+                if r in touched:
+                    continue
+                P = H - r * (H - L)
+                if ll[i] <= P:
+                    touched.add(r)              # a level counts as used even when the touch can't be traded
+                    if ok:
+                        out.append((i, r, P, L, H))
+        # 2) update the swing with this candle
+        if active and ll[i] < L:
+            active = False
+        if active:
+            if hl[i] > H:
+                if pl < 1e17 and (H - pl) >= 0.382 * (H - L):
+                    L = pl                  # a real pullback made a new (higher) swing low
+                H, iH, touched, pl = hl[i], i, set(), 1e18
+            else:
+                pl = min(pl, ll[i])
+        # 3) a new swing starts when the line turns green (mirror: red)
+        if not active and sl[i] == 1 and sl[i - 1] != 1:
+            s0 = max(d0, i - lb + 1)
+            seg = ll[s0:i + 1]
+            k = s0 + int(np.argmin(seg))
+            L = ll[k]
+            hs = hl[k:i + 1]
+            iH = k + int(np.argmax(hs))
+            H = hl[iH]
+            pl = min(ll[iH + 1:i + 1]) if iH < i else 1e18
+            touched = {r for r in ratios if pl <= H - r * (H - L)}     # levels price already reached since the high
+            active = H > L
+    if sd == 1:
+        return out
+    return [(i, r, -P, -L, -H) for (i, r, P, L, H) in out]
+
+
+def fib_bracket(ind, e, en, s, stop, tgt, intrabar, maxh=FIB_MAXH):
+    """the classic fib trade: stop = the swing low (high for shorts) broken by $0.01, target = back to the swing high (limit,
+    filled when traded $0.01 through). Stop checked first. Intrabar entries can't hit the target on the entry candle.
+    Time limit maxh candles / 15:55. Returns ($ per share, outcome 1 target / -1 stop / 0 time)."""
+    o, h, l, c, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["hm"], ind["day"]
+    n = len(o)
+    j = e
+    while True:
+        if s == 1:
+            if l[j] < stop - 0.01:
+                px = min(o[j], stop - 0.01) if j > e else stop - 0.01
+                return px - en, -1
+            if (j > e or not intrabar) and h[j] >= tgt + 0.01:
+                return max(o[j], tgt) - en if j > e else tgt - en, 1
+        else:
+            if h[j] > stop + 0.01:
+                px = max(o[j], stop + 0.01) if j > e else stop + 0.01
+                return en - px, -1
+            if (j > e or not intrabar) and l[j] <= tgt - 0.01:
+                return en - (min(o[j], tgt) if j > e else tgt), 1
+        if j - e + 1 >= maxh or hm[j] >= 1555 or j + 1 >= n or day[j + 1] != day[j]:
+            return s * (c[j] - en), 0
+        j += 1
+
+
+def fib_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("FIB_TFS", "1,5").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(17)
+    KN = [f"k{k}" for k in FIB_K]
+    AC = [f"a{k}" for k in FIB_K]
+    ratios = tuple(sorted(FIB_REAL + FIB_FAKE))
+    rows, base = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, c, a, hm, day = ind["o"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            inyr = ts >= yr_start
+            half = np.where(ts < mid, "H1", "H2")
+            nev = 0
+            for sdv in (1, -1):
+                ev = [x for x in fib_events(ind, sdv, ratios) if inyr[x[0]]]
+                nev += len(ev)
+                for kind in ("LIMIT", "HOLD"):
+                    E_ = []
+                    for (i, r, P, L, H) in ev:
+                        if kind == "LIMIT":
+                            if (sdv == 1 and ind["l"][i] < P - 0.01) or (sdv == -1 and ind["h"][i] > P + 0.01):
+                                px = min(o[i], P) if sdv == 1 else max(o[i], P)
+                                E_.append((i, i, px, r, L, H))
+                        else:
+                            if i + 1 < n and day[i + 1] == day[i] and hm[i + 1] < 1555 and ((sdv == 1 and c[i] >= P) or (sdv == -1 and c[i] <= P)):
+                                E_.append((i, i + 1, o[i + 1], r, L, H))
+                    if not E_:
+                        continue
+                    si = np.array([x[0] for x in E_])
+                    ei = np.array([x[1] for x in E_])
+                    ep = np.array([x[2] for x in E_], dtype=float)
+                    sd = np.full(len(si), sdv)
+                    R, _, _ = bnc_outcomes(ind, ei, ep, sd, ep - sd * 1e9, ks=FIB_K)
+                    br = [fib_bracket(ind, e_, en_, sdv, L_, H_, kind == "LIMIT") for (_, e_, en_, _, L_, H_) in E_]
+                    A_ = a[si]
+                    d_ = pd.DataFrame(np.c_[R, R / A_[:, None]], columns=KN + AC)
+                    d_["br"] = [b[0] for b in br]
+                    d_["bra"] = d_["br"] / A_
+                    d_["bro"] = [b[1] for b in br]
+                    d_["ratio"] = [x[3] for x in E_]
+                    d_["kind"], d_["sym"], d_["tf"], d_["side"] = kind, sym, tf, sdv
+                    d_["half"], d_["date"] = half[si], day[si]
+                    rows.append(d_.dropna(subset=[KN[0]]))
+            pool = np.nonzero(inyr & (hm >= 935) & (hm < 1530))[0]
+            pool = pool[(pool + 1 < n)]
+            pool = pool[day[pool + 1] == day[pool]]
+            ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("FIB_RANDOM", "6000"))), replace=False))
+            for sdv in (1, -1):
+                e_ = ridx + 1
+                R, _, _ = bnc_outcomes(ind, e_, o[e_], np.full(len(e_), sdv), o[e_] - sdv * 1e9, ks=FIB_K)
+                d_ = pd.DataFrame(np.c_[R, R / a[ridx][:, None]], columns=KN + AC)
+                d_["sym"], d_["tf"], d_["side"], d_["half"] = sym, tf, sdv, half[ridx]
+                base.append(d_.dropna(subset=[KN[0]]))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | level touches {nev}", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B_ = pd.concat(base, ignore_index=True)
+    keyc = ["sym", "tf", "side", "half"]
+    bm = B_.groupby(keyc)[AC].mean().reset_index()
+    E = E.merge(bm.rename(columns={c_: "r_" + c_ for c_ in AC}), on=keyc, how="left")
+    for c_ in AC:
+        E["d_" + c_] = E[c_] - E["r_" + c_]
+    E["fib"] = E["ratio"].round(3).isin([round(x, 3) for x in FIB_REAL])
+
+    def tday(g, col):
+        r = g[col].dropna()
+        if len(r) < 10:
+            return np.nan
+        mu = r.mean()
+        dev = (r - mu).groupby([g.loc[r.index, "sym"], g.loc[r.index, "date"]]).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(r)
+        return mu / se if se > 0 else np.nan
+
+    def diff_t(g, col, boots=300):
+        """fib levels minus fake levels, with the noise found by re-drawing whole days (touches on one day overlap)"""
+        g = g.dropna(subset=[col])
+        f, k = g[g["fib"]], g[~g["fib"]]
+        if len(f) < 10 or len(k) < 10:
+            return np.nan, np.nan
+        dd = f[col].mean() - k[col].mean()
+        keys = g["sym"].astype(str) + "|" + g["date"].astype(str)
+        ukeys = keys.unique()
+        rs = np.random.default_rng(5)
+        grp = {kk: v for kk, v in g.groupby(keys)}
+        bs = []
+        for _ in range(boots):
+            pick = rs.choice(ukeys, len(ukeys), replace=True)
+            gg = pd.concat([grp[p] for p in pick])
+            ff, kk2 = gg[gg["fib"]], gg[~gg["fib"]]
+            if len(ff) and len(kk2):
+                bs.append(ff[col].mean() - kk2[col].mean())
+        se = np.std(bs)
+        return dd, (dd / se if se > 0 else np.nan)
+
+    ndays = max(1, len(pd.bdate_range(yr_start.date(), end.date())))
+    HK = "d_a10"
+    syms = list(SYMBOLS)
+    md = [f"# FIB LEVELS vs FAKE LEVELS - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d} only, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Touches 9:35-15:30. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"**Swing** = the trend line turns GREEN -> swing low = lowest low of the last {FIB_LB} candles, swing high = highest high since "
+          f"(keeps rising with new highs; the swing must be {FIB_MINLEG:g}+ ATR tall; it dies when price breaks the low, at the day's end, or "
+          f"{FIB_MAXAGE} candles after the high). SHORT = the mirror on a RED line. **Levels** = how far price pulled back from the high: "
+          "**FIB** 23.6 / 38.2 / 50 / 61.8 / 78.6% and **fake** 30 / 45 / 55 / 70 / 86% - same rules, only the number differs. "
+          "First touch of each level per swing. **LIMIT** = a limit order sitting at the level, filled when price trades $0.01 through. "
+          "**HOLD** = the touch candle closes back on the trend side of the level -> enter the next open. **vs random** = result in ATR "
+          "minus random entries the same way on the same chart and half-year. **Bracket** = the classic fib trade: stop $0.01 past the "
+          "swing low, target = back to the swing high, 60 candles max (no random comparison needed - on random prices it averages 0). "
+          "**t** = edge / noise, noise measured day by day (2+ = unlikely luck).", ""]
+    summ = ["## The answer in 30 seconds"]
+    ladders = []
+    for tf in tfs:
+        for kind in ("LIMIT", "HOLD"):
+            g = E[(E["tf"] == tf) & (E["kind"] == kind)]
+            if not len(g):
+                continue
+            d10, t10 = diff_t(g, HK)
+            dbr, tbr = diff_t(g, "bra")
+            fa, ka = g[g["fib"]], g[~g["fib"]]
+
+            def fmk(z):
+                return z[z["fib"]][HK].mean() - z[~z["fib"]][HK].mean()
+            parts = [fmk(g[g["half"] == hh]) for hh in ("H1", "H2")] + [fmk(g[g["sym"] == s_]) for s_ in syms]
+            wins = (t10 >= 3) and all(p_ > 0 for p_ in parts if not np.isnan(p_))
+            summ.append(f"- **{tf}m {kind}**: FIB levels {fa[HK].mean():+.3f} ATR vs random after 10 candles, fake levels {ka[HK].mean():+.3f} "
+                        f"-> **fib minus fake {d10:+.3f} (t {t10:.1f})** | H1 / H2 {parts[0]:+.3f} / {parts[1]:+.3f} | "
+                        + " / ".join(f"{s_} {p_:+.3f}" for s_, p_ in zip(syms, parts[2:])) +
+                        f" -> **{'FIB WINS' if wins else 'no fib edge'}**. Bracket: fib {fa['bra'].mean():+.3f} ATR, fake {ka['bra'].mean():+.3f} "
+                        f"-> fib minus fake {dbr:+.3f} (t {tbr:.1f}). All levels together: {g[HK].mean():+.3f} ATR vs random (t {tday(g, HK):.1f}).")
+            ladders += [f"## {tf}m - {kind} - every level, shallow to deep",
+                        "| Level | Type | Touches | Per day | **10 c vs random** (t) | 1 / 3 / 5 / 20 c vs random | H1 / H2 (10 c) | "
+                        + " / ".join(syms) + " (10 c) | Longs / Shorts (10 c) | Bracket ATR (t) | Bracket $/sh | Target / stop / time | |",
+                        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            for r in ratios:
+                z = g[np.isclose(g["ratio"], r)]
+                if len(z) < 30:
+                    ladders.append(f"| {100 * r:.1f}% | {'FIB' if np.isclose(FIB_REAL, r).any() else 'fake'} | {len(z)} | too few |||||||||")
+                    continue
+                isf = np.isclose(FIB_REAL, r).any()
+                t_ = tday(z, HK)
+                h1, h2 = z[z["half"] == "H1"][HK].mean(), z[z["half"] == "H2"][HK].mean()
+                bys = [z[z["sym"] == s_][HK].mean() for s_ in syms]
+                held = (t_ >= 2) and h1 > 0 and h2 > 0 and all(v > 0 for v in bys if not np.isnan(v)) and len(z) >= 200
+                oc = z["bro"].value_counts(normalize=True)
+                ladders.append(f"| **{100 * r:.1f}%** | {'**FIB**' if isf else 'fake'} | {len(z)} | {len(z) / ndays / len(SYMBOLS) / 2:.1f} | "
+                               f"**{z[HK].mean():+.3f}** ({t_:.1f}) | " + " / ".join(f"{z['d_a' + str(k)].mean():+.3f}" for k in (1, 3, 5, 20)) +
+                               f" | {h1:+.3f} / {h2:+.3f} | " + " / ".join(f"{v:+.3f}" for v in bys) +
+                               f" | {z[z['side'] == 1][HK].mean():+.3f} / {z[z['side'] == -1][HK].mean():+.3f} | {z['bra'].mean():+.3f} ({tday(z, 'bra'):.1f}) | "
+                               f"{z['br'].mean():+.3f} | {100 * oc.get(1, 0):.0f}% / {100 * oc.get(-1, 0):.0f}% / {100 * oc.get(0, 0):.0f}% | {'✅' if held else ''} |")
+            ladders.append("")
+    summ += ["- **How to read it:** if fib levels were special, every FIB row in the ladders below would beat the fake rows next to it, "
+             "and 'fib minus fake' would be clearly positive. If all levels look alike, the pullback itself is what matters, "
+             "not the fib number. **FIB WINS** needs fib minus fake t 3+ AND positive in both halves AND on every symbol - on random prices "
+             "'fib minus fake' reached t 3.0 by pure luck, so t 2 is not enough here. ✅ = that level held up on its own (t 2+, positive in "
+             "both halves and on every symbol, 200+ touches) - **luck check: on random prices 1-2 levels got a ✅ in every run** (40 rows "
+             "tested), so one ✅ alone means nothing; it needs to show on BOTH 1m and 5m. **LIMIT** rows run a little negative even on random "
+             "prices (about -0.05 to -0.10 ATR on 1m): that's the real cost of waiting for price to trade $0.01 through your limit.", ""]
+    text = "\n".join(md + summ + ladders + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/fib_{stamp}.md", f"{OUT}/fib_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
