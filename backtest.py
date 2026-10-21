@@ -1,5 +1,7 @@
 """
-FIB LEVELS vs FAKE LEVELS - LAST 12 MONTHS, 1m + 5m (MODE=fib, the default) - pullbacks in a trend-line swing to the fib
+VIX FIX MOVING AVERAGES -> TOPS & BOTTOMS - LAST 12 MONTHS, 1m / 3m / 5m (MODE=vma, the default) - your VIX FIX 5 pane (0-100) with
+  an average on each side: TURN / FADE / CROSS rules x depth x EMA/SMA 5/10/20 x trend-line filters, vs random. DATA ONLY.
+FIB LEVELS vs FAKE LEVELS - LAST 12 MONTHS, 1m + 5m (MODE=fib) - pullbacks in a trend-line swing to the fib
   levels (23.6/38.2/50/61.8/78.6) vs fake levels in between (30/45/55/70/86), same rules, vs random + the classic bracket. DATA ONLY.
 23-DEGREE SIGNALS -> PRICE JUMPS BY MULTI-TIMEFRAME VIX FIX - LAST 12 MONTHS, 1m (MODE=jump) - how often a
   TL ANGLE signal is followed by a +1 / +2 ATR jump, split by whether the Vix Fix on 1m / 5m / 15m agrees. DATA ONLY.
@@ -121,7 +123,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "fib").strip().lower() or "fib"
+MODE = os.getenv("MODE", "vma").strip().lower() or "vma"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -421,6 +423,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "vma":
+        return vma_main()
     if MODE == "fib":
         return fib_main()
     if MODE == "jump":
@@ -6257,7 +6261,7 @@ def angs_main():
         x = g["x"]
         if len(x) < 2:
             return np.nan
-        dev = (x - x.mean()).groupby([g["sym"], g["date"]]).sum()
+        dev = (x - x.mean()).groupby(g["date"]).sum()      # one cluster per DAY across symbols (SPY / QQQ / IWM move together)
         se = np.sqrt((dev ** 2).sum()) / len(x)
         return x.mean() / se if se > 0 else np.nan
 
@@ -7201,6 +7205,320 @@ def fib_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/fib_{stamp}.md", f"{OUT}/fib_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ VIX FIX MOVING AVERAGES -> TOPS & BOTTOMS (MODE=vma) - LAST 12 MONTHS
+# Uses your VIX FIX 5 pane on the 0-100 scale (fear = bottom bars, greed = top bars) and a moving average of each side.
+# BOTTOM (LONG) rules use the FEAR side, TOP (SHORT) rules are the exact mirror on the GREED side:
+#   TURN  = the fear average was D+ deep and turns back (falls after rising) - first turn per visit above D
+#   FADE  = fear bars peaked at D+ in the last 10 candles while above their average, and now close back BELOW the average
+#   CROSS = the greed average crosses above the fear average, after the fear average was D+ in the last 20 candles
+# Filters (the trend line, EMA 13):
+#   none | ANGLE UP = the line's angle is rising (vs 2 candles ago) | RECLAIM = price closes back over the line |
+#   WITH TREND = the trend line is GREEN (buy fear in an uptrend; shorts: greed in a RED downtrend)
+VMA_TYPES = ("EMA", "SMA")
+VMA_LENS = (5, 10, 20)
+VMA_DEPTHS = (40, 50, 60, 70, 80)
+VMA_RULES = ("TURN", "FADE", "CROSS")
+VMA_FILTERS = ("none", "ANGLE UP", "RECLAIM", "WITH TREND")
+VMA_K = (1, 2, 3, 5, 10, 20)
+
+
+def vma_ma(x, typ, n):
+    s = pd.Series(x)
+    return (s.ewm(span=n, adjust=False).mean() if typ == "EMA" else s.rolling(n).mean()).to_numpy()
+
+
+def vma_signals(X, M, O, D, rule):
+    """X = this side's bars (fear for longs), M = its average, O = the other side's average. Signal at the candle's close."""
+    Mp, Mpp = np.r_[np.nan, M[:-1]], np.r_[np.nan, np.nan, M[:-2]]
+    if rule == "TURN":
+        turn = (Mp >= D) & (M < Mp) & (Mp >= Mpp)
+        above = Mp >= D
+        ep = np.cumsum(np.r_[True, above[1:] & ~above[:-1]])          # a new visit above D starts a new episode
+        first = pd.Series(turn).groupby(ep).cumsum().to_numpy() == 1
+        return turn & first
+    if rule == "FADE":
+        hot = (X >= D) & (X > M)
+        hot10 = pd.Series(hot.astype(float)).rolling(10, min_periods=1).max().to_numpy() > 0
+        Xp = np.r_[np.nan, X[:-1]]
+        return (X < M) & (Xp >= Mp) & np.r_[False, hot10[:-1]]
+    # CROSS
+    Op = np.r_[np.nan, O[:-1]]
+    deep = pd.Series(M).rolling(20, min_periods=1).max().to_numpy() >= D
+    return (O > M) & (Op <= Mp) & deep
+
+
+def vma_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("VMA_TFS", "1,3,5").split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(18)
+    K = len(VMA_K)
+    # per setting: list of per-(sym, day, side) sums -> exact day-clustered stats without keeping every trade
+    # columns: K residuals (ATR vs random) | $ at 5 | $ at 10 | clean - random clean | heat 10 | best 10 | green 10
+    NC = K + 6
+    AGG = {}
+    syms_seen = []
+    ndays_tot = {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        syms_seen.append(sym)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day, st = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["st"]
+            n = len(o)
+            ts = df.index
+            inyr = np.asarray(ts >= yr_start)
+            half = np.where(ts < mid, 0, 1)
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F, nan=0.0), np.nan_to_num(G, nan=0.0)
+            ang = ang_series(df, ind)
+            ef = df["close"].ewm(span=13, adjust=False).mean().to_numpy()
+            # last tradable candle of each day (before 15:55)
+            ok_c = hm < 1555
+            dcode = pd.factorize(day)[0]
+            dord = np.array([d_.toordinal() for d_ in day])          # calendar day (the same on every symbol)
+            lastok = pd.Series(np.where(ok_c, np.arange(n), -1)).groupby(dcode).transform("max").to_numpy()
+            base_ok = inyr & (hm >= 935 * 1) & (hm < 1530) & (np.arange(n) + 1 < n)
+            base_ok[:-1] &= dcode[1:] == dcode[:-1]
+            offs = np.arange(20)
+
+            def outcomes(idx, sd):
+                e = idx + 1
+                le = lastok[e]
+                en = o[e]
+                A = a[idx]
+                J = np.minimum(e[:, None] + offs[None, :], le[:, None])
+                cl = c[J]
+                hi_, lo_ = h[J], l[J]
+                s_ = sd[:, None]
+                retk = np.stack([s_[:, 0] * (cl[:, k - 1] - en) for k in VMA_K], axis=1)
+                fav = np.where(s_ == 1, hi_ - en[:, None], en[:, None] - lo_)
+                adv = np.where(s_ == 1, en[:, None] - lo_, hi_ - en[:, None])
+                A2 = A[:, None]
+                hitF = fav >= A2
+                hitA = adv >= A2
+                fF = np.where(hitF.any(1), hitF.argmax(1), 99)
+                fA = np.where(hitA.any(1), hitA.argmax(1), 99)
+                clean = ((fF < fA) & (fF < 99)).astype(float)
+                heat10 = adv[:, :10].max(1) / A
+                best10 = fav[:, :10].max(1) / A
+                return retk, retk / A2, clean, heat10, best10
+
+            # random baseline per side and half-year
+            pool = np.nonzero(base_ok)[0]
+            rid = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("VMA_RANDOM", "8000"))), replace=False))
+            BASE = {}
+            for sdv in (1, -1):
+                _, RA, CL, _, _ = outcomes(rid, np.full(len(rid), sdv))
+                for hh in (0, 1):
+                    m = half[rid] == hh
+                    BASE[(sdv, hh)] = (np.nanmean(RA[m], 0), np.nanmean(CL[m]))
+            nd = len(np.unique(day[inyr]))
+            ndays_tot[(sym, tf)] = nd
+            filt = {}
+            angp2 = np.r_[np.nan, np.nan, ang[:-2]]
+            for sdv in (1, -1):
+                filt[(sdv, "none")] = np.ones(n, dtype=bool)
+                filt[(sdv, "ANGLE UP")] = (ang > angp2) if sdv == 1 else (ang < angp2)
+                filt[(sdv, "RECLAIM")] = (c > ef) if sdv == 1 else (c < ef)
+                filt[(sdv, "WITH TREND")] = (st == 1) if sdv == 1 else (st == -1)
+            cnt = 0
+            for typ in VMA_TYPES:
+                for L_ in VMA_LENS:
+                    MF, MG = vma_ma(F, typ, L_), vma_ma(G, typ, L_)
+                    for D in VMA_DEPTHS:
+                        for rule in VMA_RULES:
+                            sig = {1: vma_signals(F, MF, MG, D, rule), -1: vma_signals(G, MG, MF, D, rule)}
+                            for fl in VMA_FILTERS:
+                                parts = []
+                                for sdv in (1, -1):
+                                    m = sig[sdv] & filt[(sdv, fl)] & base_ok
+                                    idx = np.nonzero(m)[0]
+                                    if not len(idx):
+                                        continue
+                                    sd = np.full(len(idx), sdv)
+                                    R, RA, CL, HT, BS = outcomes(idx, sd)
+                                    hh = half[idx]
+                                    bR = np.stack([BASE[(sdv, x)][0] for x in hh])
+                                    bC = np.array([BASE[(sdv, x)][1] for x in hh])
+                                    M_ = np.c_[RA - bR, R[:, VMA_K.index(5)], R[:, VMA_K.index(10)], CL - bC, HT, BS,
+                                               (R[:, VMA_K.index(10)] > 0).astype(float)]
+                                    key = dord[idx] * 2 + (sdv == 1)
+                                    uk, inv = np.unique(key, return_inverse=True)
+                                    S_ = np.zeros((len(uk), NC))
+                                    np.add.at(S_, inv, M_)
+                                    nn = np.bincount(inv)
+                                    parts.append(pd.DataFrame(np.c_[S_, nn, np.full(len(uk), sdv), half[idx][np.unique(inv, return_index=True)[1]]],
+                                                              columns=list(range(NC)) + ["n", "side", "half"]).assign(sym=sym, day=uk // 2))
+                                    cnt += len(idx)
+                                if parts:
+                                    AGG.setdefault((tf, typ, L_, D, rule, fl), []).append(pd.concat(parts, ignore_index=True))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s) | signals tested {cnt}", flush=True)
+        del df1
+
+    # ---------- stats per setting ----------
+    rows = []
+    for key, lst in AGG.items():
+        g = pd.concat(lst, ignore_index=True)
+        N = g["n"].sum()
+        if N < 30:
+            continue
+        r = dict(tf=key[0], typ=key[1], L=key[2], D=key[3], rule=key[4], fl=key[5], n=int(N))
+        gd = g.groupby(["day", "side"])[list(range(NC)) + ["n"]].sum()   # SPY / QQQ / IWM move together -> one cluster per day
+        for kk, k in enumerate(VMA_K):
+            mu = g[kk].sum() / N
+            dev = gd[kk] - gd["n"] * mu
+            se = np.sqrt((dev ** 2).sum()) / N
+            r[f"e{k}"] = mu
+            r[f"t{k}"] = mu / se if se > 0 else np.nan
+
+            def part(mask, kk=kk):
+                nn = g.loc[mask, "n"].sum()
+                return g.loc[mask, kk].sum() / nn if nn else np.nan
+            r[f"h1_{k}"], r[f"h2_{k}"] = part(g["half"] == 0), part(g["half"] == 1)
+            r[f"L_{k}"], r[f"S_{k}"] = part(g["side"] == 1), part(g["side"] == -1)
+            for s_ in SYMBOLS:
+                r[f"{s_}_{k}"] = part(g["sym"] == s_)
+        r["usd5"], r["usd10"] = g[K].sum() / N, g[K + 1].sum() / N
+        r["clean"], r["heat"], r["best"], r["green"] = g[K + 2].sum() / N, g[K + 3].sum() / N, g[K + 4].sum() / N, g[K + 5].sum() / N
+        r["perday"] = N / max(1, np.mean([ndays_tot[(s_, key[0])] for s_ in syms_seen])) / len(syms_seen)
+        rows.append(r)
+    Sx = pd.DataFrame(rows)
+    T_PASS = float(os.getenv("VMA_T", "3.5"))
+
+    def held_at(z, k):
+        return (z[f"t{k}"] >= T_PASS) and z[f"h1_{k}"] > 0 and z[f"h2_{k}"] > 0 and all(z[f"{s_}_{k}"] > 0 for s_ in SYMBOLS) and z["n"] >= 200
+
+    Sx_d = Sx.to_dict("records")
+    lookd = {(z["tf"], z["typ"], z["L"], z["D"], z["rule"], z["fl"]): z for z in Sx_d}
+
+    def plateau(z, k):
+        """the neighbors (depth +-10, next shorter / longer average) must also be positive"""
+        nb = []
+        for D2 in (z["D"] - 10, z["D"] + 10):
+            nb.append(lookd.get((z["tf"], z["typ"], z["L"], D2, z["rule"], z["fl"])))
+        li = VMA_LENS.index(z["L"])
+        for j in (li - 1, li + 1):
+            if 0 <= j < len(VMA_LENS):
+                nb.append(lookd.get((z["tf"], z["typ"], VMA_LENS[j], z["D"], z["rule"], z["fl"])))
+        nb = [x for x in nb if x is not None]
+        return len(nb) >= 2 and all(x[f"e{k}"] > 0 for x in nb)
+
+    best_rows = []
+    for z in Sx_d:
+        for k in (3, 5, 10):
+            if held_at(z, k) and plateau(z, k):
+                best_rows.append((z, k))
+    best_rows.sort(key=lambda zk: -zk[0][f"t{zk[1]}"])
+
+    def fmt(z, k, mark=""):
+        syms = " / ".join(f"{z[f'{s_}_{k}']:+.3f}" for s_ in SYMBOLS)
+        return (f"| {z['tf']}m | {z['rule']} | {z['fl']} | {z['typ']} {z['L']} | {z['D']} | {z['n']} | {z['perday']:.1f} | {k} ({k * z['tf']} min) | "
+                f"**{z[f'e{k}']:+.3f}** ({z[f't{k}']:.1f}) | " + " / ".join(f"{z[f'e{kk}']:+.3f}" for kk in VMA_K) +
+                f" | {z[f'h1_{k}']:+.3f} / {z[f'h2_{k}']:+.3f} | {syms} | {z[f'L_{k}']:+.3f} / {z[f'S_{k}']:+.3f} | "
+                f"{100 * z['clean']:+.0f} | {z['heat']:.2f} / {z['best']:.2f} | {z['usd5']:+.3f} / {z['usd10']:+.3f} | {100 * z['green']:.0f}% | {mark} |")
+
+    HDR = ("| Chart | Rule | Filter | Average | Depth | Signals | Per day | Hold (candles) | **ATR vs random** (t) | vs random after "
+           + " / ".join(str(k) for k in VMA_K) + " candles | H1 / H2 | " + " / ".join(SYMBOLS) +
+           " | Bottoms (longs) / Tops (shorts) | Clean jump vs random (pts) | Heat / best move in 10 (ATR) | $/share at 5 / 10 | Green at 10 | |")
+    SEP = "|" + "---|" * 18
+    ndays = max(1, len(pd.bdate_range(yr_start.date(), end.date())))
+    md = [f"# VIX FIX MOVING AVERAGES -> TOPS & BOTTOMS - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d} only, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in tfs)}. Signals 9:35-15:30, entry at the "
+          f"next open. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. Settings tested: {len(Sx)}.",
+          "Your VIX FIX 5 pane on the **0-100 scale**, with a moving average on each side. **BOTTOM = LONG** from the FEAR side, **TOP = SHORT** "
+          "= the mirror on the GREED side. **TURN** = the fear average got to the depth (D) or more and turns back (first turn per visit). "
+          "**FADE** = fear bars peaked at D+ in the last 10 candles while above their average, and now close back BELOW the average. "
+          "**CROSS** = the greed average crosses above the fear average, after the fear average was D+ in the last 20 candles. "
+          "**Filters** (trend line = EMA 13): **ANGLE UP** = the line's angle is rising vs 2 candles ago; **RECLAIM** = price closes back over the "
+          "line; **WITH TREND** = the trend line is GREEN (shorts: RED); none = no filter. **ATR vs random** = result in ATR minus random entries "
+          "the same way on the same chart and half-year (the fair score). **t** = edge / noise, measured day by day with all symbols of a day together (SPY, QQQ and IWM move together, so they are not 3 separate tests). **Clean jump** = how much more "
+          "often price went +1 ATR before -1 ATR (within 20 candles) than random, in points. **Heat** = the worst move against you in the first 10 "
+          "candles; **best** = the best move for you (ATR).",
+          f"**HELD UP** = t {T_PASS:g}+ at a 3, 5 or 10 candle hold, positive in BOTH halves of the year (split {mid:%Y-%m-%d}), on EVERY symbol, 200+ "
+          "signals, AND its neighbors (depth +-10, the next shorter / longer average) also positive. **Luck check:** "
+          f"{len(Sx)} settings x 3 holds are tested, so the luckiest ones always look good. On random prices that move together like SPY / QQQ / IWM (5 runs) "
+          "the luckiest setting reached t 2.5-3.2 and at t 3 1-2 settings passed every other check; at t 3.5 none did - so the bar is t 3.5. "
+          "Run it with SPY, QQQ AND IWM (with fewer symbols more luck gets through).", ""]
+    md += ["## The answer in 30 seconds"]
+    if best_rows:
+        md.append(f"- **Settings that HELD UP: {len(best_rows)}.** Best:")
+        for z, k in best_rows[:5]:
+            md.append(f"  - {z['tf']}m {z['rule']} + {z['fl']}, {z['typ']} {z['L']}, depth {z['D']}, hold {k} candles: {z[f'e{k}']:+.3f} ATR vs random "
+                      f"(t {z[f't{k}']:.1f}), ${z['usd10']:+.3f}/share at 10, {z['perday']:.1f} per symbol per day, bottoms {z[f'L_{k}']:+.3f} / tops {z[f'S_{k}']:+.3f}")
+    else:
+        md.append("- **Settings that HELD UP: none.**")
+    for rule in VMA_RULES:
+        g = Sx[Sx["rule"] == rule]
+        if len(g):
+            md.append(f"- **{rule}**: average over all its settings {g['e5'].mean():+.3f} ATR vs random at 5 candles, {g['e10'].mean():+.3f} at 10; "
+                      f"{100 * (g['e10'] > 0).mean():.0f}% of settings positive at 10.")
+    md.append("")
+    md += ["## Best setting for every chart x rule x filter (picked by t at a 3 / 5 / 10 candle hold)", HDR, SEP]
+    for tf in tfs:
+        for rule in VMA_RULES:
+            for fl in VMA_FILTERS:
+                g = [z for z in Sx_d if z["tf"] == tf and z["rule"] == rule and z["fl"] == fl]
+                if not g:
+                    continue
+                cand = [(z, k) for z in g for k in (3, 5, 10) if not np.isnan(z[f"t{k}"])]
+                z, k = max(cand, key=lambda zk: zk[0][f"t{zk[1]}"])
+                md.append(fmt(z, k, "✅" if held_at(z, k) and plateau(z, k) else ""))
+    md.append("")
+    md += ["## Depth sweep - is deeper fear / greed better? (EMA 10, no filter, ATR vs random at 5 candles, t in brackets)",
+           "| Chart | Rule | " + " | ".join(f"depth {D}" for D in VMA_DEPTHS) + " |", "|---|---|" + "---|" * len(VMA_DEPTHS)]
+    for tf in tfs:
+        for rule in VMA_RULES:
+            cells = []
+            for D in VMA_DEPTHS:
+                z = lookd.get((tf, "EMA", 10, D, rule, "none"))
+                cells.append(f"{z['e5']:+.3f} ({z['t5']:.1f}) n{z['n']}" if z else "-")
+            md.append(f"| {tf}m | {rule} | " + " | ".join(cells) + " |")
+    md.append("")
+    md += ["## Average length sweep - EMA vs SMA, 5 / 10 / 20 (depth 60, no filter, ATR vs random at 5 candles)",
+           "| Chart | Rule | " + " | ".join(f"{t_} {L_}" for t_ in VMA_TYPES for L_ in VMA_LENS) + " |", "|---|---|" + "---|" * 6]
+    for tf in tfs:
+        for rule in VMA_RULES:
+            cells = []
+            for t_ in VMA_TYPES:
+                for L_ in VMA_LENS:
+                    z = lookd.get((tf, t_, L_, 60, rule, "none"))
+                    cells.append(f"{z['e5']:+.3f} ({z['t5']:.1f})" if z else "-")
+            md.append(f"| {tf}m | {rule} | " + " | ".join(cells) + " |")
+    md.append("")
+    md += ["## Top 25 settings overall (by t, any hold 3 / 5 / 10) - on random prices the top of this list reached t 2.5-3.2, so only t 3.5+ with a ✅ counts",
+           HDR, SEP]
+    allc = sorted(((z, k) for z in Sx_d for k in (3, 5, 10) if not np.isnan(z[f"t{k}"])), key=lambda zk: -zk[0][f"t{zk[1]}"])
+    seen = set()
+    shown = 0
+    for z, k in allc:
+        kk = (z["tf"], z["typ"], z["L"], z["D"], z["rule"], z["fl"])
+        if kk in seen:
+            continue
+        seen.add(kk)
+        md.append(fmt(z, k, "✅" if held_at(z, k) and plateau(z, k) else ""))
+        shown += 1
+        if shown >= 25:
+            break
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/vma_{stamp}.md", f"{OUT}/vma_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
