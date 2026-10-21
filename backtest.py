@@ -1,5 +1,7 @@
 """
-PAUSE OR TURN? - LAST 12 MONTHS, 1m (MODE=pause, the default) - when a steep trend line cools off, which reading (Vix Fix,
+23-DEGREE SIGNALS -> PRICE JUMPS BY MULTI-TIMEFRAME VIX FIX - LAST 12 MONTHS, 1m (MODE=jump, the default) - how often a
+  TL ANGLE signal is followed by a +1 / +2 ATR jump, split by whether the Vix Fix on 1m / 5m / 15m agrees. DATA ONLY.
+PAUSE OR TURN? - LAST 12 MONTHS, 1m (MODE=pause) - when a steep trend line cools off, which reading (Vix Fix,
   Stoch, volume, VWAP, TTM, pullback depth, cooling speed, 5m / slow line, time) tells a PAUSE from a TURN. DATA ONLY.
 TRADE THE TURN - LAST 12 MONTHS, 1m (MODE=turn) - the trend line falls steeply, bottoms and its angle turns
   back up = long (mirror = short): slope before x turn size x speed x exits, vs random. DATA ONLY.
@@ -117,7 +119,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "pause").strip().lower() or "pause"
+MODE = os.getenv("MODE", "jump").strip().lower() or "jump"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -417,6 +419,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "jump":
+        return jump_main()
     if MODE == "pause":
         return pause_main()
     if MODE == "turn":
@@ -6717,6 +6721,197 @@ def pause_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/pause_{stamp}.md", f"{OUT}/pause_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ 23-DEGREE SIGNALS -> PRICE JUMPS, SPLIT BY MULTI-TIMEFRAME
+# VIX FIX AGREEMENT (MODE=jump, the default) - LAST 12 MONTHS, 1m
+JUMP_A = 23
+
+
+def mtf_vf(df1, df, tf):
+    """fear / greed 0-100 numbers of the LAST CLOSED tf-minute candle and the one before it, mapped onto each 1m candle"""
+    dft = to_tf(df1, rth_only=False, mins=tf)
+    F, G = vfx_pane(dft)
+    idx = dft.index + pd.Timedelta(minutes=tf)            # known at that candle's close
+    close_t = df.index + pd.Timedelta(minutes=1)
+    out = {}
+    for nm, v in (("F", F), ("G", G)):
+        s = pd.Series(v, index=idx)
+        s = s[~s.index.duplicated()].sort_index()
+        p = s.shift(1)
+        out[nm] = s.reindex(s.index.union(close_t)).ffill().reindex(close_t).to_numpy()
+        out[nm + "p"] = p.reindex(p.index.union(close_t)).ffill().reindex(close_t).to_numpy()
+    return out
+
+
+def jump_slow_atr(df):
+    """a SLOW ATR (true range averaged over ~2 hours) - the normal 14-candle ATR shrinks after a few quiet candles, which makes
+    any following move look like a bigger 'jump'; the slow one barely reacts to the last few candles"""
+    h, l, c = df["high"], df["low"], df["close"]
+    pc = c.shift(1)
+    tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / 120, adjust=False).mean().to_numpy()
+
+
+def jump_outcomes(ind, idx, sd, aslow=None):
+    """entry next open; in ATR of the signal candle: best move your way within 5 / 10 / 20 candles (MFE), and the clean jump
+    (+1 ATR before -1 ATR within 20 candles, both in one candle = no). Cut at 15:55 / day end."""
+    o, h, l, hm, day = ind["o"], ind["h"], ind["l"], ind["hm"], ind["day"]
+    a = ind["atr"] if aslow is None else aslow
+    n = len(o)
+    res = np.full((len(idx), 4), np.nan)
+    hl, ll, dl, hml = h.tolist(), l.tolist(), day.tolist(), hm.tolist()
+    for q, (i, s) in enumerate(zip(idx.tolist(), sd.tolist())):
+        e = i + 1
+        if e >= n or dl[e] != dl[i] or hml[e] >= 1555:
+            continue
+        en, A = o[e], a[i]
+        best, clean, j = -1e9, 0.0, e
+        m5 = m10 = np.nan
+        decided = False
+        while j < n and j - e < 20 and dl[j] == dl[e] and hml[j] < 1555:
+            fav = (hl[j] - en) if s == 1 else (en - ll[j])
+            adv = (en - ll[j]) if s == 1 else (hl[j] - en)
+            best = max(best, fav)
+            if not decided:
+                if adv >= A:
+                    decided = True
+                elif fav >= A:
+                    clean, decided = 1.0, True
+            if j - e == 4:
+                m5 = best
+            if j - e == 9:
+                m10 = best
+            j += 1
+        m5 = best if np.isnan(m5) else m5
+        m10 = best if np.isnan(m10) else m10
+        res[q] = [m5 / A, m10 / A, best / A, clean]
+    return res
+
+
+def jump_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(16)
+    rows, base = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df = to_tf(df1, rth_only=False, mins=1)
+        ind = indicators(df, 13, 34, True)
+        ang = ang_series(df, ind)
+        aslow = jump_slow_atr(df)
+        hm, day = ind["hm"], ind["day"]
+        ts = df.index
+        ry = ts >= yr_start
+        half = np.where(ts < mid, "H1", "H2")
+        F1, G1 = vfx_pane(df)
+        V = {1: dict(F=F1, Fp=np.r_[np.nan, F1[:-1]], G=G1, Gp=np.r_[np.nan, G1[:-1]])}
+        for tf in (5, 15):
+            V[tf] = mtf_vf(df1, df, tf)
+
+        def feats(idx, sd):
+            out = {}
+            for side_nm, (lk, sk) in (("trend", ("G", "F")), ("pull", ("F", "G"))):
+                dirs = []
+                lv = []
+                for tf in (1, 5, 15):
+                    key = np.where(sd == 1, 0, 1)
+                    now = np.where(key == 0, V[tf][lk][idx], V[tf][sk][idx])
+                    prv = np.where(key == 0, V[tf][lk + "p"][idx], V[tf][sk + "p"][idx])
+                    dirs.append(np.sign(now - prv))
+                    lv.append(now)
+                D = np.vstack(dirs)
+                out[side_nm] = np.where((D > 0).all(axis=0), "rising on all 3", np.where((D < 0).all(axis=0), "falling on all 3", "mixed"))
+                out[side_nm + "_hot"] = (lv[1] >= 70) & (lv[2] >= 70)
+            return out
+
+        for mode, mnm in (("dn", "FLATTEN 23°"), ("up", "CROSS UP 23°")):
+            idx, sd = ang_events(ang, hm, day, JUMP_A, mode)
+            keep = ry[idx]
+            idx, sd = idx[keep], sd[keep]
+            if not len(idx):
+                continue
+            R = jump_outcomes(ind, idx, sd, aslow)
+            fz = feats(idx, sd)
+            d_ = pd.DataFrame(R, columns=["m5", "m10", "m20", "clean"])
+            d_["entry"], d_["sym"], d_["side"], d_["half"], d_["date"] = mnm, sym, sd, half[idx], day[idx]
+            for k_, v_ in fz.items():
+                d_[k_] = v_
+            rows.append(d_.dropna(subset=["m10"]))
+        cand = np.nonzero(ry & (hm >= 935) & (hm < 1530) & np.r_[day[1:] == day[:-1], False])[0]
+        rid = np.sort(rng.choice(cand, size=min(len(cand), int(os.getenv("JUMP_RANDOM", "20000"))), replace=False))
+        for sdv in (1, -1):
+            R = jump_outcomes(ind, rid, np.full(len(rid), sdv), aslow)
+            d_ = pd.DataFrame(R, columns=["m5", "m10", "m20", "clean"])
+            d_["sym"], d_["side"], d_["half"] = sym, sdv, half[rid]
+            base.append(d_.dropna(subset=["m10"]))
+        print(f"  {sym} done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    B = pd.concat(base, ignore_index=True)
+    E["j1"] = (E["m10"] >= 1).astype(float)
+    E["j2"] = (E["m20"] >= 2).astype(float)
+    B["j1"] = (B["m10"] >= 1).astype(float)
+    B["j2"] = (B["m20"] >= 2).astype(float)
+    bm = B.groupby(["sym", "side", "half"])[["j1", "j2", "clean", "m10"]].mean()
+
+    def vs(g, col):
+        tot, nn = 0.0, 0
+        for k, gg in g.groupby(["sym", "side", "half"]):
+            if k in bm.index:
+                tot += (gg[col].mean() - bm.loc[k, col]) * len(gg)
+                nn += len(gg)
+        return tot / nn if nn else np.nan
+
+    def row(name, g):
+        if len(g) < 30:
+            return f"| {name} | {len(g)} | too few | | | | |"
+        h1, h2 = g[g["half"] == "H1"], g[g["half"] == "H2"]
+        return (f"| {name} | {len(g)} | {100 * g['j1'].mean():.0f}% ({100 * vs(g, 'j1'):+.0f}) | {100 * g['j2'].mean():.0f}% ({100 * vs(g, 'j2'):+.0f}) | "
+                f"{100 * g['clean'].mean():.0f}% ({100 * vs(g, 'clean'):+.0f}) | {g['m10'].mean():.2f} ({vs(g, 'm10'):+.2f}) | "
+                f"{100 * vs(h1, 'j1'):+.0f} / {100 * vs(h2, 'j1'):+.0f} |")
+
+    md = [f"# 23° SIGNALS -> PRICE JUMPS, BY MULTI-TIMEFRAME VIX FIX - LAST 12 MONTHS, 1m - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, 1m. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Signals** = TL ANGLE: FLATTEN 23° (a steeper line comes back through 23°) and CROSS UP 23° (the angle rises through 23°); shorts "
+          "= the mirror. Entry = next open. **Jumps** (ATR of the signal candle): **+1 ATR in 10** = price got 1 ATR your way within 10 "
+          "minutes (ATR here = a SLOW ATR averaged over ~2 hours, so a few quiet candles can't fake a 'jump'); **+2 ATR in 20** = 2 ATR within 20 minutes; **clean** = +1 ATR before 1 ATR against (within 20); **best move 10** = the "
+          "biggest move your way in the first 10 minutes. (In brackets: vs RANDOM entries the same way on the same symbol and half-year.) "
+          "**Vix Fix agreement** at the signal, on the 1m + the last closed 5m + 15m candle: the **trend side** = greed for longs / fear for "
+          "shorts (the side that is running), the **pullback side** = fear for longs / greed for shorts. **Hot** = trend side 70+ on the 5m "
+          "and 15m. **H1 / H2** = the +1 ATR jump edge in each half of the year (a real effect is + in both). **Luck check:** on random prices "
+          "groups of 100-300 signals swung by up to about 10 points by pure chance - so trust only a group with 300+ signals that is "
+          "clearly better in BOTH halves.", ""]
+    for ent in ("FLATTEN 23°", "CROSS UP 23°"):
+        g0 = E[E["entry"] == ent]
+        if not len(g0):
+            continue
+        md += [f"## {ent}", "| Group | Signals | +1 ATR in 10 | +2 ATR in 20 | Clean jump | Best move 10 (ATR) | +1 ATR edge H1 / H2 |",
+               "|---|---|---|---|---|---|---|", row("**ALL signals**", g0)]
+        for col, lab in (("trend", "Trend side"), ("pull", "Pullback side")):
+            for st_ in ("rising on all 3", "falling on all 3", "mixed"):
+                md.append(row(f"{lab} {st_}", g0[g0[col] == st_]))
+        md.append(row("Trend side HOT (70+ on 5m and 15m)", g0[g0["trend_hot"]]))
+        md.append(row("Trend side rising on all 3 AND pullback side falling on all 3", g0[(g0["trend"] == "rising on all 3") & (g0["pull"] == "falling on all 3")]))
+        md.append("")
+    md.insert(4, "## Random entries for reference: " + f"+1 ATR in 10 = {100 * B['j1'].mean():.0f}% | +2 ATR in 20 = {100 * B['j2'].mean():.0f}% | "
+              f"clean = {100 * B['clean'].mean():.0f}% | best move 10 = {B['m10'].mean():.2f} ATR\n")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/jump_{stamp}.md", f"{OUT}/jump_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
