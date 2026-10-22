@@ -1,5 +1,10 @@
 """
-THE DEFAULT RUN (MODE=crun) = BEST ENTRY FOR A RUN - every combination of your trend line (color + run), TTM, squeeze, Vix Fix,
+THE DEFAULT RUN (MODE=fire) = FLOW SUITE 2 FIRE TAGS - EVERY SETTING: pivot level x other-side level x pivot candles x fire rule
+  (pivot / flow / glow) x flow average x trend filter x candle filter x wait (+ cooldown), 1/2/3/5m, scored by the RUN each fire
+  gives, vs random, both halves, neighbors, walk-forward. Type QQQ. DATA ONLY.
+MODE=mtf = DO HIGHER CHARTS AGREEING HELP? - the best-entry run test + the next 2 charts up (line, TTM,
+  squeeze, all 3 lines agreeing) in every pair / triple with your 8 readings. Type QQQ. DATA ONLY.
+MODE=crun = BEST ENTRY FOR A RUN - every combination of your trend line (color + run), TTM, squeeze, Vix Fix,
   maxed, FLOW SUITE line and diamonds, scored by the RUN each entry gives (you manage the exit). Type QQQ. DATA ONLY.
 MODE=vspike = DROPS & POPS only - volume-spike candles, 1m / 3m / 5m, last 12 months + the year before. Type QQQ.
 MODE=combo+vspike = EVERY COMBINATION of your trend line (color + run length), TTM bars, squeeze, Vix Fix flow,
@@ -138,7 +143,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "crun").strip().lower() or "crun"
+MODE = os.getenv("MODE", "fire").strip().lower() or "fire"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -438,6 +443,10 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "fire":
+        return fire_main()
+    if MODE == "mtf":
+        return crun_main(mtf=True)
     if MODE == "crun":
         return crun_main()
     if MODE == "combo+vspike":
@@ -9339,7 +9348,19 @@ def crun_paths(o, h, l, c, a, lastok, idx, sd):
     return out
 
 
-def crun_main():
+MTF_F = ["UP1 LINE", "UP2 LINE", "UP1 TTM", "UP2 TTM", "UP1 SQZ", "ALL 3 LINES"]
+MTF_NAMES = {
+    "UP1 LINE": {1: "next chart up: line WITH", 0: "next chart up: line gray", -1: "next chart up: line AGAINST"},
+    "UP2 LINE": {1: "2 charts up: line WITH", 0: "2 charts up: line gray", -1: "2 charts up: line AGAINST"},
+    "UP1 TTM": {1: "next chart up: TTM WITH", -1: "next chart up: TTM AGAINST"},
+    "UP2 TTM": {1: "2 charts up: TTM WITH", -1: "2 charts up: TTM AGAINST"},
+    "UP1 SQZ": {0: "next chart up: squeeze ON", 1: "next chart up: squeeze JUST FIRED", 2: "next chart up: squeeze off"},
+    "ALL 3 LINES": {1: "ALL 3 charts' lines WITH", 0: "lines mixed", -1: "ALL 3 lines AGAINST"},
+}
+MTF_UP = {1: (5, 15), 2: (10, 30), 3: (15, 60), 5: (15, 60), 10: (30, 60), 15: (60, 120)}
+
+
+def crun_main(mtf=False):
     from itertools import combinations
     end = datetime.now(timezone.utc) - timedelta(days=1)
     yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
@@ -9367,6 +9388,17 @@ def crun_main():
             ok = inyr & (hm >= 935) & (hm < 1530) & (np.arange(n) + 1 < n) & np.isfinite(a) & (a > 0)
             ok[:-1] &= dcode[1:] == dcode[:-1]
             FE, col = combo_features(df, ind)
+            if mtf:
+                # higher charts: the LAST CLOSED candle of the next chart up / 2 charts up at this candle's close
+                close_t = (df.index + pd.Timedelta(minutes=tf)).to_numpy()
+                HF = []
+                for H in MTF_UP[tf]:
+                    dfH = to_tf(df1, rth_only=False, mins=H)
+                    indH = indicators(dfH, 13, 34, True)
+                    FEH, _ = combo_features(dfH, indH)
+                    closeH = (dfH.index + pd.Timedelta(minutes=H)).to_numpy()
+                    pos = np.searchsorted(closeH, close_t, side="right") - 1
+                    HF.append((pos, FEH))
             idx = np.nonzero(ok)[0]
             for sd in (1, -1):
                 Rm = crun_paths(o, h, l, c, a, lastok, idx, sd)
@@ -9374,9 +9406,25 @@ def crun_main():
                 D_["usd1"] = D_["run1"] * a[idx]
                 for f in CMB_F:
                     D_[f] = FE[sd][f][idx]
+                if mtf:
+                    lw = []
+                    for j_, (pos, FEH) in enumerate(HF):
+                        pp = np.clip(pos[idx], 0, None)
+                        tlH = FEH[sd]["TL"][pp]
+                        lineH = np.where(tlH >= 1, 1, np.where(tlH <= -1, -1, 0))
+                        lineH = np.where(pos[idx] >= 0, lineH, 0)
+                        ttmH = np.where(np.isin(FEH[sd]["TTM"][pp], (0, 1)), 1, -1)
+                        D_[f"UP{j_ + 1} LINE"], D_[f"UP{j_ + 1} TTM"] = lineH, ttmH
+                        if j_ == 0:
+                            D_["UP1 SQZ"] = FEH[sd]["SQZ"][pp]
+                        lw.append(lineH)
+                    base_w = np.where(FE[sd]["TL"][idx] >= 1, 1, np.where(FE[sd]["TL"][idx] <= -1, -1, 0))
+                    D_["ALL 3 LINES"] = np.where((base_w == 1) & (lw[0] == 1) & (lw[1] == 1), 1,
+                                                 np.where((base_w == -1) & (lw[0] == -1) & (lw[1] == -1), -1, 0))
                 D_["tf"], D_["sym"], D_["side"], D_["half"], D_["day"] = tf, sym, sd, half[idx], dord[idx]
                 D_["hm"] = hm[idx].astype(np.int16)
-                rows.append(D_.astype({f: np.int8 for f in CMB_F}))
+                FL = CMB_F + (MTF_F if mtf else [])
+                rows.append(D_.astype({f: np.int8 for f in FL}))
             print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
         del df1
     E = pd.concat(rows, ignore_index=True)
@@ -9402,7 +9450,11 @@ def crun_main():
         se = np.sqrt((dev ** 2).groupby(level=lv).sum()).div(cnt, axis=0)
         return mu, mu / se, cnt
 
-    subsets = [s_ for r_ in (1, 2, 3) for s_ in combinations(CMB_F, r_)] + [tuple(CMB_F)]
+    if mtf:
+        ALLF = CMB_F + MTF_F
+        subsets = [s_ for r_ in (1, 2, 3) for s_ in combinations(ALLF, r_) if any(f in MTF_F for f in s_)]
+    else:
+        subsets = [s_ for r_ in (1, 2, 3) for s_ in combinations(CMB_F, r_)] + [tuple(CMB_F)]
     out = []
     for tf in tfs:
         Et = E[E["tf"] == tf]
@@ -9440,13 +9492,14 @@ def crun_main():
         held = (z.score_t >= T_PASS and z.n >= HELD_N and h1 > 0 and h2 > 0 and p1 > 0 and p2_ > 0 and len(nbv) > 0 and all(v_ > 0 for v_ in nbv))
         tod = g.groupby(pd.cut(g["hm"], [930, 1030, 1200, 1400, 1530], right=False), observed=True)["d_run1"].mean()
         chk.append(dict(idx=z.Index, h1=h1, h2=h2, ph1=p1, ph2=p2_, L=L_, S=S_, nb=nbv, held=held,
-                        per_day=z.n / max(1, len(np.unique(g["day"]))), tod=list(tod.round(2))))
+                        per_day=z.n / max(1, len(np.unique(g["day"]))), tod=[f"{v_:+.2f}" for v_ in tod]))
     cand = cand.join(pd.DataFrame(chk).set_index("idx"))
 
     def words(sub, key):
-        return " + ".join(CMB_NAMES[f][v_] for f, v_ in zip(sub, key))
+        NM = {**CMB_NAMES, **MTF_NAMES}
+        return " + ".join(NM[f][v_] for f, v_ in zip(sub, key))
     bl = E.groupby("tf")[["run1", "run05", "trail", "p2", "p3", "spd", "usd1"]].mean()
-    md = [f"# BEST ENTRY FOR A RUN - EVERY COMBINATION - {', '.join(SYMBOLS)} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+    md = [f"# {'DO HIGHER CHARTS AGREEING HELP? ' if mtf else ''}BEST ENTRY FOR A RUN - EVERY COMBINATION - {', '.join(SYMBOLS)} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
           f"Charts {', '.join(f'{t}m' for t in tfs)}, {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. Every candle 9:35-15:30 = a possible entry at the next "
           f"open (long, and short as the mirror). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. Entries scored: {len(E):,}.",
           "**You manage the exit, so each entry is scored by the RUN it gives:** **RUN** = how far price went your way (ATR) before it "
@@ -9484,6 +9537,17 @@ def crun_main():
                   f"{100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}, {z.t_p2:.1f}) | {100 * z.raw_p3:.0f}% ({100 * z.p3:+.0f}) | {z.raw_spd:.0f} | ${z.raw_usd1:.2f} | "
                   f"{z.h1:+.2f} / {z.h2:+.2f} | {z.L:+.2f} / {z.S:+.2f} | {' / '.join(f'{v_:+.2f}' for v_ in z.nb)} | {' / '.join(str(v_) for v_ in z.tod)} | "
                   f"{'✅' if z.held else ''} |")
+    if mtf:
+        md += ["", "## Higher charts agreeing - each reading alone (RUN vs random, t; 2:1 odds vs random, t)",
+               "Higher charts used: 1m -> 5m + 15m | 2m -> 10m + 30m | 3m -> 15m + 60m | 5m -> 15m + 60m | 10m -> 30m + 60m | 15m -> 60m + 120m "
+               "(the last CLOSED higher candle at each entry - no peeking). 'WITH' = green / blue line or TTM above zero for a long (mirror for a short).",
+               "| Chart | Higher-chart reading | Entries | RUN real (vs random, t) | 2:1 odds real (vs random, t) |", "|---|---|---|---|---|"]
+        for z in R[R["sub"].apply(lambda s_: len(s_) == 1 and s_[0] in MTF_F)].sort_values(["tf", "sub", "key"]).itertuples():
+            md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {z.raw_run1:.2f} ({z.run1:+.2f}, {z.t_run1:.1f}) | {100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}, {z.t_p2:.1f}) |")
+        md += ["", "## Your chart's line + the higher charts' lines (does agreement make the run bigger?)",
+               "| Chart | Combination | Entries | RUN real (vs random, t) | 2:1 odds real (vs random) |", "|---|---|---|---|---|"]
+        for z in R[R["sub"] == ("TL", "UP1 LINE", "UP2 LINE")].sort_values(["tf", "key"]).itertuples():
+            md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {z.raw_run1:.2f} ({z.run1:+.2f}, {z.t_run1:.1f}) | {100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}) |")
     md += ["", "## Each reading on its own (RUN before a 1 ATR pullback vs random, t; 2:1 odds vs random)",
            "| Chart | Reading | Entries | RUN vs random (t) | 2:1 odds vs random (t) |", "|---|---|---|---|---|"]
     for z in R[R["sub"].apply(len) == 1].sort_values(["tf", "sub", "key"]).itertuples():
@@ -9498,7 +9562,400 @@ def crun_main():
     text = "\n".join(md + [""])
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
-    for path in (f"{OUT}/crun_{stamp}.md", f"{OUT}/crun_latest.md"):
+    tag = "mtf" if mtf else "crun"
+    for path in (f"{OUT}/{tag}_{stamp}.md", f"{OUT}/{tag}_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ FLOW SUITE 2 FIRE TAGS - EVERY SETTING (MODE=fire)
+# The FIRE tag exactly like the indicator: a Vix Fix PIVOT arms it (LONG: fear peaks at HI+ and turns down while greed was
+# under LO at that peak; SHORT: the mirror), then it FIRES on the first candle (within WAIT candles) that passes the fire rule
+# (the flow line agrees / the glowing line / no wait at all), the trend line filter and the candle-direction filter.
+# A new setup the other way cancels a waiting one. Entry = the next candle's open after the tag candle (9:30-15:30 tags).
+# Each fire is scored by the RUN it gives (you manage the exit) - same scoring as MODE=crun - vs a random entry the same way.
+FIRE_TFS_DEF = "1,2,3,5"
+FIRE_HI = (70, 80, 85, 90, 95)          # pivot must come from at least
+FIRE_LO = (20, 35, 50, 101)             # ... while the other side is under (101 = rule off)
+FIRE_PL = (1, 2, 3)                     # pivot: candles before the peak
+FIRE_PR = (1, 2)                        # pivot: candles after the peak (confirmation)
+FIRE_MA = (5, 10, 20)                   # flow average length (EMA)
+FIRE_NEED = ("pivot", "flow", "glow")   # fire at the pivot / when the flow line agrees / when the line glows (flow + TTM)
+FIRE_CONF = (1, 2)                      # flow must hold N candles
+FIRE_TREND = ("off", "block", "with")   # trend line filter: off / block a solid line against / only with the line
+FIRE_BAR = (0, 1)                       # fire candle must close the right way
+FIRE_WAIT = (0, 2, 3, 5, 8, 12)         # candles to wait for the fire rule after the pivot
+FIRE_COOL = (0, 5, 10, 20)              # candles before another fire the same way (checked on the top settings)
+FIRE_YOURS = dict(hi=85, lo=20, pl=2, pr=1, ma=10, need="flow", conf=1, trend="block", bar=1, wait=5)
+FIRE_NEED_TV = {"pivot": "fire AT the pivot (no flow wait)", "flow": "flow line agrees", "glow": "glowing line (flow + TTM)"}
+FIRE_TREND_TV = {"off": "Off", "block": "Block against a solid trend line", "with": "Only with the trend line"}
+
+
+def fire_pivots(X, other, L, R, hi, lo):
+    """bars where a pivot high of X is CONFIRMED (R candles after the peak): peak >= the L candles before it, > the R candles
+    after it, peak >= hi, and the other side < lo at the peak candle."""
+    s = pd.Series(X)
+    left = s.shift(1).rolling(L).max().to_numpy()
+    right = s[::-1].shift(1).rolling(R).max().to_numpy()[::-1]          # max of the next R candles
+    pk = (X >= left) & (X > right) & (X >= hi) & (other < lo)
+    p = np.nonzero(pk)[0] + R
+    return p[p < len(X)]
+
+
+def fire_next_true(mask):
+    n = len(mask)
+    idx = np.where(mask, np.arange(n), n)
+    return np.minimum.accumulate(idx[::-1])[::-1]
+
+
+def fire_events(setL, setS, ntL, ntS, wait, okw):
+    """fires per side: first candle at/after the setup passing the fire rule, within wait candles, before the other side's next
+    setup (same order as the indicator: on a candle with both setups the long arm is dropped, the short one kept)."""
+    out = []
+    for sd, st_, opp, nt in ((1, setL, setS, ntL), (-1, setS, setL, ntS)):
+        if len(st_) == 0:
+            out.append(np.zeros(0, dtype=np.int64))
+            continue
+        f = nt[st_]
+        k = np.searchsorted(opp, st_, side="left" if sd == 1 else "right")
+        nopp = np.where(k < len(opp), opp[np.minimum(k, len(opp) - 1)], 10 ** 9)
+        v = (f - st_ <= wait) & (f < nopp) & (f < len(okw))
+        f = np.unique(f[v])
+        out.append(f[okw[f]])
+    return out
+
+
+def fire_cool(f, cool):
+    if cool <= 0 or len(f) == 0:
+        return f
+    keep, last = [], -10 ** 9
+    for x in f:
+        if x - last > cool:
+            keep.append(x)
+            last = x
+    return np.asarray(keep, dtype=np.int64)
+
+
+def fire_score(fL, fS, P):
+    """stats of a set of fires (both sides) vs random, t clustered by day"""
+    dc = np.r_[P[1]["day"][fL], P[-1]["day"][fS]]
+    N = len(dc)
+    if N < 2:
+        return None
+    r = {"n": N, "nL": len(fL), "nS": len(fS)}
+    hf = np.r_[P[1]["half"][fL], P[-1]["half"][fS]]
+    nd = P["ndays"]
+    for key in ("run1", "p2"):
+        d = np.r_[P[1]["d_" + key][fL], P[-1]["d_" + key][fS]]
+        for tag, m in (("", None), ("h1_", hf == 0), ("h2_", hf == 1)):
+            dd, cc = (d, dc) if m is None else (d[m], dc[m])
+            nn = len(dd)
+            if nn < 2:
+                r[tag + key], r[tag + "t_" + key], r[tag + "n"] = np.nan, np.nan, nn
+                continue
+            mu = dd.mean()
+            S_ = np.bincount(cc, weights=dd, minlength=nd)
+            C_ = np.bincount(cc, minlength=nd)
+            se = np.sqrt(((S_ - C_ * mu) ** 2).sum()) / nn
+            r[tag + key], r[tag + "t_" + key], r[tag + "n"] = mu, (mu / se if se > 0 else 0.0), nn
+    for key in ("run1", "p2", "p3", "trail", "spd", "usd1"):
+        v = np.r_[P[1][key][fL], P[-1][key][fS]]
+        r["raw_" + key] = float(np.nanmean(v)) if np.isfinite(v).any() else np.nan
+    r["L_run1"] = float(P[1]["d_run1"][fL].mean()) if len(fL) else np.nan
+    r["S_run1"] = float(P[-1]["d_run1"][fS].mean()) if len(fS) else np.nan
+    r["days"] = len(np.unique(dc))
+    r["score"] = min(r["t_run1"], r["t_p2"])
+    r["h1_score"] = min(r["h1_t_run1"], r["h1_t_p2"]) if np.isfinite(r["h1_t_run1"]) else np.nan
+    r["h2_score"] = min(r["h2_t_run1"], r["h2_t_p2"]) if np.isfinite(r["h2_t_run1"]) else np.nan
+    return r
+
+
+def fire_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("FIRE_TFS", FIRE_TFS_DEF).split(",")]
+    T_PASS = float(os.getenv("FIRE_T", "4.0"))
+    WF_T = float(os.getenv("FIRE_WF_T", "2.0"))
+    MIN_N = int(os.getenv("FIRE_MIN_N", "150"))
+    HELD_N = int(os.getenv("FIRE_HELD_N", "250"))
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    sym = SYMBOLS[0]
+    print(f"\n=== {sym} (FIRE test uses the first ticker only) ===", flush=True)
+    df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+    allR, yours, speed, ex = [], {}, {}, {}
+    for tf in tfs:
+        df = to_tf(df1, rth_only=True, mins=tf)                     # regular hours, like your chart
+        ind = indicators(df, 13, 34, True)
+        o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+        n = len(o)
+        ts = df.index
+        inyr = np.asarray(ts >= yr_start)
+        half = np.where(ts < mid, 0, 1).astype(np.int8)
+        dcode = pd.factorize(day)[0]
+        lastok = pd.Series(np.where(hm < 1555, np.arange(n), -1)).groupby(dcode).transform("max").to_numpy()
+        okw = inyr & (hm >= 930) & (hm < 1530) & (np.arange(n) + 1 < n) & np.isfinite(a) & (a > 0)
+        okw[:-1] &= dcode[1:] == dcode[:-1]
+        idx = np.nonzero(okw)[0]
+        P = {"ndays": int(dcode.max()) + 1}
+        for sd in (1, -1):
+            Rm = crun_paths(o, h, l, c, a, lastok, idx, sd)
+            D = {}
+            for k_ in ("run1", "p2", "p3", "trail", "spd"):
+                full = np.full(n, np.nan, dtype=np.float64)
+                full[idx] = Rm[k_]
+                D[k_] = full
+            D["usd1"] = D["run1"] * a
+            for k_ in ("run1", "p2"):
+                base = np.full(n, np.nan)
+                for hv in (0, 1):
+                    mm = okw & (half == hv)
+                    base[mm] = np.nanmean(D[k_][mm])
+                D["d_" + k_] = D[k_] - base
+            D["day"], D["half"] = dcode, half
+            P[sd] = D
+        # ---- the indicator pieces
+        S = agr_series(df, ind)
+        tState = S["st"]
+        col, _ = tlt_colors(df, ind)
+        col = np.asarray(col)
+        F, G = vfx_pane(df)
+        F, G = np.nan_to_num(F), np.nan_to_num(G)
+        bar_up = c > np.r_[np.nan, c[:-1]]
+        bar_dn = c < np.r_[np.nan, c[:-1]]
+        trend_ok = {("off", 1): np.ones(n, bool), ("off", -1): np.ones(n, bool),
+                    ("block", 1): col != -2, ("block", -1): col != 2, ("with", 1): col > 0, ("with", -1): col < 0}
+        flows = {}
+        for ma in FIRE_MA:
+            gA = pd.Series(G).ewm(span=ma, adjust=False).mean().to_numpy()
+            fA = pd.Series(F).ewm(span=ma, adjust=False).mean().to_numpy()
+            gA1, fA1 = np.r_[np.nan, gA[:-1]], np.r_[np.nan, fA[:-1]]
+            upR = (gA > gA1) & (fA < fA1)
+            dnR = (gA < gA1) & (fA > fA1)
+            for cf in FIRE_CONF:
+                u = pd.Series(upR.astype(float)).rolling(cf).sum().to_numpy() == cf
+                d_ = pd.Series(dnR.astype(float)).rolling(cf).sum().to_numpy() == cf
+                flows[(ma, cf)] = (u, d_)
+        # fire-rule variants -> next candle passing the rule, per side
+        rules = []
+        for need in FIRE_NEED:
+            for ma in (FIRE_MA if need != "pivot" else (0,)):
+                for cf in (FIRE_CONF if need != "pivot" else (0,)):
+                    for tr in FIRE_TREND:
+                        for br in FIRE_BAR:
+                            nt = {}
+                            for sd in (1, -1):
+                                m = trend_ok[(tr, sd)].copy()
+                                if br:
+                                    m &= bar_up if sd == 1 else bar_dn
+                                if need != "pivot":
+                                    fl = flows[(ma, cf)][0 if sd == 1 else 1]
+                                    m &= fl
+                                    if need == "glow":
+                                        m &= tState == sd
+                                nt[sd] = fire_next_true(m)
+                            rules.append((dict(need=need, ma=ma, conf=cf, trend=tr, bar=br), nt))
+        print(f"  {sym} {tf}m: {n:,} candles, {len(rules)} fire rules ({time.time() - t0:.0f}s)", flush=True)
+        cnt = 0
+        for hi in FIRE_HI:
+            for lo in FIRE_LO:
+                for pl in FIRE_PL:
+                    for pr in FIRE_PR:
+                        setL = fire_pivots(F, G, pl, pr, hi, lo)
+                        setS = fire_pivots(G, F, pl, pr, hi, lo)
+                        for rp, nt in rules:
+                            for w in FIRE_WAIT:
+                                if rp["need"] == "pivot" and w > 0 and rp["trend"] == "off" and rp["bar"] == 0:
+                                    continue                                   # nothing to wait for
+                                fL, fS = fire_events(setL, setS, nt[1], nt[-1], w, okw)
+                                r = fire_score(fL, fS, P)
+                                if r is None:
+                                    continue
+                                cnt += 1
+                                st_ = dict(tf=tf, hi=hi, lo=lo, pl=pl, pr=pr, wait=w, **rp)
+                                if r["n"] >= MIN_N:
+                                    allR.append({**st_, **r})
+                                if all(st_[k_] == v_ for k_, v_ in FIRE_YOURS.items()):
+                                    yours[tf] = {**st_, **r}
+                                    if len(setL) and len(fL):
+                                        arm = setL[np.maximum(np.searchsorted(setL, fL, side="right") - 1, 0)]
+                                        speed[tf] = float(np.median(fL - arm) + pr)
+        ex[tf] = dict(P=P, F=F, G=G, rules={tuple(sorted(rp.items())): nt for rp, nt in rules}, okw=okw)
+        print(f"  {sym} {tf}m: {cnt:,} settings scored ({time.time() - t0:.0f}s)", flush=True)
+    del df1
+    R = pd.DataFrame(allR)
+    KEYS = ["hi", "lo", "pl", "pr", "need", "ma", "conf", "trend", "bar", "wait"]
+    # ---- plateau: the average of the settings one step away (each setting moved one notch)
+    GRIDS = dict(hi=FIRE_HI, lo=FIRE_LO, pl=FIRE_PL, pr=FIRE_PR, ma=FIRE_MA, conf=FIRE_CONF, wait=FIRE_WAIT)
+    look = {tuple([z.tf] + [getattr(z, k_) for k_ in KEYS]): z.run1 for z in R.itertuples()}
+
+    def nbrs(z):
+        vals = []
+        base = {k_: getattr(z, k_) for k_ in KEYS}
+        for k_, g_ in GRIDS.items():
+            if base[k_] not in g_:
+                continue
+            i_ = g_.index(base[k_])
+            for j_ in (i_ - 1, i_ + 1):
+                if 0 <= j_ < len(g_):
+                    b2 = dict(base)
+                    b2[k_] = g_[j_]
+                    v_ = look.get(tuple([z.tf] + [b2[k2] for k2 in KEYS]))
+                    if v_ is not None:
+                        vals.append(v_)
+        return vals
+    cand = R.sort_values("score", ascending=False).head(400).copy()
+    pl_ = []
+    for z in cand.itertuples():
+        v_ = nbrs(z)
+        pl_.append((np.mean(v_) if v_ else np.nan, (np.mean(np.array(v_) > 0) if v_ else np.nan)))
+    cand["nb_mean"], cand["nb_pos"] = [x[0] for x in pl_], [x[1] for x in pl_]
+    cand["held"] = ((cand["score"] >= T_PASS) & (cand["n"] >= HELD_N) & (cand["h1_run1"] > 0) & (cand["h2_run1"] > 0)
+                    & (cand["h1_p2"] > 0) & (cand["h2_p2"] > 0) & (cand["nb_mean"] > 0) & (cand["nb_pos"] >= 0.75))
+    # ---- walk-forward: pick the best on the FIRST half only, see what it did in the SECOND half
+    wf = []
+    for tf in tfs:
+        Rt = R[(R["tf"] == tf) & (R["h1_n"] >= MIN_N // 2)]
+        if len(Rt) == 0:
+            continue
+        for rank, z in enumerate(Rt.sort_values("h1_score", ascending=False).head(5).itertuples()):
+            wf.append(dict(tf=tf, rank=rank + 1, z=z))
+    # ... and the other way round: pick on the SECOND half, judge on the FIRST
+    wb = {}
+    for tf in tfs:
+        Rt = R[(R["tf"] == tf) & (R["h2_n"] >= MIN_N // 2)]
+        if len(Rt):
+            wb[tf] = Rt.sort_values("h2_score", ascending=False).iloc[0]
+    verdict = {}
+    for w_ in wf:
+        if w_["rank"] == 1 and w_["tf"] in wb:
+            zf, zb = w_["z"], wb[w_["tf"]]
+            verdict[w_["tf"]] = (zf.h2_t_run1 >= WF_T and zf.h2_t_p2 >= WF_T * 0.75 and zb.h1_t_run1 >= WF_T and zb.h1_t_p2 >= WF_T * 0.75,
+                                 zf, zb)
+    # ---- cooldown on the top settings
+    cool_rows = []
+    for z in cand.head(15).itertuples():
+        E_ = ex[z.tf]
+        rp = dict(need=z.need, ma=z.ma, conf=z.conf, trend=z.trend, bar=z.bar)
+        nt = E_["rules"][tuple(sorted(rp.items()))]
+        setL = fire_pivots(E_["F"], E_["G"], z.pl, z.pr, z.hi, z.lo)
+        setS = fire_pivots(E_["G"], E_["F"], z.pl, z.pr, z.hi, z.lo)
+        fL, fS = fire_events(setL, setS, nt[1], nt[-1], z.wait, E_["okw"])
+        rr = []
+        for cl in FIRE_COOL:
+            r = fire_score(fire_cool(fL, cl), fire_cool(fS, cl), E_["P"])
+            rr.append(r)
+        cool_rows.append((z, rr))
+    # ---- which setting values matter (process of elimination): best + typical score for each value
+    elim = []
+    for k_ in KEYS:
+        for v_, g_ in R.groupby(k_):
+            elim.append(dict(k=k_, v=v_, best=g_["score"].max(), med=g_["score"].median(), run=g_["run1"].median(),
+                             top=(R.nlargest(500, "score")[k_] == v_).mean()))
+
+    def tv(z):
+        s_ = (f"pivot from {z.hi:g}+, other side under {('OFF (101)' if z.lo > 100 else f'{z.lo:g}')}, pivot {z.pl} before / {z.pr} after, "
+              f"{FIRE_NEED_TV[z.need]}")
+        if z.need != "pivot":
+            s_ += f", flow average {z.ma}, flow holds {z.conf}"
+        s_ += f", wait {z.wait}, trend filter {FIRE_TREND_TV[z.trend]}, candle close the right way {'ON' if z.bar else 'OFF'}"
+        return s_
+
+    def row(z, extra=""):
+        return (f"| {z.tf}m | {tv(z)} | {z.n} ({z.n / 250:.1f}/day) | {z.raw_run1:.2f} ({z.run1:+.2f}, t {z.t_run1:.1f}) | "
+                f"{100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}, t {z.t_p2:.1f}) | {100 * z.raw_p3:.0f}% | {z.raw_trail:.2f} | {z.raw_spd:.0f} | ${z.raw_usd1:.2f} | "
+                f"{z.h1_run1:+.2f} / {z.h2_run1:+.2f} | {z.L_run1:+.2f} / {z.S_run1:+.2f} |{extra}")
+    HEAD = ("| Chart | Settings | Fires (per day) | RUN ATR (vs random, t) | 2:1 odds (vs random, t) | 3:1 odds | TRAIL run | Candles to +1 ATR | "
+            "$ run / share | 1st half / 2nd half run vs random | Longs / Shorts run vs random |")
+    held = cand[cand["held"] == True]
+    md = [f"# FLOW SUITE 2 FIRE TAGS - EVERY SETTING - {sym} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(f'{t}m' for t in tfs)} (regular hours, like your chart), {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min. Settings combinations scored: {len(R):,} (with {MIN_N}+ fires).",
+          "**The FIRE tag exactly like FLOW SUITE 2:** a Vix Fix pivot arms it (LONG = fear peaks at HI+ and turns down while greed was under "
+          "LO; SHORT = mirror), it fires on the first candle within WAIT candles that passes the fire rule, the trend line filter and the "
+          "candle-close filter; a new setup the other way cancels it. Entry = next candle's open after the tag. **Scored by the RUN** "
+          "(you manage the exit): RUN = how far price went your way before a 1 ATR pullback against the entry; 2:1 odds = chance of "
+          "+2 ATR before -1 ATR. **vs random** = minus what an average candle gives the same way, same chart, same half-year.",
+          f"**Settings tested:** pivot from {'/'.join(map(str, FIRE_HI))}; other side under {'/'.join(str(x) if x <= 100 else 'off' for x in FIRE_LO)}; "
+          f"pivot {'/'.join(map(str, FIRE_PL))} before x {'/'.join(map(str, FIRE_PR))} after; fire rule = at the pivot / flow agrees / glow; "
+          f"flow average {'/'.join(map(str, FIRE_MA))}; flow holds {'/'.join(map(str, FIRE_CONF))}; trend filter off / block / with; candle filter "
+          f"off / on; wait {'/'.join(map(str, FIRE_WAIT))}; cooldown {'/'.join(map(str, FIRE_COOL))} on the top 15.",
+          f"**HELD UP** = t {T_PASS:g}+ on BOTH the run and the 2:1 odds, {HELD_N}+ fires, better than random in BOTH halves of the year on "
+          "both, and the settings one notch away on every knob also better on average (not a lucky spike).", "",
+          "## The answer in 30 seconds"]
+    if len(held):
+        md.append(f"- **HELD UP: {len(held)} settings.** Best:")
+        for z in held.head(8).itertuples():
+            md.append(f"  - **{z.tf}m: {tv(z)}** -> run {z.raw_run1:.2f} ATR ({z.run1:+.2f} vs random, t {z.t_run1:.1f}), 2:1 odds "
+                      f"{100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f} pts, t {z.t_p2:.1f}), {z.n / 250:.1f} fires a day, ${z.raw_usd1:.2f}/share run")
+    else:
+        md.append(f"- **HELD UP: none** - no setting improved BOTH the run and the 2:1 odds at t {T_PASS:g} with every check.")
+    md.append(f"- Best combined t anywhere: {R['score'].max():.1f}.")
+    md.append(f"- **THE REAL TEST - pick the best settings on 6 months, trade them blind on the other 6 (both ways round).** "
+              f"PASS = the blind half beats random with t {WF_T:g}+ on the run (and {WF_T * 0.75:g}+ on the 2:1 odds) BOTH ways:")
+    for tf in tfs:
+        if tf in verdict:
+            ok_, zf, zb = verdict[tf]
+            md.append(f"  - **{tf}m: {'PASS ✅' if ok_ else 'FAIL'}** - picked on months 1-6 ({tv(zf)}) -> blind months 7-12: run "
+                      f"{zf.h2_run1:+.2f} ATR vs random (t {zf.h2_t_run1:.1f}), 2:1 odds {100 * zf.h2_p2:+.0f} pts (t {zf.h2_t_p2:.1f}), {zf.h2_n} fires | "
+                      f"picked on months 7-12 ({tv(zb)}) -> blind months 1-6: run {zb.h1_run1:+.2f} (t {zb.h1_t_run1:.1f}), 2:1 odds "
+                      f"{100 * zb.h1_p2:+.0f} pts (t {zb.h1_t_p2:.1f})")
+    md += ["", "## Your current settings (85 / 20, pivot 2 before / 1 after, flow agrees, average 10, holds 1, wait 5, block, candle ON)", HEAD,
+           "|" + "---|" * 11]
+    for tf in tfs:
+        if tf in yours:
+            z = pd.Series(yours[tf])
+            md.append(row(z).replace(f"| {tf}m |", f"| {tf}m (lag peak->fire ~{speed.get(tf, np.nan):.0f} candles) |", 1))
+    md += ["", "## Top 40 settings (ranked by the weaker t of RUN and 2:1 odds)", HEAD[:-1] + " Next settings run | |", "|" + "---|" * 13]
+    for z in cand.head(40).itertuples():
+        md.append(row(z, f" {z.nb_mean:+.2f} ({100 * z.nb_pos:.0f}% better) | {'✅' if z.held else ''} |"))
+    for tf in tfs:
+        Ct = cand[cand["tf"] == tf].head(5)
+        if len(Ct):
+            md += ["", f"### Best 5 on the {tf}m chart", HEAD[:-1] + " Next settings run | |", "|" + "---|" * 13]
+            for z in Ct.itertuples():
+                md.append(row(z, f" {z.nb_mean:+.2f} ({100 * z.nb_pos:.0f}% better) | {'✅' if z.held else ''} |"))
+    md += ["", "## Walk-forward: top 5 picked on the FIRST half -> what they did in the SECOND half",
+           "| Chart | Rank | Settings | 1st half run vs random (t) | 2nd half run vs random (t) | 2nd half 2:1 odds vs random (t) | 2nd half fires |",
+           "|---|---|---|---|---|---|---|"]
+    for w_ in wf:
+        z = w_["z"]
+        md.append(f"| {z.tf}m | {w_['rank']} | {tv(z)} | {z.h1_run1:+.2f} ({z.h1_t_run1:.1f}) | {z.h2_run1:+.2f} ({z.h2_t_run1:.1f}) | "
+                  f"{100 * z.h2_p2:+.0f} pts ({z.h2_t_p2:.1f}) | {z.h2_n} |")
+    md += ["", "## Process of elimination - each setting value across ALL combinations",
+           "Best = the best combined t with that value; Typical = the median; Run = median run vs random; In top 500 = share of the 500 best "
+           "settings that use it (higher = that value keeps showing up in the winners).",
+           "| Setting | Value | Best t | Typical t | Typical run vs random | In top 500 |", "|---|---|---|---|---|---|"]
+    KN = dict(hi="Pivot from", lo="Other side under", pl="Pivot candles before", pr="Pivot candles after", need="Fire rule", ma="Flow average",
+              conf="Flow holds", trend="Trend filter", bar="Candle close filter", wait="Wait")
+    for e in elim:
+        vv = e["v"]
+        vs = ("off" if (e["k"] == "lo" and vv > 100) else FIRE_NEED_TV.get(vv, vv) if e["k"] == "need" else
+              FIRE_TREND_TV.get(vv, vv) if e["k"] == "trend" else ("ON" if vv == 1 else "OFF") if e["k"] == "bar" else vv)
+        if e["k"] in ("ma", "conf") and vv == 0:
+            vs = "n/a (fire at pivot)"
+        md.append(f"| {KN[e['k']]} | {vs} | {e['best']:.1f} | {e['med']:.1f} | {e['run']:+.2f} | {100 * e['top']:.0f}% |")
+    md += ["", "## Cooldown (candles before another fire the same way) on the top 15 settings",
+           "| Chart | Settings | " + " | ".join(f"cooldown {cl}: fires, run vs random (t)" for cl in FIRE_COOL) + " |", "|" + "---|" * (2 + len(FIRE_COOL))]
+    for z, rr in cool_rows:
+        md.append(f"| {z.tf}m | {tv(z)} | " + " | ".join(f"{r_['n']}, {r_['run1']:+.2f} ({r_['t_run1']:.1f})" if r_ else "-" for r_ in rr) + " |")
+    md += ["", f"**Luck check:** {len(R):,} settings are scored, so some look good by chance. This exact test on random 1-cent-tick prices "
+           f"(no edge anywhere) is the bar: HELD UP needs t {T_PASS:g}+ on BOTH measures, {HELD_N}+ fires, both halves, and the neighbors. "
+           "On random prices the BEST of these settings looked great (run +0.5 ATR vs random, 2:1 odds +6-8 pts, both halves better, "
+           "every neighbor better, t up to 3.8) - pure luck, because neighboring settings share most of the same fires. That is why the "
+           "verdict is the BLIND test (pick on one half, judge on the other, both ways). 3 runs on random prices: best combined t 2.2-3.3, "
+           "nothing HELD UP at t 4, and the blind test FAILED on all 12 charts (best blind t 1.8)."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/fire_{stamp}.md", f"{OUT}/fire_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
