@@ -1,5 +1,8 @@
 """
-THE DEFAULT RUN (MODE=diamond) = DIAMOND DAYS: your AGREE DOTS diamonds traded like you trade them (options-sized targets,
+THE DEFAULT RUN (MODE=dial) = DIAL IN THE DIAMOND: every bar-count setting of your AGREE DOTS diamond (311,040 per chart) + every
+  reading at each diamond (inside the diamond, the run into it, colors, trend line, VWAP, the day, real VIX), alone and in every
+  2-3 combination, winners vs losers, blind tests. SPY + QQQ, 1/2/3/5m + TODAY. DATA ONLY.
+MODE=diamond = DIAMOND DAYS: your AGREE DOTS diamonds traded like you trade them (options-sized targets,
   stop past the swing, ride to the opposite diamond), every diamond of the last 2 days listed to check against your chart, and
   do clean days stay clean (today's earlier diamonds, VWAP crosses, range, trend so far, real VIX). SPY + QQQ, 1/2/3/5m + TODAY.
 MODE=second = THE SECOND MOVE: every good little run ($0.75+ in 30 min, greed / fear 70+), every candle after
@@ -154,7 +157,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "diamond").strip().lower() or "diamond"
+MODE = os.getenv("MODE", "dial").strip().lower() or "dial"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -454,6 +457,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "dial":
+        return dl_main()
     if MODE == "diamond":
         return dm_main()
     if MODE == "second":
@@ -12114,6 +12119,674 @@ def dm_main():
         with open(sm_, "a") as f:
             f.write(text + "\n")
 
+
+# ================================================================ DIAL IN THE DIAMOND (MODE=dial)
+# Your AGREE DOTS diamond, taken apart. PART 1 = every setting of the indicator itself (TTM average length, how deep TTM must be,
+# Vix Fix average length, how high the Vix average must peak, how close the two turns must be) scored on 12 months, blind-tested.
+# PART 2 = every reading at the moment each diamond fires (inside the diamond, the move into it, colors, trend line, VWAP, the
+# day so far, real VIX) - which ones separate the winners from the losers, alone and in every 2-3 combination, blind-tested.
+DL_TFS_DEF = "1,2,3,5"
+DG = dict(tLen=[10, 14, 20, 30], atrLen=[7, 14, 21], aLen=[3, 5, 8], tDepth=[0.5, 0.75, 1.0, 1.5, 2.0, 2.5],
+          lb=[10, 15, 22, 30], hiLb=[20, 30, 50, 80], maLen=[5, 10, 15], vDepth=[30, 40, 50, 60, 70, 80], win=[1, 2, 3, 4, 5])
+DG_KEYS = ["tLen", "atrLen", "aLen", "tDepth", "lb", "hiLb", "maLen", "vDepth", "win"]
+DG_NAMES = ["TTM length", "ATR length", "TTM average length", "TTM depth (ATR)", "Vix Fix lookback (high / low close)",
+            "Vix Fix range lookback", "Vix Fix average length", "Vix Fix turn level", "Both turns within N candles"]
+DG_DEF = (20, 14, 5, 1.0, 22, 50, 10, 50, 2)       # YOUR settings (AGREE DOTS screen: within 2)
+DL_DEF = (5, 1.0, 10, 50, 2)                        # the same, for the readings part
+DL_F = ["TPK", "TNOW", "VPK", "SNOW", "ONOW", "FIRST", "MAXD", "OMAX", "SCOL", "OCOL", "TCOL", "TLC", "PXL", "ANG", "RUN", "RMIN", "AGE",
+        "PB", "SQZ", "GLOW", "VWAP", "TRND", "WITH", "VIXD", "VIXR"]
+_RUNC2 = ["calm (gray)", "DROPPING FAST (yellow)", "FADING (purple greed / orange fear)", "BUILDING (light blue / salmon)",
+          "SURGING (blue greed / red fear)", "MAXED (bright blue / hot pink)", "BOTTOMED (brown)", "WAKING UP (lime)"]
+DL_NAMES = {
+    "TPK": ("TTM average peak before the turn (ATR)", ["1-1.5", "1.5-2", "2-3", "3+", "under 1"]),
+    "TNOW": ("TTM now (ATR, on the run side)", ["under 1", "1-2", "2-3", "3+", "already flipped"]),
+    "VPK": ("Vix Fix average peak (stretched side)", ["under 50", "50-60", "60-70", "70-80", "80+"]),
+    "SNOW": ("Stretched side now (greed for shorts / fear for longs)", ["0-35", "35-60", "60-85", "85+"]),
+    "ONOW": ("Other side now", ["0-10", "10-20", "20-35", "35+"]),
+    "FIRST": ("Which pane turned first", ["SAME candle", "TTM first", "VIX FIX first"]),
+    "MAXD": ("Stretched side MAXED (95+) in the last 10 candles", ["no", "YES"]),
+    "OMAX": ("Other side MAXED (95+) in the last 30 candles", ["no", "YES"]),
+    "SCOL": ("Stretched LINE COLOR", _RUNC2),
+    "OCOL": ("Other LINE COLOR", _RUNC2),
+    "TCOL": ("TTM COLOR", ["RUN STILL PUSHING (cyan shorts / red longs)", "RUN FADING (blue shorts / yellow longs)",
+                           "FLIPPED YOUR WAY (red shorts / cyan longs)", "FLIPPED, BOUNCING (yellow shorts / blue longs)"]),
+    "TLC": ("TREND LINE COLOR", ["RUN SIDE STRONG (green shorts / red longs)", "RUN SIDE FADING (blue shorts / pink longs)", "GRAY",
+                                 "YOUR SIDE FADING (pink shorts / blue longs)", "YOUR SIDE STRONG (red shorts / green longs)"]),
+    "PXL": ("Price vs trend line (ATR)", ["through it to YOUR side", "at the line", "0.25-1 ATR on the run side", "1+ ATR on the run side"]),
+    "ANG": ("Trend line angle (+ = the run's way)", ["your way 5+", "flat (-5 to +5)", "run way 5-15", "run way 15+"]),
+    "RUN": ("The run into the diamond (last 20 candles, $)", ["under $0.75", "$0.75-1.50", "$1.50-3", "$3+"]),
+    "RMIN": ("The run took (minutes)", ["10 or less", "11-20", "21-40", "41+"]),
+    "AGE": ("Candles since the run's high (shorts) / low (longs)", ["0-1", "2-3", "4-6", "7+"]),
+    "PB": ("Price already came back from the extreme ($)", ["under $0.20", "$0.20-0.50", "$0.50-1", "$1+"]),
+    "SQZ": ("TTM squeeze", ["ON", "just fired", "off"]),
+    "GLOW": ("Lines GLOW (Vix flow + TTM agree)", ["glow YOUR way", "no glow", "glow the RUN way"]),
+    "VWAP": ("Price vs VWAP (ATR, + = run side)", ["your side", "-1 to +1", "+1 to +3", "+3 or more"]),
+    "TRND": ("Day so far: net move / range", ["round trips (under 30%)", "30-60%", "trending (60%+)"]),
+    "WITH": ("Diamond vs the day's move so far", ["WITH the day", "AGAINST the day"]),
+    "VIXD": ("REAL VIX today (VIXY vs yesterday)", ["down", "up 0-3%", "up 3%+"]),
+    "VIXR": ("REAL VIX vs its 20-day average", ["LOW (5%+ under)", "normal", "HIGH (5%+ over)"]),
+}
+DL_RAW = [("TTM average peak (ATR)", "r_tpk"), ("TTM now on the run side (ATR)", "r_tnow"), ("Vix Fix average peak", "r_vpk"),
+          ("Stretched side now", "r_snow"), ("Other side now", "r_onow"), ("Run into the diamond $", "r_run"), ("Run minutes", "r_rmin"),
+          ("Candles since the extreme", "r_age"), ("Price already back from the extreme $", "r_pb"), ("Price vs trend line (ATR)", "r_pxl"),
+          ("Trend line angle (run way +)", "r_ang"), ("Price vs VWAP (ATR, run side +)", "r_vwap"), ("Stop past the swing $", "stopsw")]
+
+
+def dl_main():
+    from itertools import combinations, product
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    midord = mid.date().toordinal()
+    fetch_from = (yr_start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("DL_TFS", DL_TFS_DEF).split(",")]
+    MIN_N = int(os.getenv("DL_MIN_N", "60"))
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    vx1, _ = fake_1m("VIXY", fetch_from, end) if test else fetch_1m("VIXY", fetch_from, end)
+    vxc = vx1["close"]
+    vday = vxc.groupby(vxc.index.date).last()
+    vday_prev = pd.Series(vday.shift(1).values, index=pd.to_datetime(vday.index))
+    vday_avg20 = pd.Series(vday.rolling(20).mean().shift(1).values, index=pd.to_datetime(vday.index))
+    all_days = pd.bdate_range(yr_start.date(), end.astimezone(NY).date())
+    DAYIDX = {d.toordinal(): i for i, d in enumerate(all_days.date)}
+    ND = len(all_days)
+    dhalf = np.array([1 if d.toordinal() >= midord else 0 for d in all_days.date])
+    EVS = {}           # (symbol, tf) -> turn events for every setting + outcomes
+    rows, charts, last_days = [], [], []
+    EXK = [1, 2, 4]    # +0.50/-0.50, +1/-0.50, +1/stop past swing (DM_EXITS indexes)
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df1 = df1[(df1.index.hour * 100 + df1.index.minute >= 400) & (df1.index.hour * 100 + df1.index.minute < 2000)]
+        o1, h1, l1, c1 = (df1[k].to_numpy() for k in ("open", "high", "low", "close"))
+        t1 = df1.index
+        hm1 = (t1.hour * 100 + t1.minute).to_numpy()
+        d1 = pd.factorize(t1.date)[0]
+        last1 = pd.Series(np.where(hm1 < 1559, np.arange(len(t1)), -1)).groupby(d1).transform("max").to_numpy()
+        last1 = np.where(last1 < 0, np.arange(len(t1)), last1)
+        last_days = sorted(set(t1.date))[-2:]
+        for tf in tfs:
+            ch = f"{sym} {tf}m"
+            charts.append(ch)
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            half = np.where(ts < mid, 0, 1).astype(np.int8)
+            dord = np.array([d_.toordinal() for d_ in day])
+            didx = np.array([DAYIDX.get(x, -1) for x in dord])
+            e = np.minimum(np.searchsorted(t1.values, (ts + pd.Timedelta(minutes=tf)).values), len(t1) - 1)
+            okw = np.asarray(ts >= yr_start) & (hm >= 930) & (hm < 1545) & np.isfinite(a) & (a > 0) & (didx >= 0)
+            okw &= np.asarray(pd.Index(t1[e].date) == pd.Index(ts.date)) & (hm1[e] < 1550)
+            sh = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+            lo10 = pd.Series(l).rolling(10, min_periods=1).min().to_numpy()
+            hi10 = pd.Series(h).rolling(10, min_periods=1).max().to_numpy()
+            # ---- outcomes for EVERY candle, both sides (any diamond setting is a subset of these)
+            ib = np.nonzero(okw)[0]
+            PO = {}
+            for sd in (1, -1):
+                en = o1[e[ib]]
+                sdist = (en - (lo10[ib] - 0.05)) if sd == 1 else ((hi10[ib] + 0.05) - en)
+                P_, _ = dm_outcomes(o1, h1, l1, c1, last1, e[ib], sd, sdist)
+                full = np.full((n, len(DM_EXITS)), np.nan, dtype=np.float32)
+                full[ib] = P_
+                PO[sd] = full
+            bmean = {(sd, hf): np.nanmean(PO[sd][ib][half[ib] == hf, DM_MAIN]) for sd in (1, -1) for hf in (0, 1)}
+            # ---- PART 1: the turn events for EVERY bar-count setting (TTM length / ATR length / average / depth,
+            #      Vix Fix lookback / range lookback / average / turn level) - stored sparse, scored after both symbols load
+            sh_ = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+            hS, lS, cS = df["high"], df["low"], df["close"]
+            trS = pd.concat([hS - lS, (hS - cS.shift(1)).abs(), (lS - cS.shift(1)).abs()], axis=1).max(axis=1)
+            trS.iloc[0] = hS.iloc[0] - lS.iloc[0]
+            TTE = {}
+            for L_ in DG["tLen"]:
+                mid_ = ((hS.rolling(L_).max() + lS.rolling(L_).min()) / 2 + cS.rolling(L_).mean()) / 2
+                mom_ = linreg_last((cS - mid_).to_numpy(), L_)
+                for AL in DG["atrLen"]:
+                    atr_ = trS.ewm(alpha=1 / AL, adjust=False).mean().to_numpy()
+                    m_ = np.nan_to_num(np.where(atr_ > 0, mom_ / atr_, 0.0))
+                    for aL in DG["aLen"]:
+                        av = pd.Series(m_).ewm(span=aL, adjust=False).mean().to_numpy()
+                        av1, av2 = sh_(av, 1), sh_(av, 2)
+                        upv = (av > av1) & (av1 <= av2)
+                        dnv = (av < av1) & (av1 >= av2)
+                        for td in DG["tDepth"]:
+                            TTE[(L_, AL, aL, td)] = (np.nonzero(upv & (av1 <= -td))[0], np.nonzero(dnv & (av1 >= td))[0])
+            VVE = {}
+            for lb_ in DG["lb"]:
+                hc_, lc_ = cS.rolling(lb_).max(), cS.rolling(lb_).min()
+                wvf_, wvs_ = (hc_ - lS) / hc_ * 100, (hS - lc_) / lc_ * 100
+                for hl_ in DG["hiLb"]:
+                    F_ = np.nan_to_num((wvf_ / wvf_.rolling(hl_).max() * 100).to_numpy())
+                    G_ = np.nan_to_num((wvs_ / wvs_.rolling(hl_).max() * 100).to_numpy())
+                    for mL in DG["maLen"]:
+                        gA = pd.Series(G_).ewm(span=mL, adjust=False).mean().to_numpy()
+                        fA = pd.Series(F_).ewm(span=mL, adjust=False).mean().to_numpy()
+                        gA1, fA1, gA2, fA2 = sh_(gA, 1), sh_(fA, 1), sh_(gA, 2), sh_(fA, 2)
+                        fpk = (fA < fA1) & (fA1 >= fA2)
+                        gpk = (gA < gA1) & (gA1 >= gA2)
+                        for vd in DG["vDepth"]:
+                            VVE[(lb_, hl_, mL, vd)] = (np.nonzero(fpk & (fA1 >= vd))[0], np.nonzero(gpk & (gA1 >= vd))[0])
+            dcv = {sd: np.nan_to_num(PO[sd][:, DM_MAIN] - np.where(half == 0, bmean[(sd, 0)], bmean[(sd, 1)])) for sd in (1, -1)}
+            EVS[(sym, tf)] = dict(TTE=TTE, VVE=VVE, okw=okw, dsafe=np.where(didx >= 0, didx, 0), dcv=dcv,
+                                  PO={sd: np.nan_to_num(PO[sd]) for sd in (1, -1)})
+            S_ = agr_series(df, ind)
+            m = S_["m"]
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F), np.nan_to_num(G)
+            rec = lambda x, w: pd.Series(np.asarray(x, float)).rolling(w, min_periods=1).max().to_numpy() > 0
+            print(f"  {ch}: setting events ready ({time.time() - t0:.0f}s)", flush=True)
+            # ---- PART 2: every reading at each DEFAULT diamond
+            aL, td, mL, vd, w = DL_DEF
+            av = pd.Series(m).ewm(span=aL, adjust=False).mean().to_numpy()
+            av1, av2 = sh(av, 1), sh(av, 2)
+            gA = pd.Series(G).ewm(span=mL, adjust=False).mean().to_numpy()
+            fA = pd.Series(F).ewm(span=mL, adjust=False).mean().to_numpy()
+            gA1, fA1, gA2, fA2 = sh(gA, 1), sh(fA, 1), sh(gA, 2), sh(fA, 2)
+            tu = (av > av1) & (av1 <= av2) & (av1 <= -td)
+            tdn = (av < av1) & (av1 >= av2) & (av1 >= td)
+            fT = (fA1 >= vd) & (fA < fA1) & (fA1 >= fA2)
+            gT = (gA1 >= vd) & (gA < gA1) & (gA1 >= gA2)
+            col, ef = tlt_colors(df, ind)
+            ang = np.nan_to_num(ang_series(df, ind, 5))
+            vw = ind["vwap"]
+            st_ = S_["st"]
+            cs = df["close"]
+            hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+            wvf, wvs = (hc22 - df["low"]) / hc22 * 100, (df["high"] - lc22) / lc22 * 100
+            fspk = ((wvf >= wvf.rolling(20).mean() + 2 * wvf.rolling(20).std(ddof=0)) | (wvf >= wvf.rolling(50).max() * 0.85)).to_numpy()
+            gspk = ((wvs >= wvs.rolling(20).mean() + 2 * wvs.rolling(20).std(ddof=0)) | (wvs >= wvs.rolling(50).max() * 0.85)).to_numpy() & ~fspk
+            fRun, gRun = sm_frun(F, fspk), sm_frun(G, gspk)
+            gAm, fAm = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy(), pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+            upFlow = (gAm > sh(gAm, 1)) & (fAm < sh(fAm, 1))
+            dnFlow = (gAm < sh(gAm, 1)) & (fAm > sh(fAm, 1))
+            close_s = df["close"]
+            basis, dev = close_s.rolling(20).mean(), 2 * close_s.rolling(20).std(ddof=0)
+            tr = pd.concat([df["high"] - df["low"], (df["high"] - close_s.shift(1)).abs(), (df["low"] - close_s.shift(1)).abs()], axis=1).max(axis=1)
+            sq = (dev < 1.5 * tr.ewm(alpha=1 / 20, adjust=False).mean()).to_numpy()
+            fired = ~sq & (pd.Series(sq.astype(float)).shift(1).rolling(3, min_periods=1).max().fillna(0).to_numpy() > 0)
+            sqz = np.where(sq, 0, np.where(fired, 1, 2))
+            rth = (hm >= 930) & (hm < 1600)
+            dkey = pd.Series(dord)
+            o930 = pd.Series(np.where(rth, o, np.nan)).groupby(dkey).transform("first").to_numpy()
+            hi_sf = pd.Series(np.where(rth, h, -np.inf)).groupby(dkey).cummax().to_numpy()
+            lo_sf = pd.Series(np.where(rth, l, np.inf)).groupby(dkey).cummin().to_numpy()
+            rng_ = np.where(np.isfinite(hi_sf - lo_sf), hi_sf - lo_sf, 0)
+            move = c - o930
+            trnd = np.nan_to_num(np.abs(move) / np.where(rng_ > 0, rng_, np.nan))
+            vxa = vxc.reindex(ts + pd.Timedelta(minutes=tf) - pd.Timedelta(minutes=1), method="ffill").to_numpy()
+            dts = pd.to_datetime(pd.Index(ts.date))
+            vxd = (vxa / vday_prev.reindex(dts).to_numpy() - 1) * 100
+            vxr = (vxa / vday_avg20.reindex(dts).to_numpy() - 1) * 100
+            from numpy.lib.stride_tricks import sliding_window_view as swv
+            L20 = 20
+            hpad, lpad = np.r_[np.full(L20 - 1, -np.inf), h], np.r_[np.full(L20 - 1, np.inf), l]
+            whi, wlo = swv(hpad, L20), swv(lpad, L20)
+            age_hi = whi[:, ::-1].argmax(1)
+            age_lo = wlo[:, ::-1].argmin(1)
+            parts = []
+            for sd in (1, -1):
+                if sd == 1:
+                    mk = (tu & rec(fT, w)) | (fT & rec(tu, w))
+                else:
+                    mk = (tdn & rec(gT, w)) | (gT & rec(tdn, w))
+                mark = mk & ~np.r_[False, mk[:-1]] & ~np.r_[False, False, mk[:-2]] & okw
+                ii = np.nonzero(mark)[0]
+                if not len(ii):
+                    continue
+                runc = -sd
+                Sx, Ox = (F, G) if sd == 1 else (G, F)
+                sRun, oRun = (fRun, gRun) if sd == 1 else (gRun, fRun)
+                SA1 = fA1 if sd == 1 else gA1
+                ttm_t = tu if sd == 1 else tdn
+                vix_t = fT if sd == 1 else gT
+                # which turned first: barssince of each at the diamond
+                bs = lambda x: (np.arange(n) - np.maximum.accumulate(np.where(x, np.arange(n), -10 ** 6)))
+                bt_, bv_ = bs(ttm_t)[ii], bs(vix_t)[ii]
+                first = np.where(bt_ == bv_, 0, np.where(bt_ > bv_, 1, 2))
+                # the run into the diamond: extreme on the run side within 20 candles
+                if sd == -1:            # short after an up run: high = extreme
+                    ag = age_hi[ii]
+                    ext = h[ii - ag]
+                    lowb = np.array([l[max(0, i - ag_ - L20):i - ag_ + 1].min() for i, ag_ in zip(ii, ag)])
+                    run = ext - lowb
+                    rmin_ = np.array([(i - ag_) - (max(0, i - ag_ - L20) + int(np.argmin(l[max(0, i - ag_ - L20):i - ag_ + 1]))) for i, ag_ in zip(ii, ag)]) * tf
+                    pb = ext - c[ii]
+                else:
+                    ag = age_lo[ii]
+                    ext = l[ii - ag]
+                    hib = np.array([h[max(0, i - ag_ - L20):i - ag_ + 1].max() for i, ag_ in zip(ii, ag)])
+                    run = hib - ext
+                    rmin_ = np.array([(i - ag_) - (max(0, i - ag_ - L20) + int(np.argmax(h[max(0, i - ag_ - L20):i - ag_ + 1]))) for i, ag_ in zip(ii, ag)]) * tf
+                    pb = c[ii] - ext
+                mm_ = m * runc
+                rise_r = mm_ > sh(mm_, 1)
+                tcol = np.where(mm_ >= 0, np.where(rise_r, 0, 1), np.where(rise_r, 3, 2))
+                tpk = np.abs(av1[ii])
+                tnow = mm_[ii]
+                pxl = (np.where(a > 0, (c - ef) / a, 0) * runc)[ii]
+                angr = (ang * runc)[ii]
+                vwp = (np.where(a > 0, (c - vw) / a, 0) * runc)[ii]
+                glow_y = (upFlow & (st_ == 1)) if sd == 1 else (dnFlow & (st_ == -1))
+                glow_r = (dnFlow & (st_ == -1)) if sd == 1 else (upFlow & (st_ == 1))
+                mx10 = pd.Series(Sx).rolling(10, min_periods=1).max().to_numpy()[ii]
+                omx30 = pd.Series(Ox).rolling(30, min_periods=1).max().to_numpy()[ii]
+                D = pd.DataFrame({f"p{k}": PO[sd][ii, k] for k in range(len(DM_EXITS))})
+                en = o1[e[ii]]
+                D["stopsw"] = np.maximum((en - (lo10[ii] - 0.05)) if sd == 1 else ((hi10[ii] + 0.05) - en), 0.05)
+                D["side"], D["i"] = sd, ii
+                D["TPK_"] = np.where(tpk < 1, 4, np.digitize(tpk, [1.5, 2, 3]))
+                D["TNOW_"] = np.where(tnow < 0, 4, np.digitize(tnow, [1, 2, 3]))
+                D["VPK_"] = np.digitize(SA1[ii], [50, 60, 70, 80])
+                D["SNOW_"] = np.digitize(Sx[ii], [35, 60, 85])
+                D["ONOW_"] = np.digitize(Ox[ii], [10, 20, 35])
+                D["FIRST_"] = first
+                D["MAXD_"] = (mx10 >= 95).astype(int)
+                D["OMAX_"] = (omx30 >= 95).astype(int)
+                D["SCOL_"], D["OCOL_"] = sRun[ii], oRun[ii]
+                D["TCOL_"] = tcol[ii]
+                D["TLC_"] = 2 - (col * runc)[ii]
+                D["PXL_"] = np.digitize(pxl, [-0.25, 0.25, 1])
+                D["ANG_"] = np.digitize(angr, [-5, 5, 15])
+                D["RUN_"] = np.digitize(run, [0.75, 1.5, 3])
+                D["RMIN_"] = np.digitize(rmin_, [10.5, 20.5, 40.5])
+                D["AGE_"] = np.digitize(ag, [2, 4, 7])
+                D["PB_"] = np.digitize(pb, [0.2, 0.5, 1])
+                D["SQZ_"] = sqz[ii]
+                D["GLOW_"] = np.where(glow_y, 0, np.where(glow_r, 2, 1))[ii]
+                D["VWAP_"] = np.digitize(vwp, [-1, 1, 3])
+                D["TRND_"] = np.digitize(trnd[ii], [0.3, 0.6])
+                D["WITH_"] = np.where(move[ii] * sd > 0, 0, 1)
+                D["VIXD_"] = np.digitize(np.nan_to_num(vxd[ii]), [0, 3])
+                D["VIXR_"] = np.digitize(np.nan_to_num(vxr[ii]), [-5, 5])
+                for nm_, v_ in (("r_tpk", tpk), ("r_tnow", tnow), ("r_vpk", SA1[ii]), ("r_snow", Sx[ii]), ("r_onow", Ox[ii]), ("r_run", run),
+                                ("r_rmin", rmin_), ("r_age", ag), ("r_pb", pb), ("r_pxl", pxl), ("r_ang", angr), ("r_vwap", vwp)):
+                    D[nm_] = np.asarray(v_, dtype=np.float32)
+                parts.append(D)
+            if not parts:
+                continue
+            D = pd.concat(parts, ignore_index=True)
+            ii = D["i"].to_numpy()
+            D["ch"], D["half"], D["day"], D["t"], D["px"] = ch, half[ii], dord[ii], ts[ii], c[ii]
+            D["date"] = pd.Index(ts[ii].date)
+            D["bm"] = [bmean[(s_, hf)] for s_, hf in zip(D["side"], D["half"])]
+            for f_ in DL_F:
+                D[f_ + "_"] = D[f_ + "_"].astype(np.int8)
+            rows.append(D)
+            print(f"  {ch}: {len(D)} default diamonds ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["dc"] = E[f"p{DM_MAIN}"] - E["bm"]
+    E["win"] = (E[f"p{DM_MAIN}"] > 0).astype(float)
+    PK = [f"p{k}" for k in range(len(DM_EXITS))]
+    pooled_sets = [(f"{'+'.join(SYMBOLS)} {tf}m", [f"{s_} {tf}m" for s_ in SYMBOLS]) for tf in tfs] + [(f"ALL {len(charts)} charts", list(charts))]
+    PL = [x for x, _ in pooled_sets]
+    MEM = {c_: [c_] for c_ in charts}
+    MEM.update(dict(pooled_sets))
+    yr = E[E["t"] >= yr_start]
+    xl = DM_EXITS[DM_MAIN][0]
+
+    def lab(f, v):
+        nm = DL_NAMES[f][1]
+        return nm[int(v)] if 0 <= int(v) < len(nm) else str(v)
+
+    def words(sub, key):
+        return " + ".join(f"{DL_NAMES[f][0]}: {lab(f, v)}" for f, v in zip(sub, key))
+
+    def stats(g):
+        if len(g) < 2:
+            return None
+        S_ = g.groupby("day")["dc"].sum()
+        C_ = g.groupby("day")["dc"].count()
+        mu = S_.sum() / C_.sum()
+        se = np.sqrt(((S_ - C_ * mu) ** 2).sum()) / C_.sum()
+        hh = g.groupby(g["day"] >= midord)["dc"].mean()
+        r = dict(n=len(g), days=len(S_), win=g["win"].mean(), dc=mu, t=(mu / se if se > 0 and len(S_) >= 10 else np.nan),
+                 h1=hh.get(False, np.nan), h2=hh.get(True, np.nan))
+        for p_ in PK:
+            r[p_] = g[p_].mean()
+        return r
+
+    from itertools import product as _prod
+    TKEYS = list(_prod(DG["tLen"], DG["atrLen"], DG["aLen"], DG["tDepth"]))
+    VKEYS = list(_prod(DG["lb"], DG["hiLb"], DG["maLen"], DG["vDepth"]))
+    WS = DG["win"]
+    NV, NW = len(VKEYS), len(WS)
+    NC = len(TKEYS) * NV * NW
+
+    def ctuple(ci):
+        ti, rem = divmod(ci, NV * NW)
+        vi, wi = divmod(rem, NW)
+        return TKEYS[ti] + VKEYS[vi] + (WS[wi],)
+
+    def cindex(st):
+        return (TKEYS.index(tuple(st[:4])) * NV + VKEYS.index(tuple(st[4:8]))) * NW + WS.index(st[8])
+
+    def sname(st):
+        L_, AL, aL, td, lb_, hl_, mL, vd, w = st
+        return f"TTM len {L_} / ATR {AL} / avg {aL} / depth {td:g} - Vix lookback {lb_} / range {hl_} / avg {mL} / turn {vd} - within {w}"
+
+    def marks(a_, b_, w):
+        if len(a_) == 0 or len(b_) == 0:
+            return np.empty(0, dtype=np.int64)
+        p = np.searchsorted(b_, a_, "right") - 1
+        a1 = a_[(p >= 0) & (a_ - b_[np.maximum(p, 0)] < w)]
+        q = np.searchsorted(a_, b_, "right") - 1
+        b1 = b_[(q >= 0) & (b_ - a_[np.maximum(q, 0)] < w)]
+        u = np.union1d(a1, b1)
+        if len(u) == 0:
+            return u
+        return u[np.r_[True, np.diff(u) > 2]]          # one diamond per turn (not again on the next 2 candles)
+    RK = ["n", "win", "p1", "p2", "p4", "dc", "t", "n0", "dc0", "t0", "n1", "dc1", "t1"]
+    RES = {}
+
+    def fill(Rr, sl, A):
+        N_ = A["n"]
+        Nt = N_.sum(1)
+        Ns = np.maximum(Nt, 1)
+        mu = A["dc"].sum(1) / Ns
+        se = np.sqrt(((A["dc"] - N_ * mu[:, None]) ** 2).sum(1)) / Ns
+        Rr["n"][sl], Rr["win"][sl], Rr["dc"][sl] = Nt, A["win"].sum(1) / Ns, mu
+        Rr["t"][sl] = np.where(se > 0, mu / np.where(se > 0, se, 1), np.nan)
+        for k in ("p1", "p2", "p4"):
+            Rr[k][sl] = A[k].sum(1) / Ns
+        for hh in (0, 1):
+            mk_ = dhalf == hh
+            Nh, Dh = N_[:, mk_], A["dc"][:, mk_]
+            nt = Nh.sum(1)
+            ns = np.maximum(nt, 1)
+            muh = Dh.sum(1) / ns
+            seh = np.sqrt(((Dh - Nh * muh[:, None]) ** 2).sum(1)) / ns
+            Rr[f"n{hh}"][sl], Rr[f"dc{hh}"][sl] = nt, muh
+            Rr[f"t{hh}"][sl] = np.where(seh > 0, muh / np.where(seh > 0, seh, 1), np.nan)
+    BATCH = 4096
+    LABS = {}
+    for tf in tfs:
+        labs = [(f"{s_} {tf}m", [s_]) for s_ in SYMBOLS]
+        if len(SYMBOLS) > 1:
+            labs = [(f"{'+'.join(SYMBOLS)} {tf}m", list(SYMBOLS))] + labs
+        LABS[tf] = labs
+        for lab_, _ in labs:
+            RES[lab_] = {k: np.full(NC, np.nan, dtype=np.float32) for k in RK}
+        for b0 in range(0, NC, BATCH):
+            nb = min(NC, b0 + BATCH) - b0
+            M = {s_: {k: np.zeros((nb, ND)) for k in ("n", "dc", "win", "p1", "p2", "p4")} for s_ in SYMBOLS}
+            for s_ in SYMBOLS:
+                ev = EVS.get((s_, tf))
+                if ev is None:
+                    continue
+                Mx = M[s_]
+                okw_, ds_ = ev["okw"], ev["dsafe"]
+                for j in range(nb):
+                    st = ctuple(b0 + j)
+                    tu, tdn = ev["TTE"][st[:4]]
+                    fT, gT = ev["VVE"][st[4:8]]
+                    for sd, a_, b_ in ((1, tu, fT), (-1, tdn, gT)):
+                        u = marks(a_, b_, st[8])
+                        if not len(u):
+                            continue
+                        u = u[okw_[u]]
+                        if not len(u):
+                            continue
+                        dd = ds_[u]
+                        P_ = ev["PO"][sd][u]
+                        Mx["n"][j] += np.bincount(dd, minlength=ND)
+                        Mx["dc"][j] += np.bincount(dd, weights=ev["dcv"][sd][u], minlength=ND)
+                        Mx["win"][j] += np.bincount(dd, weights=(P_[:, DM_MAIN] > 0).astype(float), minlength=ND)
+                        Mx["p1"][j] += np.bincount(dd, weights=P_[:, 1], minlength=ND)
+                        Mx["p2"][j] += np.bincount(dd, weights=P_[:, 2], minlength=ND)
+                        Mx["p4"][j] += np.bincount(dd, weights=P_[:, 4], minlength=ND)
+            for lab_, mem_ in labs:
+                agg = {k: sum(M[s_][k] for s_ in mem_) for k in M[mem_[0]]}
+                fill(RES[lab_], slice(b0, b0 + nb), agg)
+            if (b0 // BATCH) % 10 == 0:
+                print(f"  {tf}m settings {b0 + nb:,}/{NC:,} ({time.time() - t0:.0f}s)", flush=True)
+    for s_ in list(EVS):
+        EVS[s_] = None
+    DEFI = cindex(DG_DEF)
+    md = [f"# DIAL IN THE DIAMOND - YOUR AGREE DOTS DIAMOND TAKEN APART - {', '.join(SYMBOLS)} - LAST 12 MONTHS + TODAY - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(charts)} (extended hours feed the indicators, like your chart). Diamonds 9:30-15:45, entry = next 1-minute open. "
+          f"DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. **Settings tested: {NC:,} per chart** (every bar count). Your-setting diamonds studied: {len(E):,}.",
+          f"**Win %** = {xl} first (30 min max, same minute = stop). **$/diamond**: +$0.50/-$0.50, +$1/-$0.50, +$1 / stop $0.05 past the last "
+          "10 candles' swing. Rough option math (at-the-money 0DTE midday): +$0.50 on SPY ~ +15-20%.",
+          "**vs random** = the same exit from ANY candle, same side. **t** = clustered by day (3+ = solid). **YOUR SETTINGS** = TTM length 20 / "
+          "ATR 14 / avg 5 / depth 1 - Vix lookback 22 / range 50 / avg 10 / turn 50 - within 2 (your AGREE DOTS screen).",
+          "**Neighbors** = the average t of the settings one notch away on every knob - a real setting sits on a plateau, a lucky one is a lone spike.", ""]
+    GH = "| Chart | Settings | Diamonds (per day) | Win % | +$0.50/-$0.50 | +$1/-$0.50 | +$1/stop past swing | vs random | t | 1st / 2nd half | Neighbors t |"
+    GSP = "|---|---|---|---|---|---|---|---|---|---|---|"
+
+    def neigh_t(Rr, ci):
+        st = list(ctuple(ci))
+        ts_ = []
+        for kk, key_ in enumerate(DG_KEYS):
+            vals = DG[key_]
+            ix = vals.index(st[kk])
+            for d_ in (-1, 1):
+                if 0 <= ix + d_ < len(vals):
+                    s2 = list(st)
+                    s2[kk] = vals[ix + d_]
+                    v_ = Rr["t"][cindex(s2)]
+                    if np.isfinite(v_):
+                        ts_.append(v_)
+        return np.mean(ts_) if ts_ else np.nan
+
+    def grow(lab_, nm_, Rr, ci, nb=True):
+        n_ = Rr["n"][ci]
+        return (f"| {lab_} | {nm_} | {int(n_)} ({n_ / 250:.1f}) | {100 * Rr['win'][ci]:.0f}% | {Rr['p1'][ci]:+.3f} | {Rr['p2'][ci]:+.3f} | "
+                f"{Rr['p4'][ci]:+.3f} | {Rr['dc'][ci]:+.3f} | {Rr['t'][ci]:.1f} | {Rr['dc0'][ci]:+.3f} / {Rr['dc1'][ci]:+.3f} | "
+                f"{(neigh_t(Rr, ci) if nb else np.nan):.1f} |")
+    md += ["## PART 1 - DIAL THE SETTINGS: every bar count, every timeframe"]
+    for tf in tfs:
+        labs = LABS[tf]
+        md += ["", f"### {tf}m", GH, GSP]
+        for lab_, _ in labs:
+            md.append(grow(lab_, "**YOUR SETTINGS**", RES[lab_], DEFI))
+        Rr = RES[labs[0][0]]
+        good = np.nonzero((Rr["n"] >= 150) & (Rr["dc0"] > 0) & (Rr["dc1"] > 0) & (Rr["t"] >= 3))[0]
+        md.append(f"| {labs[0][0]} | **{len(good):,} of {NC:,} settings have t 3+ and beat random in both halves** | | | | | | | | | |")
+        for ci in good[np.argsort(-Rr["t"][good])][:10]:
+            md.append(grow(labs[0][0], sname(ctuple(ci)), Rr, ci))
+        md += ["", f"**{tf}m - every knob, one at a time** (SPY+QQQ, the other knobs at YOUR settings): $/diamond vs random (t, diamonds). "
+               "Then the BEST any setting with that value reached (t), and the share of all settings with that value that beat random at t 2+."]
+        for kk, (key_, nm_) in enumerate(zip(DG_KEYS, DG_NAMES)):
+            cells, cells2 = [], []
+            allst = None
+            for v_ in DG[key_]:
+                st = list(DG_DEF)
+                st[kk] = v_
+                ci = cindex(st)
+                cells.append(f"{v_:g}: {Rr['dc'][ci]:+.3f} (t {Rr['t'][ci]:.1f}, {int(Rr['n'][ci])})")
+            # marginal over every setting with that value
+            vals = DG[key_]
+            inner = int(np.prod([len(DG[k_]) for k_ in DG_KEYS[kk + 1:]]))
+            for vi, v_ in enumerate(vals):
+                idx_ = np.arange(NC)
+                sel = ((idx_ // inner) % len(vals)) == vi
+                ok_ = sel & (Rr["n"] >= 150)
+                tt_ = Rr["t"][ok_]
+                if len(tt_):
+                    cells2.append(f"{v_:g}: best t {np.nanmax(tt_):.1f}, {100 * np.mean(tt_ >= 2):.0f}% at t 2+")
+            md.append(f"- **{nm_}** - " + " | ".join(cells))
+            md.append(f"  - all settings: " + " | ".join(cells2))
+    # ---- blind tests for the settings
+    md += ["", "### BLIND TESTS for the settings (✅ = +$0.04/diamond over random, t 2.5+, on data it never saw)",
+           "Each line: the best of all the settings on ONE half of the year (or one ticker), then judged on the other."]
+    for tf in tfs:
+        for lab_, _ in LABS[tf]:
+            Rr = RES[lab_]
+            for pick in (0, 1):
+                oth = 1 - pick
+                cand = np.nonzero((Rr[f"n{pick}"] >= 80) & np.isfinite(Rr[f"t{pick}"]))[0]
+                if not len(cand):
+                    continue
+                ci = cand[np.argmax(Rr[f"t{pick}"][cand])]
+                ok = Rr[f"dc{oth}"][ci] >= 0.04 and Rr[f"t{oth}"][ci] >= 2.5
+                md.append(f"- **{lab_}**, picked on {'months 1-6' if pick == 0 else 'months 7-12'}: {sname(ctuple(ci))} (t {Rr[f't{pick}'][ci]:.1f}, "
+                          f"{Rr[f'dc{pick}'][ci]:+.3f}) -> other half: **{int(Rr[f'n{oth}'][ci])} diamonds, {Rr[f'dc{oth}'][ci]:+.3f} $/diamond vs random, "
+                          f"t {Rr[f't{oth}'][ci]:.1f}** {'✅' if ok else ''}")
+        if len(SYMBOLS) >= 2:
+            for sa_, sb_ in ((SYMBOLS[0], SYMBOLS[1]), (SYMBOLS[1], SYMBOLS[0])):
+                Ra, Rb = RES[f"{sa_} {tf}m"], RES[f"{sb_} {tf}m"]
+                cand = np.nonzero((Ra["n"] >= 150) & (Ra["dc0"] > 0) & (Ra["dc1"] > 0) & np.isfinite(Ra["t"]))[0]
+                if not len(cand):
+                    continue
+                ci = cand[np.argmax(Ra["t"][cand])]
+                ok = Rb["dc"][ci] >= 0.04 and Rb["t"][ci] >= 2.5
+                md.append(f"- picked on **{sa_} {tf}m** ({sname(ctuple(ci))}, t {Ra['t'][ci]:.1f}) -> on **{sb_} {tf}m**: **{int(Rb['n'][ci])} diamonds, "
+                          f"{100 * Rb['win'][ci]:.0f}% win, {Rb['p1'][ci]:+.3f} $/diamond** ({Rb['dc'][ci]:+.3f} vs random, t {Rb['t'][ci]:.1f}) {'✅' if ok else ''}")
+    # save every setting for the pooled charts (t 2+ or yours)
+    sv = []
+    for tf in tfs:
+        lab_ = LABS[tf][0][0]
+        Rr = RES[lab_]
+        keep = np.nonzero(((Rr["t"] >= 2) & (Rr["n"] >= 100)) | (np.arange(NC) == DEFI))[0]
+        for ci in keep:
+            sv.append(dict(chart=lab_, settings=sname(ctuple(ci)), **{k: float(Rr[k][ci]) for k in RK}))
+    pd.DataFrame(sv).to_csv(f"{OUT}/dial_settings.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    # ---- PART 2: inside and out
+    HD = "| Chart | Reading | Diamonds | Win % | " + " | ".join(x[0] for x in DM_EXITS) + " | vs random | t | 1st / 2nd half |"
+    HS = "|" + "---|" * (8 + len(DM_EXITS))
+
+    def row(lab_, nm_, r):
+        return (f"| {lab_} | {nm_} | {r['n']} | {100 * r['win']:.0f}% | " + " | ".join(f"{r[p_]:+.3f}" for p_ in PK) +
+                f" | {r['dc']:+.3f} | {r['t']:.1f} | {r['h1']:+.3f} / {r['h2']:+.3f} |")
+    md += ["", "## PART 2 - INSIDE AND OUT: what each diamond showed when it fired (your settings)",
+           "### Check against your chart - every SPY / QQQ 1m diamond, last 2 trading days, with its readings",
+           f"| Chart | Time | Diamond | Price | {xl} | +$1/-$0.50 | TTM peak / now | Vix avg peak | Stretched / other | First | Run $ (min) | Already back $ | Trend line | TTM color | Day |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for ch in [c_ for c_ in charts if c_.endswith(" 1m")]:
+        g = E[(E["ch"] == ch) & E["date"].isin(last_days)].sort_values("t")
+        for z in g.itertuples():
+            md.append(f"| {ch} | {z.t:%m/%d %H:%M} | {'GREEN' if z.side == 1 else 'RED'} | {z.px:.2f} | {getattr(z, f'p{DM_MAIN}'):+.2f} | {z.p2:+.2f} | "
+                      f"{z.r_tpk:.1f} / {z.r_tnow:+.1f} | {z.r_vpk:.0f} | {z.r_snow:.0f} / {z.r_onow:.0f} | {lab('FIRST', z.FIRST_)} | "
+                      f"{z.r_run:.2f} ({z.r_rmin:.0f}) | {z.r_pb:.2f} | {lab('TLC', z.TLC_).split(' (')[0]} | {lab('TCOL', z.TCOL_).split(' (')[0]} | "
+                      f"{lab('TRND', z.TRND_).split(' (')[0]} |")
+    md += ["", f"### WINNERS vs LOSERS - the actual numbers (median; win = {xl})"]
+    for lab_ in PL:
+        g = yr[yr["ch"].isin(MEM[lab_])]
+        W_, L_ = g[g["win"] == 1], g[g["win"] == 0]
+        md += ["", f"#### {lab_} - {len(W_):,} winners / {len(L_):,} losers", "| Reading | Winners | Losers | diff t |", "|---|---|---|---|"]
+        for nm_, col_ in DL_RAW:
+            a_, b_ = W_[col_].astype(float), L_[col_].astype(float)
+            se = np.sqrt(a_.var() / max(1, a_.count()) + b_.var() / max(1, b_.count()))
+            md.append(f"| {nm_} | {a_.median():.2f} | {b_.median():.2f} | {((a_.mean() - b_.mean()) / se if se > 0 else np.nan):+.1f} |")
+    out = []
+    yr = yr.copy()
+    yr["one"] = 1.0
+    VALS = ["dc", "win", "one", *PK]
+    groups = {c_: yr[yr["ch"] == c_] for c_ in charts}
+
+    def cell_rows(Gd, label, sub, nk):
+        lv = list(range(nk))
+        tot = Gd.groupby(level=lv).sum()
+        nn = tot["one"]
+        mu = tot["dc"] / nn
+        devv = Gd["dc"] - Gd["one"] * mu.reindex(Gd.index.droplevel(-1)).to_numpy()
+        se = np.sqrt((devv ** 2).groupby(level=lv).sum()) / nn
+        tt = mu / se
+        days = Gd.groupby(level=lv).size()
+        hflag = (Gd.index.get_level_values(-1) >= midord).astype(int)
+        th = Gd.groupby([Gd.index.get_level_values(i) for i in lv] + [hflag]).sum()
+        hh = th["dc"] / th["one"]
+        res = []
+        for key in nn[(nn >= MIN_N) & (days >= 10)].index:
+            kt = key if isinstance(key, tuple) else (key,)
+            z = tot.loc[key]
+            r = dict(ch=label, sub=sub, key=kt, readings=words(sub, kt), size=nk, n=int(z["one"]), days=int(days.loc[key]),
+                     win=z["win"] / z["one"], dc=z["dc"] / z["one"], t=float(tt.loc[key]), h1=hh.get(kt + (0,), np.nan), h2=hh.get(kt + (1,), np.nan))
+            for p_ in PK:
+                r[p_] = z[p_] / z["one"]
+            res.append(r)
+        return res
+    subs = [s_ for r_ in (1, 2, 3) for s_ in combinations(DL_F, r_)]
+    for si, sub in enumerate(subs):
+        keys = [f + "_" for f in sub]
+        Gs = {c_: groups[c_].groupby(keys + ["day"], observed=True)[VALS].sum() for c_ in charts}
+        for c_ in charts:
+            out += cell_rows(Gs[c_], c_, sub, len(keys))
+        for lab_, mem_ in pooled_sets:
+            Pp = pd.concat([Gs[c_] for c_ in mem_]).groupby(level=list(range(len(keys) + 1))).sum()
+            out += cell_rows(Pp, lab_, sub, len(keys))
+        if si % 300 == 0:
+            print(f"  readings {si:,}/{len(subs):,} ({time.time() - t0:.0f}s)", flush=True)
+    R = pd.DataFrame(out)
+    R["both"] = (R["h1"] > 0) & (R["h2"] > 0)
+    md += ["", "### EACH READING ON ITS OWN (✅ = t 3+ and better than random in both halves)"]
+    for lab_ in [PL[-1]] + PL[:-1]:
+        md += ["", f"#### {lab_}", HD, HS]
+        for z in R[(R["ch"] == lab_) & (R["size"] == 1)].sort_values(["sub", "key"]).itertuples():
+            md.append(row(lab_, f"{z.readings} {'✅' if (z.t >= 3 and z.both) else ''}", z._asdict()))
+    good = R[(R["size"] >= 2) & (R["t"] >= 3) & R["both"]].sort_values("t", ascending=False)
+    md += ["", f"### BEST 2-3 READING COMBINATIONS (t 3+, better than random in both halves) - {len(good):,} of {len(R[R['size'] >= 2]):,}", HD, HS]
+    for lab_ in PL + charts:
+        for z in good[good["ch"] == lab_].head(15 if lab_ in PL else 5).itertuples():
+            md.append(row(lab_, z.readings, z._asdict()))
+    md += ["", "### BLIND TESTS for the readings (✅ = +$0.04/diamond over random, t 2.5+, on data it never saw)"]
+    for lab_ in PL[:-1] + charts:
+        g = yr[yr["ch"].isin(MEM[lab_])]
+        for pick in (0, 1):
+            gp, gj = g[g["half"] == pick], g[g["half"] != pick]
+            best = None
+            for sub in [s_ for r_ in (1, 2, 3) for s_ in combinations(DL_F, r_)]:
+                keys = [f + "_" for f in sub]
+                G_ = gp.groupby(keys + ["day"], observed=True)["dc"]
+                s_, n_ = G_.sum(), G_.count()
+                lv = list(range(len(keys)))
+                tot, cnt = s_.groupby(level=lv).sum(), n_.groupby(level=lv).sum()
+                mu = tot / cnt
+                devv = s_ - n_ * mu.reindex(s_.index.droplevel(-1)).to_numpy()
+                tt = mu / (np.sqrt((devv ** 2).groupby(level=lv).sum()) / cnt)
+                ok_ = (cnt >= MIN_N // 2) & np.isfinite(tt) & (n_.groupby(level=lv).size() >= 15)
+                if ok_.any():
+                    k_ = tt[ok_].idxmax()
+                    if best is None or tt[k_] > best[2]:
+                        best = (sub, k_ if isinstance(k_, tuple) else (k_,), float(tt[k_]))
+            if best is None:
+                continue
+            sub, kt, tp = best
+            mm = np.ones(len(gj), bool)
+            for f, v in zip(sub, kt):
+                mm &= gj[f + "_"].to_numpy() == v
+            r = stats(gj[mm])
+            if r is None:
+                continue
+            ok = r["dc"] >= 0.04 and r["t"] >= 2.5
+            md.append(f"- **{lab_}**, picked on {'months 1-6' if pick == 0 else 'months 7-12'}: {words(sub, kt)} (t {tp:.1f}) -> other half: "
+                      f"**{r['n']} diamonds, {100 * r['win']:.0f}% win, {r[f'p{DM_MAIN}']:+.3f} $/diamond** ({r['dc']:+.3f} vs random, t {r['t']:.1f}) {'✅' if ok else ''}")
+    if len(SYMBOLS) >= 2:
+        for tf in tfs:
+            for sa_, sb_ in ((SYMBOLS[0], SYMBOLS[1]), (SYMBOLS[1], SYMBOLS[0])):
+                ca, cb = f"{sa_} {tf}m", f"{sb_} {tf}m"
+                Ra = R[(R["ch"] == ca) & R["both"] & (R["size"] >= 2)].sort_values("t", ascending=False)
+                if not len(Ra):
+                    continue
+                z = Ra.iloc[0]
+                gj = yr[yr["ch"] == cb]
+                mm = np.ones(len(gj), bool)
+                for f, v in zip(z["sub"], z["key"]):
+                    mm &= gj[f + "_"].to_numpy() == v
+                r = stats(gj[mm])
+                if r is None:
+                    continue
+                ok = r["dc"] >= 0.04 and r["t"] >= 2.5
+                md.append(f"- picked on **{ca}** ({z['readings']}, t {z['t']:.1f}) -> on **{cb}**: **{r['n']} diamonds, {100 * r['win']:.0f}% win, "
+                          f"{r[f'p{DM_MAIN}']:+.3f} $/diamond** ({r['dc']:+.3f} vs random, t {r['t']:.1f}) {'✅' if ok else ''}")
+    md += ["", "**Luck check:** thousands of settings and readings are scored, so some look great by chance. The BLIND TESTS are what count."]
+    R.drop(columns=["sub", "key"]).to_csv(f"{OUT}/dial_readings.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    E.drop(columns=["date"]).to_csv(f"{OUT}/dial_every_diamond.csv.gz", index=False, compression="gzip", float_format="%.3f")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/dial_{stamp}.md", f"{OUT}/dial_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as f:
+            f.write(text + "\n")
 
 if __name__ == "__main__":
     main()
