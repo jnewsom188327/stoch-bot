@@ -1,6 +1,7 @@
 """
-THE DEFAULT RUN (MODE=orb+vspike) = the OPENING RANGE payoff test, then DROPS & POPS (volume-spike candles, 1m / 3m / 5m, last 12
-  months + the year before) - two summaries in one run. DATA ONLY.
+THE DEFAULT RUN (MODE=all3) = 3 tests, 3 summaries: OPENING RANGE payoff test, DROPS & POPS (volume-spike candles), and
+  DOTS + TREND LINE CONFLUENCE (your dots / diamonds with the trend line, 1m-60m). DATA ONLY.
+MODE=orb+vspike = the first two only.
 DROPS & POPS (MODE=vspike) - volume-spike candles: do they continue or reverse?
 OPENING RANGE - PAYOFF EDGE, SPY / QQQ / IWM (MODE=orb) - first 5/15/30-minute direction, range breakouts and 10:30
   momentum, small fixed stop, ride to the close / R targets, relative-volume filters, vs coin-flip direction. DATA ONLY.
@@ -132,7 +133,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "orb+vspike").strip().lower() or "orb+vspike"
+MODE = os.getenv("MODE", "all3").strip().lower() or "all3"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -432,6 +433,10 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "all3":
+        return orb_vspike_conf_main()
+    if MODE == "conf":
+        return conf_main()
     if MODE == "orb+vspike":
         return orb_and_vspike_main()
     if MODE == "vspike":
@@ -7676,7 +7681,9 @@ def agr_events(S, name, sd):
     raise ValueError(name)
 
 
-def agree_main():
+def agree_main(events=None, evfn=None, tag="agree", title="AGREE DOTS DEEP DIVE"):
+    events = AGR_EVENTS if events is None else events
+    evfn = agr_events if evfn is None else evfn
     end = datetime.now(timezone.utc) - timedelta(days=1)
     yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
     mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
@@ -7708,6 +7715,8 @@ def agree_main():
             base_ok[:-1] &= dcode[1:] == dcode[:-1]
             atrp = a / c
             S = agr_series(df, ind)
+            S["tl"], _ef = tlt_colors(df, ind)                       # trend line: 2 green, 1 blue, -2 red, -1 pink, 0 gray
+            S["ang"] = np.nan_to_num(ang_series(df, ind))
             nt = {k: angs_next_true(v) for k, v in (("agU", S["agU"]), ("agD", S["agD"]), ("nU", ~S["agU"]), ("nD", ~S["agD"]))}
 
             def outcomes(idx, sd):
@@ -7747,11 +7756,11 @@ def agree_main():
                     BC[(sdv, hh)] = np.nanmean(O["clean"][mm])
             # volatility terciles (ATR as % of price) on this chart
             q1, q2 = np.nanquantile(atrp[base_ok], [1 / 3, 2 / 3])
-            for name, _ in AGR_EVENTS:
+            for name, _ in events:
                 for sdv in (1, -1):
-                    ev = agr_events(S, name, sdv) & base_ok
+                    ev = evfn(S, name, sdv) & base_ok
                     idx = np.nonzero(ev)[0]
-                    if name == "EVERY DOT" and len(idx):
+                    if name.startswith("EVERY DOT") and len(idx):
                         idx = np.sort(rng.choice(idx, size=max(1, len(idx) // 4), replace=False))
                     if not len(idx):
                         continue
@@ -7818,7 +7827,7 @@ def agree_main():
     passes = []
     for (ev, tf), g in E.groupby(["ev", "tf"], observed=True):
         for hcol in ("x3", "x5", "x10", "x20", "xo", "xd"):
-            if ev == "EVERY DOT":
+            if ev.startswith("EVERY DOT"):
                 continue
             ok, t_ = held(g, hcol)
             if ok:
@@ -7832,7 +7841,7 @@ def agree_main():
                     passes.append((ev, tf, hcol, t_, g[hcol].mean(), len(g)))
     passes.sort(key=lambda x: -x[3])
 
-    md = [f"# AGREE DOTS DEEP DIVE - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+    md = [f"# {title} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
           f"Data {yr_start:%Y-%m-%d} to {end:%Y-%m-%d} only, {', '.join(SYMBOLS)}, charts {', '.join(f'{t}m' for t in tfs)} (extended hours, like your chart). "
           f"Signals 9:35-15:30, entry at the NEXT candle's open, out by 15:55. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. "
           f"Signals studied: {len(E):,}.",
@@ -7855,7 +7864,7 @@ def agree_main():
             md.append(f"  - **{ev}** on the {tf}m, {HNAME[hc]}: {v:+.3f} ATR vs random (t {t_:.1f}), {nn} signals")
     else:
         md.append("- **HELD UP: none.**")
-    for ev, _ in AGR_EVENTS:
+    for ev, _ in events:
         g = GR[GR["ev"] == ev]
         if len(g):
             md.append(f"- **{ev}**: average over all charts {g['x5'].mean():+.3f} ATR vs random at 5 candles, {g['x10'].mean():+.3f} at 10, "
@@ -7864,7 +7873,7 @@ def agree_main():
            "| Event | Chart | Signals | Per sym/day | " + " / ".join(f"{k}" for k in AGR_K) + " candles vs random | t at 5 / 10 / 20 | Ride to opposite dot (t, avg candles) | "
            "Ride while dots last (t, avg candles) | H1 / H2 (10 c) | " + " / ".join(SYMBOLS) + " (10 c) | Longs / Shorts (10 c) | Clean (pts) | Heat / best 10 | $/sh at 10 | Green at 10 |",
            "|" + "---|" * 16]
-    for ev, _ in AGR_EVENTS:
+    for ev, _ in events:
         for tf in tfs:
             z = GR[(GR["ev"] == ev) & (GR["tf"] == tf)]
             if not len(z):
@@ -7877,18 +7886,21 @@ def agree_main():
     md.append("")
 
     # ---------- what does the agreement add? ----------
-    md += ["## Does the agreement add anything? DOT START vs TTM ONLY vs VIX ONLY (ATR vs random at 10 candles, t)",
-           "| Chart | DOT START (both agree) | TTM ONLY | VIX ONLY |", "|---|---|---|---|"]
+    cmp_ev = [e_ for e_ in ("DOT START", "TTM ONLY", "VIX ONLY") if e_ in [a_ for a_, _ in events]]
+    if tag != "agree":
+        cmp_ev = [e_ for e_ in ("TL GREEN START", "DOT START + TL GREEN", "DOT START AGAINST TL") if e_ in [a_ for a_, _ in events]]
+    md += ["## Does it add anything? " + " vs ".join(cmp_ev) + " (ATR vs random at 10 candles, t)",
+           "| Chart | " + " | ".join(cmp_ev) + " |", "|---|" + "---|" * len(cmp_ev)]
     for tf in tfs:
         cells = []
-        for ev in ("DOT START", "TTM ONLY", "VIX ONLY"):
+        for ev in cmp_ev:
             z = GR[(GR["ev"] == ev) & (GR["tf"] == tf)]
             cells.append(f"{z['x10'].iloc[0]:+.3f} ({z['t_x10'].iloc[0]:.1f}) n{z['n'].iloc[0]}" if len(z) else "-")
         md.append(f"| {tf}m | " + " | ".join(cells) + " |")
     md.append("")
 
     # ---------- deep dive on the strongest events ----------
-    cand = GR[GR["ev"] != "EVERY DOT"].copy()
+    cand = GR[~GR["ev"].astype(str).str.startswith("EVERY DOT")].copy()
     cand["best_t"] = cand[["t_x5", "t_x10", "t_x20", "t_xo"]].max(axis=1)
     top = cand.sort_values("best_t", ascending=False).head(4)
     for z in top.itertuples():
@@ -7917,11 +7929,11 @@ def agree_main():
     # ---------- hold curve ----------
     md += ["## Best hold length - ATR vs random by hold, averaged over all charts (where does each event's edge peak?)",
            "| Event | " + " | ".join(f"{k} c" for k in AGR_K) + " | ride to opposite | ride while dots |", "|---|" + "---|" * (KK + 2)]
-    for ev, _ in AGR_EVENTS:
+    for ev, _ in events:
         g = GR[GR["ev"] == ev]
         if len(g):
             md.append(f"| {ev} | " + " | ".join(f"{g[f'x{k}'].mean():+.3f}" for k in AGR_K) + f" | {g['xo'].mean():+.3f} | {g['xd'].mean():+.3f} |")
-    md += ["", "## Event definitions"] + [f"- **{a_}**: {b_} (shorts = the mirror)" for a_, b_ in AGR_EVENTS]
+    md += ["", "## Event definitions"] + [f"- **{a_}**: {b_} (shorts = the mirror)" for a_, b_ in events]
     md += ["", "**Luck check:** this exact test was run 4 times on random prices that move together like SPY / QQQ / IWM (520 t values "
            "each): the luckiest positive t was 2.2-3.0, the most negative -2.3 to -4.3, and nothing passed HELD UP. So a lone t of 3-4 "
            f"can be luck; HELD UP needs t {T_PASS:g}+ AND both halves AND every symbol AND positive neighbors. "
@@ -7929,7 +7941,7 @@ def agree_main():
     text = "\n".join(md + [""])
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
-    for path in (f"{OUT}/agree_{stamp}.md", f"{OUT}/agree_latest.md"):
+    for path in (f"{OUT}/{tag}_{stamp}.md", f"{OUT}/{tag}_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
@@ -8912,6 +8924,66 @@ def orb_and_vspike_main():
     """the default run: the opening-range payoff test, then the drops & pops test (two summaries, one run)"""
     orb_main()
     vspike_main()
+
+
+# ================================================================ DOTS + TREND LINE CONFLUENCE (MODE=conf) - LAST 12 MONTHS, EVERY CHART
+# Same engine as the AGREE DOTS deep dive, with your trend line (EMA 13 colored by 13/34 + VWAP: GREEN / blue / RED / pink / gray)
+# and its angle added. Longs need GREEN (or green/blue) for 'with the trend line'; shorts are the exact mirror on RED.
+CONF_EVENTS = [
+    ("TL GREEN START", "the trend line turns GREEN -> LONG (the trend line alone - the baseline)"),
+    ("DOT START + TL GREEN", "first green dot while the trend line is GREEN -> LONG (full confluence)"),
+    ("DOT START + TL UP", "first green dot while the trend line is green or blue -> LONG"),
+    ("DOT START AGAINST TL", "first green dot while the trend line is RED / pink -> LONG (against the line)"),
+    ("DOT START + TL GREEN + 23 DEG", "first green dot, trend line GREEN and its angle 23+ degrees -> LONG"),
+    ("EVERY DOT + TL GREEN", "every candle with a green dot AND a green trend line -> LONG - 1 in 4 sampled"),
+    ("TL GREEN + DOT IN 3", "the trend line turns GREEN with a green dot on that candle or the 2 before -> LONG"),
+    ("DIAMOND + TL GREEN", "green diamond while the trend line is GREEN -> LONG (a pullback low inside an uptrend)"),
+    ("DIAMOND AGAINST TL", "green diamond while the trend line is RED / pink -> LONG (calling the bottom against the line)"),
+    ("DIAMOND + DOT + TL GREEN", "first green dot within 5 candles after a green diamond, trend line GREEN -> LONG"),
+    ("ORANGE -> GREEN + TL GREEN", "first green dot within 10 candles after fear was maxed, trend line GREEN -> LONG"),
+]
+
+
+def conf_events(S, name, sd):
+    tl = S["tl"] * sd                       # 2 = green for longs (red for shorts), 1 = fading, negative = against
+    ang = S["ang"] * sd
+    green = tl == 2
+    if name == "TL GREEN START":
+        return green & ~np.r_[False, green[:-1]]
+    if name == "DOT START + TL GREEN":
+        return agr_events(S, "DOT START", sd) & green
+    if name == "DOT START + TL UP":
+        return agr_events(S, "DOT START", sd) & (tl >= 1)
+    if name == "DOT START AGAINST TL":
+        return agr_events(S, "DOT START", sd) & (tl <= -1)
+    if name == "DOT START + TL GREEN + 23 DEG":
+        return agr_events(S, "DOT START", sd) & green & (ang >= 23)
+    if name == "EVERY DOT + TL GREEN":
+        return agr_events(S, "EVERY DOT", sd) & green
+    if name == "TL GREEN + DOT IN 3":
+        dot = agr_events(S, "EVERY DOT", sd)
+        rec = pd.Series(dot.astype(float)).rolling(3, min_periods=1).max().to_numpy() > 0
+        return green & ~np.r_[False, green[:-1]] & rec
+    if name == "DIAMOND + TL GREEN":
+        return agr_events(S, "DIAMOND", sd) & green
+    if name == "DIAMOND AGAINST TL":
+        return agr_events(S, "DIAMOND", sd) & (tl <= -1)
+    if name == "DIAMOND + DOT + TL GREEN":
+        return agr_events(S, "DIAMOND + DOT", sd) & green
+    if name == "ORANGE -> GREEN + TL GREEN":
+        return agr_events(S, "ORANGE -> GREEN", sd) & green
+    raise ValueError(name)
+
+
+def conf_main():
+    return agree_main(events=CONF_EVENTS, evfn=conf_events, tag="conf", title="DOTS + TREND LINE CONFLUENCE")
+
+
+def orb_vspike_conf_main():
+    """the default run: opening-range payoff test, drops & pops, then dots + trend line confluence (three summaries, one run)"""
+    orb_main()
+    vspike_main()
+    conf_main()
 
 
 if __name__ == "__main__":
