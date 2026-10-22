@@ -9591,6 +9591,11 @@ FIRE_BAR = (0, 1)                       # fire candle must close the right way
 FIRE_WAIT = (0, 2, 3, 5, 8, 12)         # candles to wait for the fire rule after the pivot
 FIRE_COOL = (0, 5, 10, 20)              # candles before another fire the same way (checked on the top settings)
 FIRE_YOURS = dict(hi=85, lo=20, pl=2, pr=1, ma=10, need="flow", conf=1, trend="block", bar=1, wait=5)
+# the SPY 2m winners (run 10/22) - checked on every chart of whatever ticker you type (QQQ = a fresh, independent test)
+FIRE_CHECKS = {"SPY-2m A: 80/20, 3+1, flow holds 2, avg 10, wait 2, block, candle OFF":
+               dict(hi=80, lo=20, pl=3, pr=1, ma=10, need="flow", conf=2, trend="block", bar=0, wait=2),
+               "SPY-2m B: 90/20, 3+1, flow holds 2, avg 10, wait 2, block, candle OFF":
+               dict(hi=90, lo=20, pl=3, pr=1, ma=10, need="flow", conf=2, trend="block", bar=0, wait=2)}
 FIRE_NEED_TV = {"pivot": "fire AT the pivot (no flow wait)", "flow": "flow line agrees", "glow": "glowing line (flow + TTM)"}
 FIRE_TREND_TV = {"off": "Off", "block": "Block against a solid trend line", "with": "Only with the trend line"}
 
@@ -9690,7 +9695,7 @@ def fire_main():
     sym = SYMBOLS[0]
     print(f"\n=== {sym} (FIRE test uses the first ticker only) ===", flush=True)
     df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
-    allR, yours, speed, ex = [], {}, {}, {}
+    allR, yours, speed, ex, checks = [], {}, {}, {}, {}
     for tf in tfs:
         df = to_tf(df1, rth_only=True, mins=tf)                     # regular hours, like your chart
         ind = indicators(df, 13, 34, True)
@@ -9782,6 +9787,9 @@ def fire_main():
                                 st_ = dict(tf=tf, hi=hi, lo=lo, pl=pl, pr=pr, wait=w, **rp)
                                 if r["n"] >= MIN_N:
                                     allR.append({**st_, **r})
+                                for cn_, cv_ in FIRE_CHECKS.items():
+                                    if all(st_[k_] == v_ for k_, v_ in cv_.items()):
+                                        checks[(cn_, tf)] = {**st_, **r}
                                 if all(st_[k_] == v_ for k_, v_ in FIRE_YOURS.items()):
                                     yours[tf] = {**st_, **r}
                                     if len(setL) and len(fL):
@@ -9913,6 +9921,12 @@ def fire_main():
         if tf in yours:
             z = pd.Series(yours[tf])
             md.append(row(z).replace(f"| {tf}m |", f"| {tf}m (lag peak->fire ~{speed.get(tf, np.nan):.0f} candles) |", 1))
+    md += ["", "## The SPY 2m winners checked here (on SPY = the same data; on QQQ = a fresh test)", HEAD, "|" + "---|" * 11]
+    for cn_ in FIRE_CHECKS:
+        for tf in tfs:
+            if (cn_, tf) in checks:
+                z = pd.Series(checks[(cn_, tf)])
+                md.append(row(z).replace(f"| {tf}m |", f"| {tf}m - {cn_.split(':')[0]} |", 1))
     md += ["", "## Top 40 settings (ranked by the weaker t of RUN and 2:1 odds)", HEAD[:-1] + " Next settings run | |", "|" + "---|" * 13]
     for z in cand.head(40).itertuples():
         md.append(row(z, f" {z.nb_mean:+.2f} ({100 * z.nb_pos:.0f}% better) | {'✅' if z.held else ''} |"))
