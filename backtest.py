@@ -1,5 +1,8 @@
 """
-THE DEFAULT RUN (MODE=exhaust) = EXHAUSTION -> THE CLEANEST $1 MOVES: every candle within 10 candles of a fear / greed peak of 85+,
+THE DEFAULT RUN (MODE=second) = THE SECOND MOVE: every good little run ($0.75+ in 30 min, greed / fear 70+), every candle after
+  the run high as an entry the other way - Vix Fix numbers, line colors, TTM colors, diamonds, glow, trend line, real VIX - scored
+  with options-sized targets, every 1-3 combination, the first-time triggers, blind checks. SPY + QQQ, 1/2/3/5m. DATA ONLY.
+MODE=exhaust = EXHAUSTION -> THE CLEANEST $1 MOVES: every candle within 10 candles of a fear / greed peak of 85+,
   reversal + continuation, scored CLEAN = +$1 in 25 min before -$0.50 (and TREND = still +$1 after 60 min), every reading as a real
   number incl. REAL VIX (VIXY), winners vs fizzles, every 1-3 reading combination, blind checks. SPY + QQQ, 1/2/3/5m. DATA ONLY.
 MODE=pivots = THE BIGGEST MOVES - what every indicator reads at the pivot candles of the big moves (3+ ATR before a
@@ -148,7 +151,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "exhaust").strip().lower() or "exhaust"
+MODE = os.getenv("MODE", "second").strip().lower() or "second"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -448,6 +451,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "second":
+        return sm_main()
     if MODE == "exhaust":
         return ex_main()
     if MODE == "pivots":
@@ -11199,6 +11204,534 @@ def ex_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/exhaust_{stamp}.md", f"{OUT}/exhaust_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ SECOND MOVE: TIME THE ENTRY THAT INVERSES A GOOD LITTLE RUN (MODE=second)
+# A GOOD LITTLE RUN = price ran $0.75+ (low -> high) inside 30 minutes while greed (up run) / fear (down run) peaked 70+.
+# Every candle after the run high (high set within the last 15 minutes and not beaten since) is a possible entry the OTHER way
+# (up run -> SHORT, down run -> LONG), entry = next 1-minute open. What does the chart show at the candles that pay?
+# Scored like options: small $ targets and stops on the 1-minute path (30 min max, same minute = stop), + $/trade.
+SM_TFS_DEF = "1,2,3,5"
+SM_RUN_MIN = 30
+SM_HI_MIN = 15
+SM_MIN_RUN = 0.75
+SM_PK = 70.0
+SM_HOLD = 30
+SM_EXITS = [("+$0.30 / -$0.30", 0.30, 0.30), ("+$0.50 / -$0.30", 0.50, 0.30), ("+$0.50 / -$0.50", 0.50, 0.50),
+            ("+$0.75 / -$0.40", 0.75, 0.40), ("+$1.00 / -$0.50", 1.00, 0.50), ("+$0.50 / stop above the run high", 0.50, None),
+            ("+$1.00 / stop above the run high", 1.00, None)]
+SM_MAIN = 2
+SM_F = ["SIZE", "RMIN", "AGE", "PB", "SPK", "SNOW", "SDROP", "ONOW", "OCH", "SCOL", "OCOL", "TCOL", "TCN", "TLC", "PXL", "GLOW", "FLOW",
+        "VDM", "TDM", "VWAP", "VIXD", "VIXR"]
+_RUNC = ["calm (gray)", "DROPPING FAST (yellow)", "FADING (purple greed / orange fear)", "BUILDING (light blue greed / salmon fear)",
+         "SURGING (blue greed / red fear)", "MAXED (bright blue greed / hot pink fear)", "BOTTOMED (brown)", "WAKING UP (lime)"]
+SM_NAMES = {
+    "SIZE": ("Run size", ["$0.75-1.25", "$1.25-2", "$2-3", "$3+"]),
+    "RMIN": ("Run took (minutes, low to high)", ["5 or less", "6-10", "11-20", "21-30"]),
+    "AGE": ("Candles since the run high", ["0 (the high candle)", "1", "2", "3-5", "6+"]),
+    "PB": ("Pulled back from the high (% of the run)", ["0-15%", "15-35%", "35-60%", "60%+"]),
+    "SPK": ("Stretched side's peak in the run (greed for shorts / fear for longs)", ["70-85", "85-95", "95-99", "MAXED 100"]),
+    "SNOW": ("Stretched side now", ["0-35", "35-60", "60-85", "85+"]),
+    "SDROP": ("Stretched side: points dropped in the last 2 candles", ["rising / under 5", "5-15", "15-30", "30+"]),
+    "ONOW": ("Other side now (fear for shorts / greed for longs)", ["0-10", "10-20", "20-35", "35+"]),
+    "OCH": ("Other side: change in the last 2 candles", ["flat / falling", "up 5-15", "up 15-30", "up 30+"]),
+    "SCOL": ("Stretched side LINE COLOR", _RUNC),
+    "OCOL": ("Other side LINE COLOR", _RUNC),
+    "TCOL": ("TTM COLOR", ["RUN STILL PUSHING (cyan for shorts / red for longs)", "RUN FADING (blue for shorts / yellow for longs)",
+                           "FLIPPED YOUR WAY (red for shorts / cyan for longs)", "FLIPPED, BOUNCING (yellow for shorts / blue for longs)"]),
+    "TCN": ("TTM: candles in that color", ["1st candle", "2nd", "3-5", "6+"]),
+    "TLC": ("TREND LINE COLOR", ["RUN SIDE STRONG (green for shorts / red for longs)", "RUN SIDE FADING (blue for shorts / pink for longs)",
+                                 "GRAY", "YOUR SIDE FADING (pink for shorts / blue for longs)", "YOUR SIDE STRONG (red for shorts / green for longs)"]),
+    "PXL": ("Price vs trend line (ATR)", ["through it to YOUR side", "at the line", "0.25-1 ATR on the run side", "1+ ATR on the run side"]),
+    "GLOW": ("Lines GLOW (Vix flow + TTM agree)", ["glow YOUR way", "no glow", "glow the RUN way"]),
+    "FLOW": ("Vix flow (greed + fear averages)", ["YOUR way", "none", "the RUN way"]),
+    "VDM": ("VIX FIX pane DIAMOND (your way, last 3 candles)", ["no", "YES"]),
+    "TDM": ("TTM pane DIAMOND (your way, last 3 candles)", ["no", "YES"]),
+    "VWAP": ("Price vs VWAP (ATR, + = run side)", ["your side", "-1 to +1", "+1 to +3", "+3 or more"]),
+    "VIXD": ("REAL VIX today (VIXY vs yesterday)", ["down", "up 0-3%", "up 3%+"]),
+    "VIXR": ("REAL VIX vs its 20-day average", ["LOW (5%+ under)", "normal", "HIGH (5%+ over)"]),
+}
+SM_TRIG = {
+    "AT_HIGH": "On the run-high candle itself",
+    "AGE1": "The first candle after the run high",
+    "S_YEL": "Stretched line turns YELLOW (dropping fast)",
+    "S_FADE": "Stretched line turns PURPLE (greed) / ORANGE (fear) = fading",
+    "S_U60": "Stretched side falls under 60",
+    "O_WAKE": "Other line WAKES UP (lime) or starts BUILDING",
+    "O_UP15": "Other side jumps 15+ in 2 candles",
+    "T_FADE": "TTM turns BLUE (shorts) / YELLOW (longs) = run fading",
+    "T_FLIP": "TTM flips your way (RED for shorts / CYAN for longs)",
+    "VDIA": "VIX FIX pane diamond your way",
+    "TDIA": "TTM pane diamond your way",
+    "GLOW": "Lines start glowing your way",
+    "XLINE": "Candle closes through the trend line to your side",
+    "PB35": "Price pulled back 35%+ of the run",
+    "BREAK": "Candle closes past the prior candle's low (shorts) / high (longs)",
+    "S_YEL_T": "Stretched line YELLOW + TTM fading or flipped",
+    "S_FADE_T": "Stretched line PURPLE/ORANGE + TTM fading or flipped",
+    "DIA_ANY": "Either diamond + TTM fading or flipped",
+}
+
+
+def sm_outcomes(o1, h1, l1, c1, last1, e, sd, sdist):
+    """1-minute path from entry e (open), side sd: P&L ($ of the stock) for every exit pair; sdist = structural stop distance"""
+    n = len(e)
+    offs = np.arange(SM_HOLD)
+    P = np.full((n, len(SM_EXITS)), np.nan, dtype=np.float32)
+    for s0 in range(0, n, 20000):
+        ee = e[s0:s0 + 20000]
+        J = ee[:, None] + offs[None, :]
+        valid = J <= last1[ee][:, None]
+        J = np.minimum(J, last1[ee][:, None])
+        en = o1[ee][:, None]
+        fav = np.where(sd > 0, h1[J] - en, en - l1[J])
+        adv = np.where(sd > 0, en - l1[J], h1[J] - en)
+        fav = np.where(valid, fav, -np.inf)
+        adv = np.where(valid, adv, -np.inf)
+        kl = np.maximum(valid.sum(1) - 1, 0)
+        cl = c1[J[np.arange(len(ee)), kl]]
+        to = np.where(sd > 0, cl - en[:, 0], en[:, 0] - cl)
+        sdc = sdist[s0:s0 + 20000]
+        for k, (_, T, S) in enumerate(SM_EXITS):
+            Sv = np.full(len(ee), S, dtype=np.float64) if S is not None else np.maximum(sdc, 0.05)
+            hT = fav >= T
+            hS = adv >= Sv[:, None]
+            fT = np.where(hT.any(1), hT.argmax(1), 10 ** 6)
+            fS = np.where(hS.any(1), hS.argmax(1), 10 ** 6)
+            P[s0:s0 + 20000, k] = np.where(fT < fS, T, np.where(fS < 10 ** 6, -Sv, to))
+    return P
+
+
+def sm_frun(n, spk):
+    n = np.nan_to_num(n)
+    n1, n2 = np.r_[0.0, n[:-1]], np.r_[0.0, 0.0, n[:-2]]
+    d1 = n - n1
+    low5 = pd.Series(n).rolling(5, min_periods=1).min().shift(1).fillna(100).to_numpy()
+    return np.select([n >= 95, (n2 >= 60) & (n <= n2 - 25), (d1 > 0) & (spk | (n >= 70)), (d1 > 0) & (n >= 35), (n >= 50) & (d1 <= 0),
+                      n <= 10, (d1 > 0) & (low5 <= 10)], [5, 1, 4, 3, 2, 6, 7], 0)
+
+
+def sm_main():
+    from itertools import combinations
+    from numpy.lib.stride_tricks import sliding_window_view as swv
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mo_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=31), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    midord = mid.date().toordinal()
+    fetch_from = (yr_start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("SM_TFS", SM_TFS_DEF).split(",")]
+    MIN_N = int(os.getenv("SM_MIN_N", "80"))
+    MIN_D = int(os.getenv("SM_MIN_D", "30"))
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    vx1, _ = fake_1m("VIXY", fetch_from, end) if test else fetch_1m("VIXY", fetch_from, end)
+    vxc = vx1["close"]
+    vday = vxc.groupby(vxc.index.date).last()
+    vday_prev = pd.Series(vday.shift(1).values, index=pd.to_datetime(vday.index))
+    vday_avg20 = pd.Series(vday.rolling(20).mean().shift(1).values, index=pd.to_datetime(vday.index))
+    rows, bases, charts = [], [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df1 = df1[(df1.index.hour * 100 + df1.index.minute >= 400) & (df1.index.hour * 100 + df1.index.minute < 2000)]
+        o1, h1, l1, c1 = (df1[k].to_numpy() for k in ("open", "high", "low", "close"))
+        t1 = df1.index
+        hm1 = (t1.hour * 100 + t1.minute).to_numpy()
+        d1 = pd.factorize(t1.date)[0]
+        last1 = pd.Series(np.where(hm1 < 1559, np.arange(len(t1)), -1)).groupby(d1).transform("max").to_numpy()
+        for tf in tfs:
+            ch = f"{sym} {tf}m"
+            charts.append(ch)
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            half = np.where(ts < mid, 0, 1).astype(np.int8)
+            dord = np.array([d_.toordinal() for d_ in day])
+            e = np.minimum(np.searchsorted(t1.values, (ts + pd.Timedelta(minutes=tf)).values), len(t1) - 1)
+            okw = np.asarray(ts >= yr_start) & (hm >= 930) & (hm < 1530) & np.isfinite(a) & (a > 0)
+            okw &= np.asarray(pd.Index(t1[e].date) == pd.Index(ts.date)) & (hm1[e] < 1530)
+            S_ = agr_series(df, ind)
+            m, st = S_["m"], S_["st"]
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F), np.nan_to_num(G)
+            col, ef = tlt_colors(df, ind)
+            vw = ind["vwap"]
+            sh = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+            # Vix Fix line colors (VIX FIX 6 run states) - spikes like your pane
+            cs = df["close"]
+            hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+            wvf, wvs = (hc22 - df["low"]) / hc22 * 100, (df["high"] - lc22) / lc22 * 100
+            fspk = ((wvf >= wvf.rolling(20).mean() + 2 * wvf.rolling(20).std(ddof=0)) | (wvf >= wvf.rolling(50).max() * 0.85)).to_numpy()
+            gspk = ((wvs >= wvs.rolling(20).mean() + 2 * wvs.rolling(20).std(ddof=0)) | (wvs >= wvs.rolling(50).max() * 0.85)).to_numpy() & ~fspk
+            fRun, gRun = sm_frun(F, fspk), sm_frun(G, gspk)
+            gA = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy()
+            fA = pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+            gA1, fA1, gA2, fA2 = sh(gA, 1), sh(fA, 1), sh(gA, 2), sh(fA, 2)
+            upFlow, dnFlow = (gA > gA1) & (fA < fA1), (gA < gA1) & (fA > fA1)
+            fTurn = (fA1 >= 50) & (fA < fA1) & (fA1 >= fA2)
+            gTurn = (gA1 >= 50) & (gA < gA1) & (gA1 >= gA2)
+            av = pd.Series(m).ewm(span=5, adjust=False).mean().to_numpy()
+            av1, av2 = sh(av, 1), sh(av, 2)
+            ttmUp = (av > av1) & (av1 <= av2) & (av1 <= -1.0)
+            ttmDn = (av < av1) & (av1 >= av2) & (av1 >= 1.0)
+            rec3 = lambda x: pd.Series(np.asarray(x, float)).rolling(3, min_periods=1).max().to_numpy() > 0
+            rise = m > sh(m, 1)
+            vxa = vxc.reindex(ts + pd.Timedelta(minutes=tf) - pd.Timedelta(minutes=1), method="ffill").to_numpy()
+            dts = pd.to_datetime(pd.Index(ts.date))
+            vprev, vavg = vday_prev.reindex(dts).to_numpy(), vday_avg20.reindex(dts).to_numpy()
+            K = max(2, -(-SM_HI_MIN // tf))
+            W = max(3, -(-SM_RUN_MIN // tf))
+            for sd in (-1, 1):                     # -1 = SHORT after an UP run (greed), +1 = LONG after a DOWN run (fear)
+                X = h if sd == -1 else -l           # run extreme in "run direction" units
+                Y = l if sd == -1 else -h
+                Sx, Ox = (G, F) if sd == -1 else (F, G)
+                sRun, oRun = (gRun, fRun) if sd == -1 else (fRun, gRun)
+                wx = swv(np.r_[np.full(K - 1, -np.inf), X], K)
+                age = wx[:, ::-1].argmax(1)                         # candles since the latest run high
+                p = np.arange(n) - age
+                ext = X[p]
+                wy = swv(np.r_[np.full(W, np.inf), Y], W + 1)       # window [p-W, p]
+                lowp = wy.min(1)[p]
+                lowi = wy[:, ::-1].argmin(1)[p]               # candles from the run low to the run high
+                runsz = np.abs(ext - lowp)                           # $ low -> high (both sides positive)
+                spk_run = np.maximum(pd.Series(Sx).rolling(W + 1, min_periods=1).max().to_numpy()[p],
+                                     pd.Series(Sx).rolling(K, min_periods=1).max().to_numpy())
+                cand = okw & (runsz >= SM_MIN_RUN) & (spk_run >= SM_PK) & (p >= W)
+                idx = np.nonzero(cand)[0]
+                if len(idx) == 0:
+                    continue
+                hiP = h[p] if sd == -1 else l[p]                    # the run high (shorts) / low (longs) price
+                en = o1[e[idx]]
+                sdist = (hiP[idx] + 0.05 - en) if sd == -1 else (en - (hiP[idx] - 0.05))
+                P = sm_outcomes(o1, h1, l1, c1, last1, e[idx], sd, sdist)
+                runc = -sd                                          # +1 = the run's direction
+                mm = m * runc
+                rise_r = mm > sh(mm, 1)
+                tcol = np.where(mm >= 0, np.where(rise_r, 0, 1), np.where(rise_r, 3, 2))
+                tchg = tcol != np.r_[-1, tcol[:-1]]
+                cid = np.cumsum(tchg)
+                tcn = pd.Series(np.ones(n)).groupby(cid).cumsum().to_numpy()
+                ocol = col * runc                                   # 2 = run side strong ... -2 = your side strong
+                pxl = np.where(a > 0, (c - ef) / a, 0) * runc
+                glow_y = (upFlow & (st == 1)) if sd == 1 else (dnFlow & (st == -1))
+                glow_r = (dnFlow & (st == -1)) if sd == 1 else (upFlow & (st == 1))
+                flow_y = upFlow if sd == 1 else dnFlow
+                flow_r = dnFlow if sd == 1 else upFlow
+                vdm = rec3(fTurn if sd == 1 else gTurn)
+                tdm = rec3(ttmUp if sd == 1 else ttmDn)
+                pb = np.where(runsz > 0, np.abs(ext - (c if sd == -1 else -c)) / runsz, 0) * 100
+                sdrop = sh(Sx, 2) - Sx
+                och = Ox - sh(Ox, 2)
+                vwp = np.where(a > 0, (c - vw) / a, 0) * runc
+                vxd = (vxa / vprev - 1) * 100
+                vxr = (vxa / vavg - 1) * 100
+                brk = (c < sh(l, 1)) if sd == -1 else (c > sh(h, 1))
+                D = pd.DataFrame({
+                    "SIZE_": np.digitize(runsz[idx], [1.25, 2, 3]), "RMIN_": np.digitize(lowi[idx] * tf, [5.5, 10.5, 20.5]),
+                    "AGE_": np.digitize(age[idx], [1, 2, 3, 6]), "PB_": np.digitize(pb[idx], [15, 35, 60]),
+                    "SPK_": np.digitize(spk_run[idx], [85, 95, 99.5]), "SNOW_": np.digitize(Sx[idx], [35, 60, 85]),
+                    "SDROP_": np.digitize(np.nan_to_num(sdrop[idx]), [5, 15, 30]), "ONOW_": np.digitize(Ox[idx], [10, 20, 35]),
+                    "OCH_": np.digitize(np.nan_to_num(och[idx]), [5, 15, 30]), "SCOL_": sRun[idx], "OCOL_": oRun[idx],
+                    "TCOL_": tcol[idx], "TCN_": np.digitize(tcn[idx], [2, 3, 6]), "TLC_": 2 - ocol[idx],
+                    "PXL_": np.digitize(pxl[idx], [-0.25, 0.25, 1]), "GLOW_": np.where(glow_y, 0, np.where(glow_r, 2, 1))[idx],
+                    "FLOW_": np.where(flow_y, 0, np.where(flow_r, 2, 1))[idx], "VDM_": vdm[idx].astype(int), "TDM_": tdm[idx].astype(int),
+                    "VWAP_": np.digitize(vwp[idx], [-1, 1, 3]), "VIXD_": np.digitize(np.nan_to_num(vxd[idx]), [0, 3]),
+                    "VIXR_": np.digitize(np.nan_to_num(vxr[idx]), [-5, 5])})
+                for f_ in SM_F:
+                    D[f_ + "_"] = D[f_ + "_"].astype(np.int8)
+                for k in range(len(SM_EXITS)):
+                    D[f"p{k}"] = P[:, k]
+                D["stop_hi"] = np.maximum(sdist, 0.05)
+                # simple chart triggers (each one: the FIRST candle it happens after the run high = the trade)
+                prev = lambda x: np.r_[False, np.asarray(x, bool)[:-1]]
+                tfade = (tcol == 1) | (tcol == 2)
+                trig = {"AT_HIGH": age == 0, "AGE1": age == 1, "S_YEL": (sRun == 1), "S_FADE": (sRun == 2),
+                        "S_U60": (Sx < 60) & (sh(Sx, 1) >= 60), "O_WAKE": (oRun == 7) | (oRun == 3) | (oRun == 4),
+                        "O_UP15": np.nan_to_num(och) >= 15, "T_FADE": (tcol == 1) & tchg, "T_FLIP": (tcol == 2) & tchg,
+                        "VDIA": (fTurn if sd == 1 else gTurn), "TDIA": (ttmUp if sd == 1 else ttmDn), "GLOW": glow_y & ~prev(glow_y),
+                        "XLINE": (pxl < 0) & (sh(pxl, 1) >= 0), "PB35": pb >= 35, "BREAK": brk & (age >= 1),
+                        "S_YEL_T": (sRun == 1) & tfade, "S_FADE_T": (sRun == 2) & tfade,
+                        "DIA_ANY": ((fTurn if sd == 1 else gTurn) | (ttmUp if sd == 1 else ttmDn)) & tfade}
+                for k_, v_ in trig.items():
+                    D["g_" + k_] = np.asarray(v_, bool)[idx]
+                D["ch"], D["side"], D["half"], D["day"], D["t"], D["px"] = ch, sd, half[idx], dord[idx], ts[idx], c[idx]
+                D["run"] = (np.int64(1 if sd == 1 else 0) * 10 ** 9 + p[idx]).astype(np.int64)
+                D["runsz"], D["sx"], D["ox"] = runsz[idx], Sx[idx], Ox[idx]
+                rows.append(D)
+            # baseline: every candle, both sides, fixed exits
+            idx = np.nonzero(okw)[0]
+            for sd in (1, -1):
+                Pb = sm_outcomes(o1, h1, l1, c1, last1, e[idx], sd, np.full(len(idx), 0.5))
+                bases.append(pd.DataFrame(dict(ch=ch, side=sd, half=half[idx], pb=Pb[:, SM_MAIN], win=(Pb[:, SM_MAIN] > 0).astype(float))))
+            print(f"  {ch} done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["run"] = E["ch"].astype(str) + ":" + E["run"].astype(str)
+    E = E.sort_values(["ch", "run", "t"]).reset_index(drop=True)
+    B = pd.concat(bases, ignore_index=True)
+    bm = B.groupby(["ch", "side", "half"])["pb"].mean().rename("bm")
+    E = E.merge(bm, left_on=["ch", "side", "half"], right_index=True, how="left")
+    E["dc"] = E[f"p{SM_MAIN}"] - E["bm"]
+    E["win"] = (E[f"p{SM_MAIN}"] > 0).astype(float)
+    E["one"] = 1.0
+    BW = B.groupby("ch")["win"].mean()
+    BP = B.groupby("ch")["pb"].mean()
+    pooled_sets = [(f"{'+'.join(SYMBOLS)} {tf}m", [f"{s_} {tf}m" for s_ in SYMBOLS]) for tf in tfs] + [(f"ALL {len(charts)} charts", list(charts))]
+    PL = [x for x, _ in pooled_sets]
+    MEM = {c_: [c_] for c_ in charts}
+    MEM.update(dict(pooled_sets))
+    for lab_, mem_ in pooled_sets:
+        BW[lab_] = B[B["ch"].isin(mem_)]["win"].mean()
+    PK = [f"p{k}" for k in range(len(SM_EXITS))]
+    VALS = ["dc", "win", "one", *PK]
+
+    def lab(f, v):
+        nm = SM_NAMES[f][1]
+        return nm[int(v)] if 0 <= int(v) < len(nm) else str(v)
+
+    def words(sub, key):
+        return " + ".join(f"{SM_NAMES[f][0]}: {lab(f, v)}" for f, v in zip(sub, key))
+
+    def clt(g):
+        """day-clustered mean + t of dc"""
+        if len(g) < 2:
+            return np.nan, np.nan
+        S_ = g.groupby("day")["dc"].sum()
+        C_ = g.groupby("day")["dc"].count()
+        if len(S_) < 10:
+            return np.nan, np.nan
+        mu = S_.sum() / C_.sum()
+        se = np.sqrt(((S_ - C_ * mu) ** 2).sum()) / C_.sum()
+        return mu, (mu / se if se > 0 else 0.0)
+
+    def first_fire(g):
+        """one trade per run: the FIRST candle the condition is true after the run high"""
+        return g.drop_duplicates("run", keep="first")
+
+    def ff_stats(g):
+        g = first_fire(g)
+        if not len(g):
+            return None
+        mu, tt = clt(g)
+        hh = g.groupby(g["day"] >= midord)["dc"].mean()
+        r = dict(n=len(g), days=g["day"].nunique(), win=g["win"].mean(), t=tt, dc=mu, h1=hh.get(False, np.nan), h2=hh.get(True, np.nan),
+                 stop_hi=g["stop_hi"].median())
+        for k in range(len(SM_EXITS)):
+            r[f"p{k}"] = g[f"p{k}"].mean()
+        return r
+
+    # ---- every 1-3 reading combination (every candle after the run high counts; t is clustered by day)
+    def cell_rows(Gd, label, sub, nk):
+        lv = list(range(nk))
+        tot = Gd.groupby(level=lv).sum()
+        nn = tot["one"]
+        mu = tot["dc"] / nn
+        devv = Gd["dc"] - Gd["one"] * mu.reindex(Gd.index.droplevel(-1)).to_numpy()
+        se = np.sqrt((devv ** 2).groupby(level=lv).sum()) / nn
+        tt = mu / se
+        days = Gd.groupby(level=lv).size()
+        hflag = (Gd.index.get_level_values(-1) >= midord).astype(int)
+        th = Gd.groupby([Gd.index.get_level_values(i) for i in lv] + [hflag]).sum()
+        hh = th["dc"] / th["one"]
+        res = []
+        ok_ = (nn >= MIN_N) & (days >= MIN_D)
+        for key in nn[ok_].index:
+            kt = key if isinstance(key, tuple) else (key,)
+            z = tot.loc[key]
+            r = dict(ch=label, sub=sub, key=kt, n=int(z["one"]), days=int(days.loc[key]), win=z["win"] / z["one"], dc=z["dc"] / z["one"],
+                     t=float(tt.loc[key]), h1=hh.get(kt + (0,), np.nan), h2=hh.get(kt + (1,), np.nan))
+            for p_ in PK:
+                r[p_] = z[p_] / z["one"]
+            res.append(r)
+        return res
+    out = []
+    groups = {ch: E[E["ch"] == ch] for ch in charts}
+    subs = [s_ for r_ in (1, 2, 3) for s_ in combinations(SM_F, r_)]
+    for si, sub in enumerate(subs):
+        keys = [f + "_" for f in sub]
+        Gs = {}
+        for ch in charts:
+            Gs[ch] = groups[ch].groupby(keys + ["day"], observed=True)[VALS].sum()
+            out += cell_rows(Gs[ch], ch, sub, len(keys))
+        for lab_, mem_ in pooled_sets:
+            Pp = pd.concat([Gs[c_] for c_ in mem_]).groupby(level=list(range(len(keys) + 1))).sum()
+            out += cell_rows(Pp, lab_, sub, len(keys))
+        if si % 200 == 0:
+            print(f"  combinations {si:,}/{len(subs):,} ({time.time() - t0:.0f}s)", flush=True)
+    R = pd.DataFrame(out)
+    R["both"] = (R["h1"] > 0) & (R["h2"] > 0)
+    R["readings"] = [words(s_, k_) for s_, k_ in zip(R["sub"], R["key"])]
+    R["size"] = R["sub"].apply(len)
+
+    def mask_of(g, sub, key):
+        mm_ = np.ones(len(g), bool)
+        for f, v in zip(sub, key):
+            mm_ &= g[f + "_"].to_numpy() == v
+        return mm_
+    # ---- blind tests (picked on one half / one ticker by t, judged on the other as REAL trades: first candle per run)
+    wf, xs = [], []
+    for ch in charts + PL[:-1]:
+        Et = E[E["ch"].isin(MEM[ch])]
+        for pick, judge in ((0, 1), (1, 0)):
+            Ep, Ej = Et[Et["half"] == pick], Et[Et["half"] == judge]
+            best = None
+            for sub in [s_ for r_ in (2, 3) for s_ in combinations(SM_F, r_)]:
+                keys = [f + "_" for f in sub]
+                G_ = Ep.groupby(keys + ["day"], observed=True)["dc"]
+                s_, n_ = G_.sum(), G_.count()
+                lv = list(range(len(keys)))
+                tot, cnt = s_.groupby(level=lv).sum(), n_.groupby(level=lv).sum()
+                mu = tot / cnt
+                devv = s_ - n_ * mu.reindex(s_.index.droplevel(-1)).to_numpy()
+                tt = mu / (np.sqrt((devv ** 2).groupby(level=lv).sum()) / cnt)
+                ok_ = (cnt >= MIN_N // 2) & np.isfinite(tt) & (n_.groupby(level=lv).size() >= MIN_D // 2)
+                if ok_.any():
+                    k_ = tt[ok_].idxmax()
+                    if best is None or tt[k_] > best[2]:
+                        best = (sub, k_ if isinstance(k_, tuple) else (k_,), float(tt[k_]), float(mu[k_]))
+            if best is None:
+                continue
+            sub, kt, tp, mp = best
+            r = ff_stats(Ej[mask_of(Ej, sub, kt)])
+            wf.append(dict(ch=ch, pick=pick, sub=sub, key=kt, tp=tp, mp=mp, r=r))
+    if len(SYMBOLS) >= 2:
+        for tf in tfs:
+            for sa_, sb_ in ((SYMBOLS[0], SYMBOLS[1]), (SYMBOLS[1], SYMBOLS[0])):
+                ca, cb = f"{sa_} {tf}m", f"{sb_} {tf}m"
+                Ra = R[(R["ch"] == ca) & (R["size"] >= 2) & R["both"]]
+                if not len(Ra):
+                    continue
+                z = Ra.sort_values("t", ascending=False).iloc[0]
+                Eb = E[E["ch"] == cb]
+                xs.append(dict(a=ca, b=cb, sub=z["sub"], key=z["key"], za=z, r=ff_stats(Eb[mask_of(Eb, z["sub"], z["key"])])))
+    # ---- report
+    xl = SM_EXITS[SM_MAIN][0]
+    md = [f"# THE SECOND MOVE - TIMING THE ENTRY THAT INVERSES A GOOD LITTLE RUN - {', '.join(SYMBOLS)} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(charts)} (extended hours feed the indicators, like your chart), entries 9:30-15:30. DATA ONLY. Runtime "
+          f"{(time.time() - t0) / 60:.0f} min. Runs: {E['run'].nunique():,}. Entry candles scored: {len(E):,}. Combinations: {len(R):,}.",
+          f"**GOOD LITTLE RUN** = price ran **${SM_MIN_RUN:.2f}+ inside {SM_RUN_MIN} minutes** with greed (up run) / fear (down run) peaking "
+          f"**{SM_PK:g}+**. The run high was set in the last {SM_HI_MIN} minutes and not beaten since. **Every candle after the high is a "
+          "possible entry the OTHER way** (up run -> SHORT, down run -> LONG), entry = the next 1-minute open.",
+          f"**Scoring (options-sized):** main = **{xl}** on the stock within {SM_HOLD} min (same minute = stop, else out at minute "
+          f"{SM_HOLD}). Rough option math (at-the-money 0DTE, midday): **+$0.50 on SPY ~ +15-20% on the option, +$1 ~ +30-40%**.",
+          "**$/trade** = average result per trade in stock $. **vs random** = the same exits from ANY candle, same side (removes the year's "
+          "drift). **REAL TRADES** = one entry per run: the FIRST candle the condition shows up after the run high.", "",
+          f"## Random entry - the bar to beat ({xl})", "| Chart | Win % (any candle) | $/trade |", "|---|---|---|"]
+    for ch in charts:
+        md.append(f"| {ch} | {100 * BW[ch]:.0f}% | {BP[ch]:+.3f} |")
+    md += ["", "## The answer in 30 seconds - BLIND TESTS (✅ = +$0.04/trade or better over random with t 2.5+ on data it never saw, as REAL TRADES)"]
+    for w_ in wf:
+        r = w_["r"]
+        if r is None:
+            continue
+        ok = (r["dc"] >= 0.04) and (r["t"] >= 2.5)
+        md.append(f"- **{w_['ch']}**, picked on {'months 1-6' if w_['pick'] == 0 else 'months 7-12'}: {words(w_['sub'], w_['key'])} -> "
+                  f"other half: **{r['n']} trades, {100 * r['win']:.0f}% win, {r[f'p{SM_MAIN}']:+.3f} $/trade** ({r['dc']:+.3f} vs random, "
+                  f"t {r['t']:.1f}) {'✅' if ok else ''}")
+    for x_ in xs:
+        r = x_["r"]
+        if r is None:
+            continue
+        ok = (r["dc"] >= 0.04) and (r["t"] >= 2.5)
+        md.append(f"- picked on **{x_['a']}** ({words(x_['sub'], x_['key'])}: {100 * x_['za']['win']:.0f}% win, t {x_['za']['t']:.1f}) -> "
+                  f"on **{x_['b']}**: **{r['n']} trades, {100 * r['win']:.0f}% win, {r[f'p{SM_MAIN}']:+.3f} $/trade** ({r['dc']:+.3f} vs random, "
+                  f"t {r['t']:.1f}) {'✅' if ok else ''}")
+    # ---- the simple chart triggers
+    TH = "| Chart | Trigger | Trades (per day) | Win % | " + " | ".join(x[0] for x in SM_EXITS) + " | vs random t | 1st / 2nd half vs random |"
+    TS = "|" + "---|" * (6 + len(SM_EXITS))
+    md += ["", "## WHEN TO PULL THE TRIGGER - the first time each thing shows up after the run high (one trade per run)",
+           f"Win % = {xl}. The $ columns = average $/trade on the stock for each target / stop.", TH, TS]
+    TR = []
+    for lab_ in PL + charts:
+        Et = E[E["ch"].isin(MEM[lab_])]
+        for k_, nm_ in SM_TRIG.items():
+            r = ff_stats(Et[Et["g_" + k_]])
+            if r is None or r["n"] < 20:
+                continue
+            TR.append(dict(ch=lab_, trig=k_, **r))
+            if lab_ in PL:
+                md.append(f"| {lab_} | {nm_} | {r['n']} ({r['n'] / 250:.1f}) | {100 * r['win']:.0f}% | " +
+                          " | ".join(f"{r[f'p{k}']:+.3f}" for k in range(len(SM_EXITS))) +
+                          f" | {r['t']:.1f} | {r['h1']:+.3f} / {r['h2']:+.3f} |")
+    md += ["", f"Median stop size for the 'stop above the run high' exits: ${E.drop_duplicates('run')['stop_hi'].median():.2f}."]
+    # ---- each reading on its own, all charts together + per timeframe
+    md += ["", "## EACH READING ON ITS OWN (every candle after the run high) - colors, diamonds, numbers",
+           f"Win % = {xl}. ✅ = t 3+ and better than random in both halves."]
+    for lab_ in [PL[-1]] + PL[:-1]:
+        md += ["", f"### {lab_}", "| Reading | Value | Entries | Win % | $/trade | vs random | t | +$1 / -$0.50 | +$0.50 / stop above high | |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+        for z in R[(R["ch"] == lab_) & (R["size"] == 1)].sort_values(["sub", "key"]).itertuples():
+            md.append(f"| {SM_NAMES[z.sub[0]][0]} | {lab(z.sub[0], z.key[0])} | {z.n} | {100 * z.win:.0f}% | {getattr(z, f'p{SM_MAIN}'):+.3f} | "
+                      f"{z.dc:+.3f} | {z.t:.1f} | {z.p4:+.3f} | {z.p5:+.3f} | {'✅' if (z.t >= 3 and z.both) else ''} |")
+    # ---- every combination, best as REAL TRADES
+    good = R[(R["t"] >= 3) & R["both"] & (R["size"] >= 2)]
+    md += ["", f"## EVERY COMBINATION - {len(R):,} results (1, 2 and 3 readings, every chart, each timeframe SPY+QQQ, and all charts). "
+           f"{len(good):,} have t 3+ and beat random in both halves.",
+           "The top ones re-scored as REAL TRADES (one per run, the first candle the combination shows up). Full lists: "
+           "**results/second_all_combos.csv.gz** and **results/second_top_combos.csv**.",
+           "| Chart | Readings | Trades (per day) | Win % | $/trade | vs random | t | +$1 / -$0.50 | +$0.50 / stop above high | 1st / 2nd half |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    ff_rows = []
+    for lab_, cnt in [(PL[-1], 40)] + [(x, 15) for x in PL[:-1]] + [(c_, 8) for c_ in charts]:
+        Et = E[E["ch"].isin(MEM[lab_])]
+        cand = good[good["ch"] == lab_].sort_values("t", ascending=False).head(cnt * 4)
+        got = []
+        for z in cand.itertuples():
+            r = ff_stats(Et[mask_of(Et, z.sub, z.key)])
+            if r is None or r["n"] < 30:
+                continue
+            got.append((z, r))
+        got.sort(key=lambda zr: -zr[1]["t"] if np.isfinite(zr[1]["t"]) else 0)
+        for z, r in got[:cnt]:
+            ff_rows.append(dict(ch=lab_, readings=z.readings, **r))
+            md.append(f"| {lab_} | {z.readings} | {r['n']} ({r['n'] / 250:.1f}) | {100 * r['win']:.0f}% | {r[f'p{SM_MAIN}']:+.3f} | {r['dc']:+.3f} | "
+                      f"{r['t']:.1f} | {r['p4']:+.3f} | {r['p5']:+.3f} | {r['h1']:+.3f} / {r['h2']:+.3f} |")
+    # ---- winners vs losers: the numbers at the entry (first 5 candles after the high)
+    md += ["", f"## WINNERS vs LOSERS - the numbers at the entry candle (median, entries within 5 candles of the run high; win = {xl})"]
+    for tf in tfs:
+        Et = E[E["ch"].str.endswith(f" {tf}m") & (E["AGE_"] <= 3)]
+        W_, L_ = Et[Et["win"] == 1], Et[Et["win"] == 0]
+        md += ["", f"### {tf}m - {len(W_):,} winners / {len(L_):,} losers", "| Reading | Winners | Losers |", "|---|---|---|"]
+        for nm_, col_ in (("Run size $", "runsz"), ("Stretched side now", "sx"), ("Other side now", "ox"), ("Stop above the high $", "stop_hi")):
+            md.append(f"| {nm_} | {W_[col_].median():.2f} | {L_[col_].median():.2f} |")
+    # ---- last month: the best timing's trades to check on the chart
+    md += ["", "## LAST MONTH - the trades of the best trigger per timeframe (check them on your chart)"]
+    TRd = pd.DataFrame(TR)
+    for lab_ in PL[:-1]:
+        q = TRd[(TRd["ch"] == lab_)].sort_values("t", ascending=False)
+        if not len(q):
+            continue
+        k_ = q.iloc[0]["trig"]
+        Et = first_fire(E[E["ch"].isin(MEM[lab_]) & E["g_" + k_]])
+        Lm = Et[Et["t"] >= mo_start].sort_values("t").tail(25)
+        md += ["", f"### {lab_}: {SM_TRIG[k_]}", "| Chart | Time | Side | Price | Run $ | Stretched / other | Result " + xl + " | +$1/-$0.50 |",
+               "|---|---|---|---|---|---|---|---|"]
+        for z in Lm.itertuples():
+            md.append(f"| {z.ch} | {z.t:%m/%d %H:%M} | {'LONG' if z.side == 1 else 'SHORT'} | {z.px:.2f} | {z.runsz:.2f} | {z.sx:.0f} / {z.ox:.0f} | "
+                      f"{getattr(z, f'p{SM_MAIN}'):+.2f} | {z.p4:+.2f} |")
+    md += ["", "**Luck check:** thousands of combinations are scored, so some look great by chance (on random prices too). The BLIND "
+           "TEST lines are what count: picked on one half or one ticker, judged on data it never saw, as real trades."]
+    cols_ = ["ch", "size", "readings", "n", "days", "win", "dc", "t", *PK, "h1", "h2", "both"]
+    R.sort_values("t", ascending=False)[cols_].to_csv(f"{OUT}/second_all_combos.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    if ff_rows:
+        pd.DataFrame(ff_rows).to_csv(f"{OUT}/second_top_combos.csv", index=False, float_format="%.3f")
+    if len(TRd):
+        TRd["trigger"] = TRd["trig"].map(SM_TRIG)
+        TRd.to_csv(f"{OUT}/second_triggers.csv", index=False, float_format="%.3f")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/second_{stamp}.md", f"{OUT}/second_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm_ = os.getenv("GITHUB_STEP_SUMMARY")
