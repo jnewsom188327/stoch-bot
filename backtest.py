@@ -1,5 +1,7 @@
 """
-THE DEFAULT RUN (MODE=all3) = 3 tests, 3 summaries: OPENING RANGE payoff test, DROPS & POPS (volume-spike candles), and
+THE DEFAULT RUN (MODE=combo+vspike) = EVERY COMBINATION of your trend line (color + run length), TTM bars, squeeze, Vix Fix flow,
+  maxed, FLOW SUITE lines and diamonds, last 12 months, 1m-15m - then DROPS & POPS. Two summaries. No opening range. DATA ONLY.
+MODE=all3 = 3 tests: OPENING RANGE payoff test, DROPS & POPS (volume-spike candles), and
   DOTS + TREND LINE CONFLUENCE (your dots / diamonds with the trend line, 1m-60m). DATA ONLY.
 MODE=orb+vspike = the first two only.
 DROPS & POPS (MODE=vspike) - volume-spike candles: do they continue or reverse?
@@ -133,7 +135,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "all3").strip().lower() or "all3"
+MODE = os.getenv("MODE", "combo+vspike").strip().lower() or "combo+vspike"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -433,6 +435,10 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "combo+vspike":
+        return combo_vspike_main()
+    if MODE == "combo":
+        return combo_main()
     if MODE == "all3":
         return orb_vspike_conf_main()
     if MODE == "conf":
@@ -8984,6 +8990,281 @@ def orb_vspike_conf_main():
     orb_main()
     vspike_main()
     conf_main()
+
+
+# ================================================================ EVERY COMBINATION (MODE=combo) - LAST 12 MONTHS
+# Every candle 9:35-15:30 is described by 8 readings from your charts, seen from the LONG side (shorts = the exact mirror,
+# so 'with' = green for a long / red for a short):
+#   TL      trend line color: GREEN / BLUE (up, reversing) / GRAY / PINK (down, reversing) / RED
+#   RUN     how long the trend line has had that color: 1-2 / 3-5 / 6-12 / 13+ candles
+#   TTM     TTM bar: WITH+GROWING (cyan) / WITH+FADING (blue) / AGAINST+RECOVERING (yellow) / AGAINST+GROWING (red)
+#   SQZ     squeeze: ON / JUST FIRED (released in the last 3 candles) / OFF
+#   VIX     Vix Fix flow: WITH (greed avg up + fear avg down) / AGAINST / MIXED
+#   MAX     maxed: WITH SIDE MAXED (greed for longs) / OTHER SIDE MAXED (fear for longs) / NONE
+#   LINE    agree line (FLOW SUITE): THICK (TTM + Vix + trend line) / THIN (TTM + Vix only) / AGAINST / NONE
+#   DIAMOND a diamond in the last 3 candles: WITH (green for longs) / AGAINST / NONE
+# Every single reading, every pair, every triple, and the full 8-reading combination (where there are enough candles) is scored:
+# be long (short) in that state, exit after 3 / 5 / 10 / 20 candles or RIDE THE LINE (until the trend line stops being green/blue),
+# vs random (= every candle). Last 12 months only; it must hold in both halves, on SPY / QQQ / IWM, and on the next chart up/down.
+CMB_TFS_DEF = "1,2,3,5,10,15"
+CMB_K = (3, 5, 10, 20)
+CMB_F = ["TL", "RUN", "TTM", "SQZ", "VIX", "MAX", "LINE", "DIAMOND"]
+CMB_NAMES = {
+    "TL": {2: "GREEN", 1: "BLUE", 0: "GRAY", -1: "PINK", -2: "RED"},
+    "RUN": {0: "run 1-2", 1: "run 3-5", 2: "run 6-12", 3: "run 13+"},
+    "TTM": {0: "TTM with+growing", 1: "TTM with+fading", 2: "TTM against+recovering", 3: "TTM against+growing"},
+    "SQZ": {0: "squeeze ON", 1: "squeeze JUST FIRED", 2: "squeeze off"},
+    "VIX": {1: "Vix flow WITH", -1: "Vix flow AGAINST", 0: "Vix flow mixed"},
+    "MAX": {1: "with-side MAXED", -1: "other side MAXED", 0: "nothing maxed"},
+    "LINE": {2: "THICK line", 1: "THIN line", -1: "line AGAINST", 0: "no line"},
+    "DIAMOND": {1: "diamond WITH", -1: "diamond AGAINST", 0: "no diamond"},
+}
+
+
+def combo_features(df, ind):
+    """per candle, long frame (sd=+1) and short frame (sd=-1) codes for the 8 readings"""
+    S = agr_series(df, ind)
+    col, _ = tlt_colors(df, ind)
+    col = np.asarray(col)
+    run = agr_runlen(np.r_[True, col[1:] == col[:-1]])                      # candles the color has held (resets at a change)
+    run_b = np.digitize(run, [3, 6, 13])                                     # 0: 1-2, 1: 3-5, 2: 6-12, 3: 13+
+    m = S["m"]
+    rising = m > np.r_[np.nan, m[:-1]]
+    c = df["close"]
+    basis, dev = c.rolling(20).mean(), 2 * c.rolling(20).std(ddof=0)
+    h_, l_ = df["high"], df["low"]
+    tr = pd.concat([h_ - l_, (h_ - c.shift(1)).abs(), (l_ - c.shift(1)).abs()], axis=1).max(axis=1)
+    kc = 1.5 * tr.ewm(alpha=1 / 20, adjust=False).mean()
+    sq = (dev < kc).to_numpy()
+    fired = ~sq & (pd.Series(sq.astype(float)).shift(1).rolling(3, min_periods=1).max().fillna(0).to_numpy() > 0)
+    sqz = np.where(sq, 0, np.where(fired, 1, 2))
+    F, G = vfx_pane(df)
+    F, G = np.nan_to_num(F), np.nan_to_num(G)
+    gA = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy()
+    fA = pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+    up = (gA > np.r_[np.nan, gA[:-1]]) & (fA < np.r_[np.nan, fA[:-1]])
+    dn = (gA < np.r_[np.nan, gA[:-1]]) & (fA > np.r_[np.nan, fA[:-1]])
+    dU = pd.Series(S["dmU"].astype(float)).rolling(3, min_periods=1).max().to_numpy() > 0
+    dD = pd.Series(S["dmD"].astype(float)).rolling(3, min_periods=1).max().to_numpy() > 0
+    out = {}
+    for sd in (1, -1):
+        withm = (m * sd) > 0
+        grow = rising if sd == 1 else ~rising & np.isfinite(m)
+        ttm = np.where(withm, np.where(grow, 0, 1), np.where(grow, 2, 3))
+        vix = np.where(up, sd, np.where(dn, -sd, 0))
+        mx = np.where(G >= 95, sd, np.where(F >= 95, -sd, 0))
+        agW, agA = (S["agU"], S["agD"]) if sd == 1 else (S["agD"], S["agU"])
+        tlw = (col * sd) == 2
+        line = np.where(agW & tlw, 2, np.where(agW, 1, np.where(agA, -1, 0)))
+        dmw, dma = (dU, dD) if sd == 1 else (dD, dU)
+        dia = np.where(dmw & ~dma, 1, np.where(dma & ~dmw, -1, 0))
+        out[sd] = dict(TL=(col * sd).astype(np.int8), RUN=run_b.astype(np.int8), TTM=ttm.astype(np.int8), SQZ=sqz.astype(np.int8),
+                       VIX=vix.astype(np.int8), MAX=mx.astype(np.int8), LINE=line.astype(np.int8), DIAMOND=dia.astype(np.int8))
+    return out, col
+
+
+def combo_main():
+    from itertools import combinations
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("CMB_TFS", CMB_TFS_DEF).split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    offs = np.arange(60)
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, c, a, hm, day = ind["o"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            inyr = np.asarray(ts >= yr_start)
+            half = np.where(ts < mid, 0, 1).astype(np.int8)
+            dcode = pd.factorize(day)[0]
+            dord = np.array([d_.toordinal() for d_ in day])
+            lastok = pd.Series(np.where(hm < 1555, np.arange(n), -1)).groupby(dcode).transform("max").to_numpy()
+            ok = inyr & (hm >= 935) & (hm < 1530) & (np.arange(n) + 1 < n) & np.isfinite(a) & (a > 0)
+            ok[:-1] &= dcode[1:] == dcode[:-1]
+            FE, col = combo_features(df, ind)
+            idx = np.nonzero(ok)[0]
+            e = idx + 1
+            J = np.minimum(e[:, None] + offs[None, :], lastok[e][:, None])
+            cl = c[J]
+            en = o[e]
+            A = a[idx]
+            for sd in (1, -1):
+                ret = sd * (cl - en[:, None]) / A[:, None]                        # ATR after 1..60 candles
+                # ride the line: exit at the close of the first candle where the line is no longer green/blue (this side)
+                bad = (col * sd) <= 0
+                nb = angs_next_true(bad)
+                jr = np.minimum(np.minimum(nb[e], e + 59), lastok[e])
+                hr = jr - e + 1
+                rr = sd * (c[jr] - en) / A
+                D_ = pd.DataFrame({f"x{k}": ret[:, k - 1] for k in CMB_K})
+                D_["ride"], D_["hride"] = rr, hr
+                D_["usd10"] = sd * (cl[:, 9] - en)
+                for f in CMB_F:
+                    D_[f] = FE[sd][f][idx]
+                D_["tf"], D_["sym"], D_["side"], D_["half"], D_["day"] = tf, sym, sd, half[idx], dord[idx]
+                # random = every candle the same way, same chart, side and half; the ride is compared at its own length
+                for hh in (0, 1):
+                    mh = half[idx] == hh
+                    for k in CMB_K:
+                        D_.loc[mh, f"x{k}"] -= np.nanmean(ret[mh, k - 1])
+                    base_k = np.nanmean(ret[mh], 0)
+                    D_.loc[mh, "ride"] -= base_k[hr[mh] - 1]
+                rows.append(D_.astype({f: np.int8 for f in CMB_F}))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["sym"] = E["sym"].astype("category")
+    HOLD = [f"x{k}" for k in CMB_K] + ["ride"]
+    HN = {**{f"x{k}": f"{k} candles" for k in CMB_K}, "ride": "ride the line"}
+    T_PASS = float(os.getenv("CMB_T", "5.0"))
+    HELD_N = int(os.getenv("CMB_HELD_N", "1000"))
+    MIN_N = int(os.getenv("CMB_MIN_N", "300"))
+    syms = list(SYMBOLS)
+
+    def cell_stats(g_sum, g_cnt, keys):
+        """g_sum / g_cnt: sums and counts per (keys..., day) -> mean and day-clustered t per cell"""
+        res = []
+        tot = g_sum.groupby(level=list(range(len(keys)))).sum()
+        cnt = g_cnt.groupby(level=list(range(len(keys)))).sum()
+        mu = tot.div(cnt, axis=0)
+        dev = g_sum - g_cnt.to_numpy()[:, None] * mu.reindex(g_sum.index.droplevel(-1)).to_numpy()
+        se = np.sqrt((dev ** 2).groupby(level=list(range(len(keys)))).sum()).div(cnt, axis=0)
+        return mu, mu / se, cnt
+
+    subsets = [s_ for r_ in (1, 2, 3) for s_ in combinations(CMB_F, r_)] + [tuple(CMB_F)]
+    out = []
+    for tf in tfs:
+        Et = E[E["tf"] == tf]
+        for sub in subsets:
+            keys = list(sub)
+            gb = Et.groupby(keys + ["day"], observed=True)
+            g_sum = gb[HOLD].sum()
+            g_cnt = gb.size()
+            mu, tt, cnt = cell_stats(g_sum, g_cnt, keys)
+            keep = cnt[cnt >= MIN_N].index
+            if not len(keep):
+                continue
+            # the checks for cells that might pass: halves, symbols
+            for key in keep:
+                kt = key if isinstance(key, tuple) else (key,)
+                tvals = tt.loc[key]
+                best = max(HOLD, key=lambda h_: abs(tvals[h_]) if np.isfinite(tvals[h_]) else -1)
+                r = dict(tf=tf, sub=sub, key=kt, n=int(cnt.loc[key]), hold=best, v=float(mu.loc[key, best]), t=float(tvals[best]),
+                         **{h_: float(mu.loc[key, h_]) for h_ in HOLD}, **{"t_" + h_: float(tvals[h_]) for h_ in HOLD})
+                out.append(r)
+        print(f"  scored {tf}m ({time.time() - t0:.0f}s)", flush=True)
+    R = pd.DataFrame(out)
+    R["at"] = R["t"].abs()
+    # detailed checks only for the strong ones (halves, symbols, the next chart up / down)
+    cand = R[R["at"] >= min(T_PASS, 3.0)].sort_values("at", ascending=False).head(400).copy()
+    look = {(z.tf, z.sub, z.key): z for z in R.itertuples()}
+
+    def mask(Et, sub, key):
+        mm = np.ones(len(Et), dtype=bool)
+        for f, v_ in zip(sub, key):
+            mm &= Et[f].to_numpy() == v_
+        return mm
+    chk = []
+    for z in cand.itertuples():
+        Et = E[E["tf"] == z.tf]
+        g = Et[mask(Et, z.sub, z.key)]
+        sgn = np.sign(z.v)
+        h1, h2 = g[g["half"] == 0][z.hold].mean(), g[g["half"] == 1][z.hold].mean()
+        bys = [g[g["sym"] == s_][z.hold].mean() for s_ in syms]
+        L_, S_ = g[g["side"] == 1][z.hold].mean(), g[g["side"] == -1][z.hold].mean()
+        ti = tfs.index(z.tf)
+        nb = [look.get((tfs[j], z.sub, z.key)) for j in (ti - 1, ti + 1) if 0 <= j < len(tfs)]
+        nbv = [getattr(x, z.hold) for x in nb if x is not None]
+        held = (z.at >= T_PASS and z.n >= HELD_N and np.sign(h1) == sgn and np.sign(h2) == sgn and all(np.sign(b_) == sgn for b_ in bys if np.isfinite(b_))
+                and len(nbv) > 0 and all(np.sign(v_) == sgn for v_ in nbv))
+        per_day = z.n / max(1, len(np.unique(g["day"]))) / len(syms) / 2
+        chk.append(dict(idx=z.Index, h1=h1, h2=h2, bys=bys, L=L_, S=S_, nb=nbv, held=held, usd=g["usd10"].mean(), hr=g["hride"].mean(),
+                        win=(g[z.hold] + 0 > 0).mean(), per_day=per_day))
+    C = pd.DataFrame(chk).set_index("idx") if chk else pd.DataFrame(columns=["held"])
+    cand = cand.join(C)
+
+    def words(sub, key):
+        return " + ".join(CMB_NAMES[f][v_] for f, v_ in zip(sub, key))
+    ndays = max(1, len(pd.bdate_range(yr_start.date(), end.date())))
+    md = [f"# EVERY COMBINATION - TREND LINE RUNS x TTM x SQUEEZE x VIX FIX x LINES x DIAMONDS - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"{', '.join(SYMBOLS)}, charts {', '.join(f'{t}m' for t in tfs)}, {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. Every candle 9:35-15:30, entry at the "
+          f"next open, out by 15:55. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. Candles scored: {len(E):,} (long + short views).",
+          "**The 8 readings (from the LONG side; shorts are the exact mirror):** TL = trend line color (GREEN / BLUE / GRAY / PINK / RED); "
+          "RUN = how many candles the line has had that color (1-2 / 3-5 / 6-12 / 13+); TTM = the TTM bar (with+growing = cyan for a long, "
+          "with+fading = blue, against+recovering = yellow, against+growing = red); SQZ = squeeze ON / JUST FIRED (last 3 candles) / off; "
+          "VIX = Vix Fix flow with / against / mixed; MAX = the with-side maxed (greed for a long) / the other side maxed / none; LINE = "
+          "FLOW SUITE agree line THICK / THIN / AGAINST / none; DIAMOND = a diamond in the last 3 candles with / against / none.",
+          f"**Scored:** every single reading, every pair, every triple and the full 8-reading combination with {MIN_N}+ candles: be long (short) "
+          "in that state, out after 3 / 5 / 10 / 20 candles or RIDE THE LINE (until it is no longer green / blue for a long). **Result** = ATR "
+          "vs random (every candle, same way, same chart, same half-year) - the fair score. **t** = noise measured day by day, all symbols "
+          f"together. **HELD UP** = |t| {T_PASS:g}+ with {HELD_N:,}+ candles AND the same sign in both halves, on SPY / QQQ / IWM, and on the chart(s) next to it. "
+          "The bar is high on purpose: tens of thousands of cells are tested - see the luck check at the bottom.", ""]
+    held = cand[cand["held"] == True] if len(cand) and "held" in cand else cand.iloc[0:0]
+    md.append("## The answer in 30 seconds")
+    if len(held):
+        md.append(f"- **HELD UP: {len(held)}.** Strongest:")
+        for z in held.head(12).itertuples():
+            word = "LONG/SHORT WITH it" if z.v > 0 else "AVOID / FADE it"
+            md.append(f"  - **{z.tf}m: {words(z.sub, z.key)}** -> {HN[z.hold]}: {z.v:+.3f} ATR vs random (t {z.t:.1f}) -> {word}; "
+                      f"{z.n} candles ({z.per_day:.1f} per symbol-side per day), $ {z.usd:+.3f}/share at 10 candles, H1 {z.h1:+.3f} / H2 {z.h2:+.3f}")
+    else:
+        md.append(f"- **HELD UP: none** (nothing reached |t| {T_PASS:g} with every check).")
+    md.append(f"- Cells scored: {len(R):,}. Strongest |t| anywhere: {R['at'].max():.1f}.")
+    md += ["", "## What each reading does on its own (ATR vs random; t in brackets) - the main effects",
+           "| Chart | Reading | Candles | 3 c | 5 c | 10 c | 20 c | Ride the line (avg candles) |", "|---|---|---|---|---|---|---|---|"]
+    single = R[R["sub"].apply(len) == 1].sort_values(["tf", "sub", "key"])
+    for z in single.itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | " + " | ".join(f"{getattr(z, 'x' + str(k)):+.3f} ({getattr(z, 't_x' + str(k)):.1f})" for k in CMB_K) +
+                  f" | {z.ride:+.3f} ({z.t_ride:.1f}) |")
+    if not len(cand):
+        cand = pd.DataFrame(columns=["held"])
+    md += ["", "## Top 40 combinations by |t| (any size) - with every check",
+           "| Chart | Combination | Candles | Best hold | **Result** (t) | 3 / 5 / 10 / 20 c / ride | H1 / H2 | " + " / ".join(syms) + " | Next charts | $/sh at 10 | |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for z in cand.head(40).itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {HN[z.hold]} | **{z.v:+.3f}** ({z.t:.1f}) | " +
+                  " / ".join(f"{getattr(z, h_):+.3f}" for h_ in HOLD) + f" | {z.h1:+.3f} / {z.h2:+.3f} | " + " / ".join(f"{b_:+.3f}" for b_ in z.bys) +
+                  f" | {' / '.join(f'{v_:+.3f}' for v_ in z.nb)} | {z.usd:+.3f} | {'✅' if z.held else ''} |")
+    full = R[R["sub"].apply(len) == len(CMB_F)].sort_values("at", ascending=False)
+    md += ["", f"## The full 8-reading combinations ({MIN_N}+ candles) - top 20 by |t|",
+           "| Chart | All 8 readings | Candles | Best hold | Result (t) |", "|---|---|---|---|---|"]
+    for z in full.head(20).itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {HN[z.hold]} | {z.v:+.3f} ({z.t:.1f}) |")
+    tl_runs = R[(R["sub"] == ("TL", "RUN"))].sort_values(["tf", "key"])
+    md += ["", "## Trend line runs: color x how long it has held (ride the line, ATR vs random, t, avg candles held)",
+           "| Chart | Color + run | Candles | 5 c | 10 c | Ride the line |", "|---|---|---|---|---|---|"]
+    for z in tl_runs.itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {z.x5:+.3f} ({z.t_x5:.1f}) | {z.x10:+.3f} ({z.t_x10:.1f}) | {z.ride:+.3f} ({z.t_ride:.1f}) |")
+    md += ["", f"**Luck check:** {len(R):,} cells x 5 holds were scored. This exact test was run 3 times on random prices that move "
+           "together like SPY / QQQ / IWM (no edge anywhere): the strongest |t| reached 4.0-4.7, and once a tiny full combination (335 "
+           f"candles) passed every other check at t -4.6 - so HELD UP needs |t| {T_PASS:g}+ AND {HELD_N:,}+ candles AND both halves AND all "
+           "three symbols AND the neighboring chart(s). Readings overlap (THICK line = TTM + Vix + green line), so neighboring cells move together."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/combo_{stamp}.md", f"{OUT}/combo_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+def combo_vspike_main():
+    """the default run: every combination, then drops & pops"""
+    combo_main()
+    vspike_main()
 
 
 if __name__ == "__main__":
