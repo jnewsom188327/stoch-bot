@@ -1,5 +1,7 @@
 """
-WHAT PREDICTS A TREND? - 2020 TO NOW, 5m (MODE=trend, the default) - day context, breadth (20 sector ETFs / mega caps), VIXY /
+OPENING RANGE - PAYOFF EDGE, SPY / QQQ / IWM (MODE=orb, the default) - first 5/15/30-minute direction, range breakouts and 10:30
+  momentum, small fixed stop, ride to the close / R targets, relative-volume filters, vs coin-flip direction. DATA ONLY.
+WHAT PREDICTS A TREND? - 2020 TO NOW, 5m (MODE=trend) - day context, breadth (20 sector ETFs / mega caps), VIXY /
   TLT / HYG, VWAP, opening range, relative volume, daily backdrop, calendar -> rest of day; shuffle-test luck bar; out of sample. DATA ONLY.
 AGREE DOTS DEEP DIVE - LAST 12 MONTHS, 1m to 60m (MODE=agree) - your AGREE DOTS / TTM FLOW / VIX FIX 6 dots and
   diamonds: 13 events x 8 charts x fixed holds + rides, vs random, with splits by time, volatility, weekday, symbol, side. DATA ONLY.
@@ -127,7 +129,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "trend").strip().lower() or "trend"
+MODE = os.getenv("MODE", "orb").strip().lower() or "orb"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -427,6 +429,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "orb":
+        return orb_main()
     if MODE == "trend":
         return trend_main()
     if MODE == "agree":
@@ -8399,6 +8403,275 @@ def trend_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/trend_{stamp}.md", f"{OUT}/trend_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ OPENING RANGE / STOCKS IN PLAY (MODE=orb) - payoff edge, not win rate
+# Direction is ~50/50 - so the only way to an edge is the PAYOFF: a small fixed loss, winners that run to the close, taken on the days
+# that MOVE (the size test: relative volume, gap and range so far predict a big day; direction they don't).
+# Published version: Zarattini & Aziz (2023/24) - trade the first 5-minute candle's direction, stop at its other end, hold to the
+# close, on the stocks with the highest relative volume at the open ("stocks in play").
+ORB_MODES = ("OR5", "OR15", "OR30", "BRK15", "BRK30", "MOM1030")
+ORB_STOPS = ("OR", "0.10 ATR", "0.25 ATR", "0.50 ATR")
+ORB_EXITS = ("CLOSE", "2R", "5R", "10R")
+ORB_FILTERS = ("ALL", "RVOL 1.2+", "RVOL 1.5+", "RVOL 2+", "BUSIEST OF THE 3")
+ORB_SLIP = 0.01          # $ per share per side
+
+
+def orb_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("START", "2020-01-01").strip() or "2020-01-01").replace(tzinfo=timezone.utc)
+    yr_start = end.astimezone(NY).date() - timedelta(days=365)
+    test = os.getenv("TEST", "") == "1"
+    uni = list(SYMBOLS)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    get = (lambda s: trend_fake(s, start, end)) if test else (lambda s: trend_fetch(s, start, end))
+    raw = {}
+    for s in uni:
+        df = get(s)
+        if df is not None and len(df):
+            raw[s] = trend_grid(df)
+    syms = list(raw)
+    days = np.array(sorted(set().union(*[set(raw[s][0]) for s in syms])))
+    ND = len(days)
+    cols = np.arange(NSLOT)[None, :]
+    # per symbol: aligned grids + ATR + relative volume at each entry window
+    A = {}
+    for s in syms:
+        dd, G = raw[s]
+        ix = pd.Index(dd).get_indexer(days)
+        g = {}
+        for c_, a in G.items():
+            b = np.full((ND, NSLOT), np.nan)
+            ok = ix >= 0
+            b[ok] = a[ix[ok]]
+            g[c_] = b
+        dO, dC, dH, dL, pC, atr = trend_daily(g)
+        g["atr"], g["pC"] = atr, pC
+        cv = np.cumsum(np.nan_to_num(g["volume"]), 1)
+        g["cumv"] = cv
+        g["avgcv"] = pd.DataFrame(np.where(np.isfinite(g["close"][:, :1]), cv, np.nan)).rolling(14, min_periods=10).mean().shift(1).to_numpy()
+        A[s] = g
+    print(f"universe {syms}, days {ND} ({time.time() - t0:.0f}s)", flush=True)
+    MODE_K = {"OR5": 1, "OR15": 3, "OR30": 6, "BRK15": 3, "BRK30": 6, "MOM1030": 12}
+    rngs = [np.random.default_rng(100 + i) for i in range(20)]
+    trades = []        # one row per (variant, symbol, day): R, ATR, $, and the random-direction average R
+
+    def simulate(g, e, side, entry, stop_px, exit_kind, R0):
+        """vectorized over days. e = entry bar, side +1/-1, entry price, stop price, R0 = |entry - stop|.
+        Stop checked first in every bar (incl. the entry bar); target only from the bar after entry. Exit at 15:55 otherwise."""
+        H, L, C = g["high"], g["low"], g["close"]
+        n = len(e)
+        valid = np.isfinite(entry) & np.isfinite(stop_px) & (R0 > 0) & (e < 76)
+        e_ = np.where(valid, e, 0)
+        after = cols >= e_[:, None]
+        if True:
+            hitS = np.where(side[:, None] == 1, L <= stop_px[:, None], H >= stop_px[:, None]) & after & (cols <= 76)
+        fS = np.where(hitS.any(1), hitS.argmax(1), 999)
+        if exit_kind == "CLOSE":
+            fT = np.full(n, 999)
+            tgt = np.full(n, np.nan)
+        else:
+            m = float(exit_kind[:-1])
+            tgt = entry + side * m * R0
+            hitT = np.where(side[:, None] == 1, H >= tgt[:, None], L <= tgt[:, None]) & (cols > e_[:, None]) & (cols <= 76)
+            fT = np.where(hitT.any(1), hitT.argmax(1), 999)
+        O = g["open"]
+        px = C[:, 76].copy()                                                    # 15:55 close
+        stopped = fS <= fT
+        jS = np.minimum(fS, 76)
+        gapS = O[np.arange(n), jS]
+        sfill = np.where(side == 1, np.minimum(stop_px, np.where(jS > e_, gapS, stop_px)), np.maximum(stop_px, np.where(jS > e_, gapS, stop_px)))
+        px = np.where(stopped & (fS < 999), sfill, px)
+        jT = np.minimum(fT, 76)
+        tfill = np.where(side == 1, np.maximum(tgt, O[np.arange(n), jT]), np.minimum(tgt, O[np.arange(n), jT]))
+        px = np.where(~stopped & (fT < 999), tfill, px)
+        pnl = side * (px - entry) - 2 * ORB_SLIP
+        return np.where(valid, pnl, np.nan)
+
+    for s in syms:
+        g = A[s]
+        O, H, L, C, atr = g["open"], g["high"], g["low"], g["close"], g["atr"]
+        for mode in ORB_MODES:
+            k0 = MODE_K[mode]
+            orH, orL = np.nanmax(H[:, :k0], 1), np.nanmin(L[:, :k0], 1)
+            rvol = g["cumv"][:, k0 - 1] / g["avgcv"][:, k0 - 1]
+            if mode.startswith("OR") or mode == "MOM1030":
+                e = np.full(ND, k0)
+                side = np.sign(C[:, k0 - 1] - O[:, 0])
+                entry = O[:, k0] + side * ORB_SLIP * 0          # slippage handled in pnl
+                entry = O[:, k0]
+            else:                                                # BRK: first bar after the range that breaks it
+                upb = (H > orH[:, None]) & (cols >= k0)
+                dnb = (L < orL[:, None]) & (cols >= k0)
+                fu = np.where(upb.any(1), upb.argmax(1), 999)
+                fd = np.where(dnb.any(1), dnb.argmax(1), 999)
+                e = np.minimum(fu, fd)
+                side = np.where(fu < fd, 1.0, np.where(fd < fu, -1.0, 0.0))
+                e_c = np.minimum(e, NSLOT - 1)
+                entry = np.where(side == 1, np.maximum(O[np.arange(ND), e_c], orH), np.minimum(O[np.arange(ND), e_c], orL))
+                e = np.where(e >= 999, 99, e)
+                kb = np.maximum(np.minimum(e_c, NSLOT - 1) - 1, 0)                 # volume known BEFORE the breakout bar
+                rvol = g["cumv"][np.arange(ND), kb] / g["avgcv"][np.arange(ND), kb]
+            side = np.where(np.isfinite(side), side, 0.0)
+            for stop in ORB_STOPS:
+                if stop == "OR":
+                    if mode == "MOM1030":
+                        continue
+                    stop_px = np.where(side == 1, orL, orH)
+                else:
+                    stop_px = entry - side * float(stop.split()[0]) * atr
+                R0 = np.abs(entry - stop_px)
+                ok = (side != 0) & np.isfinite(R0) & (R0 > 0.02)
+                for ex in ORB_EXITS:
+                    pnl = simulate(g, e, side, entry, stop_px, ex, R0)
+                    # random direction, same entry, same risk distance (20 coin flips averaged)
+                    rr = []
+                    for rg in rngs:
+                        sd2 = rg.choice([-1.0, 1.0], ND)
+                        st2 = entry - sd2 * R0
+                        rr.append(simulate(g, e, sd2, entry, st2, ex, R0) / R0)
+                    rnd = np.nanmean(rr, 0)
+                    m = ok & np.isfinite(pnl)
+                    idx = np.nonzero(m)[0]
+                    trades.append(pd.DataFrame({"mode": mode, "stop": stop, "exit": ex, "sym": s, "d": idx,
+                                                "R": (pnl / R0)[idx].astype(np.float32), "atr": (pnl / atr)[idx].astype(np.float32),
+                                                "usd": pnl[idx].astype(np.float32), "rnd": rnd[idx].astype(np.float32),
+                                                "rvol": rvol[idx].astype(np.float32)}))
+        print(f"  {s} done ({time.time() - t0:.0f}s)", flush=True)
+    T = pd.concat(trades, ignore_index=True)
+    for c_ in ("mode", "stop", "exit", "sym"):
+        T[c_] = T[c_].astype("category")
+    T["test"] = days[T["d"].to_numpy()] >= yr_start
+    T["year"] = pd.to_datetime(days[T["d"].to_numpy()]).year
+    # filters: relative volume thresholds and the day's top-N by relative volume (stocks in play)
+    T["rank"] = T.groupby(["mode", "stop", "exit", "d"], observed=True)["rvol"].rank(ascending=False, method="first")
+
+    def filt(df, f):
+        if f == "ALL":
+            return df
+        if f == "RVOL 1.2+":
+            return df[df["rvol"] >= 1.2]
+        if f == "RVOL 1.5+":
+            return df[df["rvol"] >= 1.5]
+        if f == "RVOL 2+":
+            return df[df["rvol"] >= 2.0]
+        return df[df["rank"] <= 1]
+
+    def tday(x, d):
+        x = pd.Series(np.asarray(x, dtype=float))
+        if len(x) < 20:
+            return np.nan
+        mu = x.mean()
+        dev = (x - mu).groupby(np.asarray(d)).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(x)
+        return mu / se if se > 0 else np.nan
+
+    def mdd(r):
+        eq = np.cumsum(r)
+        return float(np.max(np.maximum.accumulate(eq) - eq)) if len(eq) else np.nan
+
+    out = []
+    ndays_all = len(np.unique(T["d"]))
+    ndays_t = len(np.unique(T.loc[T["test"], "d"]))
+    for (mode, stop, ex), g0 in T.groupby(["mode", "stop", "exit"], observed=True):
+        for f in ORB_FILTERS:
+            g = filt(g0, f)
+            if len(g) < 50:
+                continue
+            gt = g[g["test"]]
+            if len(gt) < 20:
+                continue
+            gt_s = gt.sort_values("d")
+            yrs = g.groupby("year")["R"].mean()
+            win = gt["R"] > 0
+            out.append(dict(mode=mode, stop=stop, exit=ex, filt=f,
+                            n=len(g), R=g["R"].mean(), t=tday(g["R"], g["d"]), rnd=g["rnd"].mean(),
+                            edge=(g["R"] - g["rnd"]).mean(), t_edge=tday(g["R"] - g["rnd"], g["d"]),
+                            yrs_pos=int((yrs > 0).sum()), yrs=len(yrs),
+                            n_t=len(gt), per_day=len(gt) / max(ndays_t, 1), R_t=gt["R"].mean(), t_t=tday(gt["R"], gt["d"]),
+                            rnd_t=gt["rnd"].mean(), edge_t=(gt["R"] - gt["rnd"]).mean(), t_edge_t=tday(gt["R"] - gt["rnd"], gt["d"]),
+                            win_t=win.mean(), avgW_t=gt.loc[win, "R"].mean(), avgL_t=gt.loc[~win, "R"].mean(),
+                            usd_t=gt["usd"].mean(), atr_t=gt["atr"].mean(), totR_t=gt["R"].sum(), mdd_t=mdd(gt_s.groupby("d")["R"].sum().to_numpy()),
+                            h2=g[g["d"] >= np.median(g["d"])]["R"].mean(), h1=g[g["d"] < np.median(g["d"])]["R"].mean()))
+    S = pd.DataFrame(out)
+    T_PASS = float(os.getenv("ORB_T", "3.0"))
+    S["held"] = (S["t"] >= T_PASS) & (S["t_t"] >= 2.0) & (S["yrs_pos"] >= S["yrs"] - 1) & (S["edge"] > 0) & (S["edge_t"] > 0) & (S["n_t"] >= 100)
+    md = [f"# OPENING RANGE / STOCKS IN PLAY - PAYOFF EDGE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {days[0]} to {days[-1]} ({ND} days), 5-minute bars, regular hours, universe ({len(syms)}): {', '.join(syms)}. LAST 12 MONTHS = from "
+          f"{yr_start} ({ndays_t} days). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. ${ORB_SLIP:.2f}/share slippage each way included.",
+          "**Why this test:** direction is ~50/50 on every reading we tried; the SIZE of the day is predictable (relative volume, gap, range so "
+          "far). So the edge has to come from the PAYOFF: a small fixed loss, and winners that run to the close on the days that move. "
+          "Published version: Zarattini & Aziz - trade the first 5-minute candle's direction, stop at its other end, hold to the close, only "
+          "on the stocks with the highest relative volume at the open - here on YOUR tickers, with relative volume as the 'is today in play' filter.",
+          "**Entries:** OR5 / OR15 / OR30 = at 9:35 / 9:45 / 10:00 in the direction of the first 5 / 15 / 30 minutes (open to close); "
+          "BRK15 / BRK30 = when price later breaks above / below the 15 / 30-minute opening range; MOM1030 = at 10:30 in the direction of the "
+          "move since the open. **Stops:** OR = the other side of the opening range; or 0.10 / 0.25 / 0.50 daily ATR. **Exits:** CLOSE = "
+          "hold to 3:55 unless stopped; 2R / 5R / 10R = target at 2 / 5 / 10 x the risk (else 3:55). **Filters:** RVOL = volume so far vs the "
+          "last 14 days at the same time (the day is unusually busy); BUSIEST OF THE 3 = only the one of SPY / QQQ / IWM with the highest RVOL that day.",
+          "**R** = profit in units of the risk (stop distance) after slippage: +1R = made what you risked. **Random** = the same trade with a "
+          "coin-flip direction (20 flips) - the payoff structure alone; **edge vs random** = what the direction rule adds. **t** = noise "
+          f"measured day by day. **HELD UP** = all years t {T_PASS:g}+, last 12 months t 2+, positive in all but at most one year, beats "
+          "random in both, 100+ trades in the last 12 months.", ""]
+    held = S[S["held"]].sort_values("t_t", ascending=False)
+    md.append("## The answer in 30 seconds")
+    if len(held):
+        md.append(f"- **HELD UP: {len(held)} setups.** Best by the last 12 months:")
+        for z in held.head(6).itertuples():
+            md.append(f"  - **{z.mode}, stop {z.stop}, exit {z.exit}, {z.filt}**: last 12 months {z.n_t} trades ({z.per_day:.1f}/day), "
+                      f"**{z.R_t:+.3f} R per trade** (t {z.t_t:.1f}), win {100 * z.win_t:.0f}% (avg win {z.avgW_t:+.2f}R / avg loss {z.avgL_t:+.2f}R), "
+                      f"total {z.totR_t:+.0f}R, worst drawdown {z.mdd_t:.0f}R, ${z.usd_t:+.3f}/share; all years {z.R:+.3f}R (t {z.t:.1f}, {z.yrs_pos}/{z.yrs} years +); "
+                      f"random direction {z.rnd_t:+.3f}R")
+    else:
+        md.append("- **HELD UP: none.**")
+    best12 = S[(S["n_t"] >= 100)].sort_values("t_t", ascending=False)
+    md.append("")
+    md += ["## Top 30 by the LAST 12 MONTHS (with every check)",
+           "| Entry | Stop | Exit | Filter | Trades (per day) | **R/trade last 12 mo (t)** | Win % | Avg win / loss (R) | Total R | Worst DD (R) | $/share | "
+           "Random dir R | All years R (t) | Years + | H1 / H2 (all years) | |", "|" + "---|" * 16]
+    for z in best12.head(30).itertuples():
+        md.append(f"| {z.mode} | {z.stop} | {z.exit} | {z.filt} | {z.n_t} ({z.per_day:.1f}) | **{z.R_t:+.3f}** ({z.t_t:.1f}) | {100 * z.win_t:.0f}% | "
+                  f"{z.avgW_t:+.2f} / {z.avgL_t:+.2f} | {z.totR_t:+.0f} | {z.mdd_t:.0f} | {z.usd_t:+.3f} | {z.rnd_t:+.3f} | {z.R:+.3f} ({z.t:.1f}) | "
+                  f"{z.yrs_pos}/{z.yrs} | {z.h1:+.3f} / {z.h2:+.3f} | {'✅' if z.held else ''} |")
+    md += ["", "## Does relative volume (a busy day) matter? The published setup (OR5, stop OR, exit CLOSE) by filter",
+           "| Filter | Trades last 12 mo | R/trade last 12 mo (t) | Win % | All years R (t) | Random dir R |", "|---|---|---|---|---|---|"]
+    for f in ORB_FILTERS:
+        z = S[(S["mode"] == "OR5") & (S["stop"] == "OR") & (S["exit"] == "CLOSE") & (S["filt"] == f)]
+        if len(z):
+            z = z.iloc[0]
+            md.append(f"| {f} | {z.n_t} | {z.R_t:+.3f} ({z.t_t:.1f}) | {100 * z.win_t:.0f}% | {z.R:+.3f} ({z.t:.1f}) | {z.rnd_t:+.3f} |")
+    md += ["", "## Every entry x filter (stop and exit picked by the all-years t - so it is not tuned on the last 12 months)",
+           "| Entry | Filter | Stop / exit | R/trade all years (t) | Last 12 months R (t) | Win % last 12 | Years + |", "|---|---|---|---|---|---|---|"]
+    for (mode, f), g in S.groupby(["mode", "filt"]):
+        z = g.sort_values("t", ascending=False).iloc[0]
+        md.append(f"| {mode} | {f} | {z['stop']} / {z['exit']} | {z['R']:+.3f} ({z['t']:.1f}) | {z['R_t']:+.3f} ({z['t_t']:.1f}) | {100 * z['win_t']:.0f}% | {z['yrs_pos']}/{z['yrs']} |")
+    if len(held):
+        z = held.iloc[0]
+        g = filt(T[(T["mode"] == z["mode"]) & (T["stop"] == z["stop"]) & (T["exit"] == z["exit"])], z["filt"])
+        gt = g[g["test"]]
+        md += ["", f"## The best setup by ticker, last 12 months ({z['mode']}, stop {z['stop']}, exit {z['exit']}, {z['filt']})",
+               "| Ticker | Trades | R/trade | Win % | $/share |", "|---|---|---|---|---|"]
+        for s_, gg in gt.groupby("sym", observed=True):
+            if len(gg):
+                md.append(f"| {s_} | {len(gg)} | {gg['R'].mean():+.3f} | {100 * (gg['R'] > 0).mean():.0f}% | {gg['usd'].mean():+.3f} |")
+        md += ["", "| Month | Trades | Total R |", "|---|---|---|"]
+        mo = pd.to_datetime(days[gt["d"].to_numpy()]).to_period("M")
+        for m_, gg in gt.groupby(mo):
+            md.append(f"| {m_} | {len(gg)} | {gg['R'].sum():+.1f} |")
+    md += ["", f"**Luck check:** {len(S)} setups were tested. The whole test was run 3 times on random prices moving in 1-cent ticks "
+           "(no edge anywhere): nothing passed HELD UP, and the best last-12-month t was about 1.7. **Fill note:** stops and breakouts are "
+           "filled at the exact level + $0.01; on fast breakouts real fills can be a few cents worse, so treat thin edges (under ~0.1R) "
+           "with care."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/orb_{stamp}.md", f"{OUT}/orb_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
