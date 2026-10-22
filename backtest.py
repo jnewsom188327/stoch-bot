@@ -1,5 +1,7 @@
 """
-AGREE DOTS DEEP DIVE - LAST 12 MONTHS, 1m to 60m (MODE=agree, the default) - your AGREE DOTS / TTM FLOW / VIX FIX 6 dots and
+WHAT PREDICTS A TREND? - 2020 TO NOW, 5m (MODE=trend, the default) - day context, breadth (20 sector ETFs / mega caps), VIXY /
+  TLT / HYG, VWAP, opening range, relative volume, daily backdrop, calendar -> rest of day; shuffle-test luck bar; out of sample. DATA ONLY.
+AGREE DOTS DEEP DIVE - LAST 12 MONTHS, 1m to 60m (MODE=agree) - your AGREE DOTS / TTM FLOW / VIX FIX 6 dots and
   diamonds: 13 events x 8 charts x fixed holds + rides, vs random, with splits by time, volatility, weekday, symbol, side. DATA ONLY.
 VIX FIX MOVING AVERAGES -> TOPS & BOTTOMS - LAST 12 MONTHS, 1m / 3m / 5m (MODE=vma) - your VIX FIX 5 pane (0-100) with
   an average on each side: TURN / FADE / CROSS rules x depth x EMA/SMA 5/10/20 x trend-line filters, vs random. DATA ONLY.
@@ -125,7 +127,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "agree").strip().lower() or "agree"
+MODE = os.getenv("MODE", "trend").strip().lower() or "trend"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -425,6 +427,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "trend":
+        return trend_main()
     if MODE == "agree":
         return agree_main()
     if MODE == "vma":
@@ -7915,6 +7919,486 @@ def agree_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/agree_{stamp}.md", f"{OUT}/agree_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+# ================================================================ WHAT PREDICTS A TREND? (MODE=trend) - 2020 to now, 5m bars
+# Not another indicator from the chart's own last 50 candles: DAY-LEVEL context (gap, opening range, relative volume,
+# efficiency, VWAP), MARKET BREADTH (11 sector ETFs + 9 mega caps), OTHER MARKETS (VIXY = VIX futures, TLT, HYG), the
+# DAILY backdrop (prior day, 20-day trend, compression), the CALENDAR, and the published "first half hour predicts the
+# last half hour" effect. Measured at 10:00 / 10:30 / 11:00 / 12:00 / 13:00 -> does it predict the REST OF THE DAY?
+TREND_BASKET = ["XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+                "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AVGO", "JPM"]
+TREND_OTHER = ["VIXY", "TLT", "HYG"]
+TREND_T = (30, 60, 90, 150, 210)        # minutes after 9:30 -> 10:00, 10:30, 11:00, 12:00, 13:00
+NSLOT = 78                              # 5-minute bars 9:30 ... 15:55
+
+
+def trend_fetch(symbol, start, end):
+    """5-minute bars, regular hours only (SIP, IEX if needed)"""
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
+    if not key or not sec:
+        sys.exit("ALPACA_KEY / ALPACA_SECRET are missing. Add them in Settings > Secrets and variables > Actions.")
+    client = StockHistoricalDataClient(key, sec)
+    last = None
+    for feed in (DataFeed.SIP, DataFeed.IEX):
+        try:
+            parts, cur = [], start
+            while cur < end:
+                nxt = min(cur + timedelta(days=365), end)
+                req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                                       start=cur, end=nxt, feed=feed, adjustment=Adjustment.SPLIT)
+                df = client.get_stock_bars(req).df
+                if len(df):
+                    parts.append(df)
+                cur = nxt
+            if not parts:
+                raise RuntimeError("no bars")
+            df = pd.concat(parts)
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.reset_index(level=0, drop=True)
+            df = df[~df.index.duplicated()].sort_index()
+            df.index = df.index.tz_convert(NY)
+            print(f"  {symbol}: {len(df):,} bars ({feed.value})", flush=True)
+            return df[["open", "high", "low", "close", "volume"]].astype(float)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            print(f"  {symbol}: feed {feed.value} failed: {str(e)[:200]}", flush=True)
+            if "401" in str(e) or "unauthorized" in str(e).lower():
+                break
+    print(f"  {symbol}: SKIPPED ({last})", flush=True)
+    return None
+
+
+def trend_fake(symbol, start, end):
+    """random 5m data with a shared market move (so breadth moves together) - for TEST=1 only; nothing in it is predictable"""
+    import zlib
+    days = pd.bdate_range(start.date(), end.date())
+    base = (days.values[:, None] + np.timedelta64(570, "m") + np.arange(NSLOT)[None, :] * np.timedelta64(5, "m")).ravel()
+    idx = pd.DatetimeIndex(base).tz_localize(NY)
+    n = len(idx)
+    sd_ = zlib.crc32(symbol.encode()) % 100000
+    com = np.random.default_rng(1).normal(0, 1, n * 5)
+    own = np.random.default_rng(sd_ + 3).normal(0, 1, n * 5)
+    x = (0.85 * com + 0.53 * own) * 0.0006
+    gap = np.zeros(n * 5)
+    gap[np.arange(0, n * 5, NSLOT * 5)] = np.random.default_rng(sd_ + 777).normal(0, 0.004, len(days))
+    p = 100 * np.exp(np.cumsum(x + gap)).reshape(n, 5)
+    o = np.r_[100.0, p[:-1, -1]]
+    vol = np.random.default_rng(5).integers(1000, 9000, n).astype(float)
+    return pd.DataFrame({"open": o, "high": np.maximum(p.max(1), o), "low": np.minimum(p.min(1), o), "close": p[:, -1], "volume": vol}, index=idx)
+
+
+def trend_grid(df):
+    """day x slot arrays (NaN where a bar is missing); keeps full days only"""
+    hm = df.index.hour * 60 + df.index.minute
+    df = df[(hm >= 570) & (hm < 960)]
+    k = ((df.index.hour * 60 + df.index.minute - 570) // 5).to_numpy()
+    d = df.index.date
+    days = np.array(sorted(set(d)))
+    di = pd.Index(days).get_indexer(d)
+    G = {}
+    for col in ("open", "high", "low", "close", "volume"):
+        a = np.full((len(days), NSLOT), np.nan)
+        a[di, k] = df[col].to_numpy()
+        G[col] = a
+    full = np.isfinite(G["close"]).sum(1) >= NSLOT - 2
+    for col in G:
+        G[col] = pd.DataFrame(G[col]).ffill(axis=1).to_numpy()[full]
+    return days[full], G
+
+
+def trend_daily(G):
+    dO, dC = G["open"][:, 0], G["close"][:, -1]
+    dH, dL = np.nanmax(G["high"], 1), np.nanmin(G["low"], 1)
+    pC = np.r_[np.nan, dC[:-1]]
+    tr = np.nanmax(np.c_[dH - dL, np.abs(dH - pC), np.abs(dL - pC)], 1)
+    atr = pd.Series(tr).rolling(20).mean().shift(1).to_numpy()          # prior 20 days only
+    return dO, dC, dH, dL, pC, atr
+
+
+def trend_vwap(G):
+    tp = (G["high"] + G["low"] + G["close"]) / 3
+    v = G["volume"]
+    return np.cumsum(tp * v, 1) / np.maximum(np.cumsum(v, 1), 1e-9)
+
+
+def trend_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("START", "2020-01-01").strip() or "2020-01-01").replace(tzinfo=timezone.utc)
+    yr_start = (end.astimezone(NY).date() - timedelta(days=365))
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    get = (lambda s: trend_fake(s, start, end)) if test else (lambda s: trend_fetch(s, start, end))
+    raw = {}
+    for s in list(SYMBOLS) + TREND_BASKET + TREND_OTHER:
+        df = get(s)
+        if df is not None and len(df):
+            raw[s] = trend_grid(df)
+    tgt = [s for s in SYMBOLS if s in raw]
+    if not tgt:
+        sys.exit("no data for the target symbols")
+    days = raw[tgt[0]][0]
+    for s in tgt[1:]:
+        days = np.intersect1d(days, raw[s][0])
+    ND = len(days)
+
+    def aligned(s):
+        dd, G = raw[s]
+        ix = pd.Index(dd).get_indexer(days)
+        out = {}
+        for col, a in G.items():
+            b = np.full((ND, NSLOT), np.nan)
+            ok = ix >= 0
+            b[ok] = a[ix[ok]]
+            out[col] = b
+        return out
+    A = {s: aligned(s) for s in raw}
+    D = {s: trend_daily(A[s]) for s in A}
+    V = {s: trend_vwap(A[s]) for s in A}
+    basket = [s for s in TREND_BASKET if s in A]
+    print(f"days {ND}, targets {tgt}, basket {len(basket)}, other {[s for s in TREND_OTHER if s in A]} ({time.time() - t0:.0f}s)", flush=True)
+
+    # ---------- per target symbol: features at each decision time + outcomes ----------
+    dts = pd.to_datetime(days)
+    dow = dts.dayofweek.to_numpy()
+    third_fri = (dow == 4) & (dts.day.to_numpy() >= 15) & (dts.day.to_numpy() <= 21)
+    mon = dts.to_period("M")
+    pos_in_month = pd.Series(np.arange(ND)).groupby(mon).cumcount().to_numpy()
+    left_in_month = pd.Series(np.arange(ND)).groupby(mon).cumcount(ascending=False).to_numpy()
+
+    def breadth(T):
+        k = T // 5 - 1
+        up, vw, mo = [], [], []
+        for b in basket:
+            dO, dC, dH, dL, pC, atr = D[b]
+            P = A[b]["close"][:, k]
+            up.append(np.sign(P - dO))
+            vw.append(np.sign(P - V[b][:, k]))
+            mo.append((P - dO) / atr)
+        return np.nanmean(up, 0), np.nanmean(vw, 0), np.nanmean(mo, 0)
+
+    def other(s, T, mode):
+        if s not in A:
+            return np.full(ND, np.nan)
+        k = T // 5 - 1
+        dO, dC, dH, dL, pC, atr = D[s]
+        P = A[s]["close"][:, k]
+        return (P - (pC if mode == "pc" else dO)) / atr
+
+    rows = []
+    for s in tgt:
+        G, (dO, dC, dH, dL, pC, atr), vw = A[s], D[s], V[s]
+        C = G["close"]
+        pH, pL = np.r_[np.nan, dH[:-1]], np.r_[np.nan, dL[:-1]]
+        ppC = np.r_[np.nan, np.nan, dC[:-2]]
+        sma20 = pd.Series(dC).rolling(20).mean().shift(1).to_numpy()
+        c5 = pd.Series(dC).shift(6).to_numpy()
+        rng_ = dH - dL
+        prng = np.r_[np.nan, rng_[:-1]]
+        nr7 = (pd.Series(prng).rolling(7).min().to_numpy() == prng).astype(float)
+        inside = np.r_[np.nan, ((dH[:-1] <= np.r_[np.nan, dH[:-2]]) & (dL[:-1] >= np.r_[np.nan, dL[:-2]])).astype(float)]
+        cumv = np.cumsum(G["volume"], 1)
+        avg_cumv = pd.DataFrame(cumv).rolling(20).mean().shift(1).to_numpy()
+        orH, orL = np.nanmax(G["high"][:, :6], 1), np.nanmin(G["low"][:, :6], 1)
+        last30 = (C[:, -1] - C[:, 71]) / atr
+        cl_, op_ = (dC - dL) / np.maximum(rng_, 1e-9), (dO - dL) / np.maximum(rng_, 1e-9)
+        trendday = (((cl_ >= 0.8) & (op_ <= 0.2)) | ((cl_ <= 0.2) & (op_ >= 0.8))).astype(float)      # opened at one end, closed at the other
+        for T in TREND_T:
+            k = T // 5 - 1
+            P = C[:, k]
+            seg = np.c_[dO, C[:, :k + 1]]
+            path = np.nansum(np.abs(np.diff(seg, axis=1)), 1)
+            side = np.nanmean(np.sign(C[:, :k + 1] - vw[:, :k + 1]), 1)
+            bu, bv, bm = breadth(T)
+            f = dict(
+                MOM_OPEN=(P - dO) / atr, MOM_PREVCLOSE=(P - pC) / atr, GAP=(dO - pC) / atr,
+                EFFICIENCY=(P - dO) / np.maximum(path, 1e-9), VWAP_DIST=(P - vw[:, k]) / atr, VWAP_SIDE=side,
+                OR_POSITION=np.clip((P - (orH + orL) / 2) / np.maximum((orH - orL) / 2, 1e-9), -3, 3),
+                RVOL_x_MOM=(P - dO) / atr * (cumv[:, k] / avg_cumv[:, k]),
+                BREADTH_UP=bu, BREADTH_VWAP=bv, BREADTH_MOM=bm,
+                VIXY_DOWN=-other("VIXY", T, "pc"), TLT_MOM=other("TLT", T, "open"), HYG_MOM=other("HYG", T, "open"),
+                PREV_DAY=(pC - ppC) / atr, PREV_CLOSE_LOC=(pC - pL) / np.maximum(pH - pL, 1e-9) * 2 - 1,
+                VS_20DAY=(pC - sma20) / atr, RET_5DAY=(pC - c5) / atr)
+            # size readings in RAW / unit-free terms (dividing both sides by the same ATR fakes a link) - see the size section
+            mag = dict(RECENT_VOL=np.log(atr / pC), RVOL=np.log(cumv[:, k] / avg_cumv[:, k]),
+                       RANGE_SO_FAR=np.log((np.nanmax(G["high"][:, :k + 1], 1) - np.nanmin(G["low"][:, :k + 1], 1)) / pC),
+                       ABS_GAP=np.log(np.abs(dO - pC) / pC + 1e-5), ABS_EFFICIENCY=np.abs((P - dO) / np.maximum(path, 1e-9)),
+                       BREADTH_UNANIMITY=np.abs(bu), NR7=nr7, INSIDE_DAY=inside, VIXY_ABS=np.abs(other("VIXY", T, "pc")))
+            kk = min(k + 12, NSLOT - 1)
+            rest = (C[:, -1] - P) / atr
+            nxt = (C[:, kk] - P) / atr
+            remaining = (np.nanmax(G["high"][:, k + 1:], 1) - np.nanmin(G["low"][:, k + 1:], 1)) / atr if k + 1 < NSLOT else np.full(ND, np.nan)
+            R = pd.DataFrame({**{f"f_{a}": b for a, b in f.items()}, **{f"m_{a}": b for a, b in mag.items()}})
+            R["rest"], R["next60"], R["last30"], R["trendday"] = rest, nxt, last30, trendday
+            R["absrest"] = np.log(np.abs(C[:, -1] - P) / pC + 1e-5)                 # size of the rest-of-day move (log, % of price)
+            R["remrange"] = np.log(remaining * atr / pC)                             # range still to come (log, % of price)
+            R["latr"] = np.log(atr / pC)
+            R["usd_rest"] = C[:, -1] - P
+            R["sym"], R["T"], R["d"] = s, T, np.arange(ND)
+            rows.append(R)
+        # the published effect: first half hour (prev close -> 10:00) and 15:00-15:30 -> last half hour
+        rows.append(pd.DataFrame({"f_FIRST_HALF_HOUR": (C[:, 5] - pC) / atr, "f_3PM_HALF_HOUR": (C[:, 71] - C[:, 59]) / atr,
+                                  "f_DAY_SO_FAR_330": (C[:, 71] - pC) / atr, "last30": last30, "sym": s, "T": -1, "d": np.arange(ND)}))
+    E = pd.concat(rows, ignore_index=True)
+    warm = 25
+    E = E[E["d"] >= warm]
+    is_test = days >= yr_start
+    E["test"] = is_test[E["d"].to_numpy()]
+    E["year"] = pd.to_datetime(days[E["d"].to_numpy()]).year
+
+    # ---------- day-level series: average over SPY/QQQ/IWM (they move together; one observation per day) ----------
+    def day_series(T, cols):
+        g = E[E["T"] == T].groupby("d")[cols].mean()
+        return g
+
+    from math import sqrt
+
+    def spearman(x, y):
+        m = np.isfinite(x) & np.isfinite(y)
+        if m.sum() < 30:
+            return np.nan, 0
+        rx, ry = pd.Series(x[m]).rank().to_numpy(), pd.Series(y[m]).rank().to_numpy()
+        r = np.corrcoef(rx, ry)[0, 1]
+        return r, int(m.sum())
+
+    def tval(r, n):
+        return r * sqrt(max(n - 2, 1)) / sqrt(max(1 - r * r, 1e-9)) if n > 2 and np.isfinite(r) else np.nan
+
+    fcols = [c for c in E.columns if c.startswith("f_")]
+    mcols = [c for c in E.columns if c.startswith("m_")]
+    dirF = [c for c in fcols if c not in ("f_FIRST_HALF_HOUR", "f_3PM_HALF_HOUR", "f_DAY_SO_FAR_330")]
+    res = []
+    tests_dir = []        # (series x, series y) for the shuffle test
+    for T in TREND_T:
+        g = day_series(T, dirF + mcols + ["rest", "next60", "last30", "absrest", "remrange", "trendday", "test", "year", "usd_rest"])
+        g["test"] = g["test"] > 0.5
+        for fc in dirF:
+            for oc in ("rest", "next60") + (("last30",) if T == 30 else ()):
+                x, y = g[fc].to_numpy(), g[oc].to_numpy()
+                r, n = spearman(x, y)
+                rt, nt_ = spearman(x[g["test"].to_numpy()], y[g["test"].to_numpy()])
+                yrs = [spearman(x[(g["year"] == yy).to_numpy()], y[(g["year"] == yy).to_numpy()])[0] for yy in sorted(g["year"].unique())]
+                yrs = [v for v in yrs if np.isfinite(v)]
+                q = pd.qcut(pd.Series(x).rank(method="first"), 5, labels=False)
+                top, bot = y[(q == 4).to_numpy()], y[(q == 0).to_numpy()]
+                ls = np.r_[top, -bot]
+                qt = pd.qcut(pd.Series(x[g["test"].to_numpy()]).rank(method="first"), 5, labels=False) if nt_ >= 30 else None
+                ls_t = np.r_[y[g["test"].to_numpy()][(qt == 4).to_numpy()], -y[g["test"].to_numpy()][(qt == 0).to_numpy()]] if qt is not None else np.array([np.nan])
+                per = []
+                for s in tgt:
+                    gs = E[(E["T"] == T) & (E["sym"] == s)]
+                    per.append(spearman(gs[fc].to_numpy(), gs[oc].to_numpy())[0])
+                res.append(dict(T=T, f=fc[2:], o=oc, ic=r, t=tval(r, n), n=n, ic_t=rt, t_t=tval(rt, nt_), n_t=nt_,
+                                yrs_pos=sum(v > 0 for v in yrs), yrs=len(yrs), ls=np.nanmean(ls), ls_win=np.nanmean(ls > 0),
+                                ls_t=np.nanmean(ls_t), per=per))
+                tests_dir.append((x, y))
+    RS = pd.DataFrame(res)
+    # magnitude: does it predict a BIG rest of day / a trend day (either direction)?
+    mres = []
+    tests_mag = []
+    def resid(v, la):
+        """remove what recent volatility (log ATR) already explains"""
+        m = np.isfinite(v) & np.isfinite(la)
+        out = np.full(len(v), np.nan)
+        if m.sum() > 30:
+            b = np.polyfit(la[m], v[m], 1)
+            out[m] = v[m] - np.polyval(b, la[m])
+        return out
+    for T in TREND_T:
+        g = day_series(T, mcols + ["absrest", "remrange", "trendday", "test", "latr"])
+        tm = (g["test"] > 0.5).to_numpy()
+        base_td = g["trendday"].mean()
+        la = g["latr"].to_numpy()
+        for mc in mcols:
+            x = g[mc].to_numpy() if mc == "m_RECENT_VOL" else resid(g[mc].to_numpy(), la)
+            for oc in ("absrest", "remrange"):
+                y = g[oc].to_numpy() if mc == "m_RECENT_VOL" else resid(g[oc].to_numpy(), la)
+                r, n = spearman(x, y)
+                rt, nt_ = spearman(x[tm], y[tm])
+                tests_mag.append((x, y))
+                q = pd.qcut(pd.Series(x).rank(method="first"), 5, labels=False).to_numpy()
+                mres.append(dict(T=T, f=mc[2:], o=oc, ic=r, t=tval(r, n), ic_t=rt, t_t=tval(rt, nt_),
+                                 td_top=g["trendday"].to_numpy()[q == 4].mean(), td_bot=g["trendday"].to_numpy()[q == 0].mean(), td_base=base_td))
+    MS = pd.DataFrame(mres)
+
+    # ---------- the shuffle test: how big does the best t get when the days are shuffled (no real link)? ----------
+    def max_abs_t(tests, perm_rng, nperm):
+        mx = []
+        prepared = []
+        for x, y in tests:
+            m = np.isfinite(x) & np.isfinite(y)
+            rx = pd.Series(np.where(m, x, np.nan)).rank().to_numpy()
+            ry = pd.Series(np.where(m, y, np.nan)).rank().to_numpy()
+            prepared.append((rx, ry, m))
+        n_all = len(prepared[0][0])
+        for _ in range(nperm):
+            p = perm_rng.permutation(n_all)
+            best = 0.0
+            for rx, ry, m in prepared:
+                yy = ry[p]
+                mm = m & np.isfinite(yy)
+                if mm.sum() < 30:
+                    continue
+                r = np.corrcoef(rx[mm], yy[mm])[0, 1]
+                best = max(best, abs(tval(r, int(mm.sum()))))
+            mx.append(best)
+        return np.quantile(mx, 0.95), np.max(mx)
+    prng_ = np.random.default_rng(23)
+    NP = int(os.getenv("TREND_PERM", "200"))
+    luck_dir95, luck_dir_max = max_abs_t(tests_dir, prng_, NP)
+    luck_mag95, luck_mag_max = max_abs_t(tests_mag, prng_, NP)
+
+    # ---------- the published effect (last half hour) ----------
+    g1 = E[E["T"] == -1].groupby("d")[["f_FIRST_HALF_HOUR", "f_3PM_HALF_HOUR", "f_DAY_SO_FAR_330", "last30", "test"]].mean()
+    pub = []
+    for fc in ("f_FIRST_HALF_HOUR", "f_3PM_HALF_HOUR", "f_DAY_SO_FAR_330"):
+        x, y = g1[fc].to_numpy(), g1["last30"].to_numpy()
+        r, n = spearman(x, y)
+        tm = (g1["test"] > 0.5).to_numpy()
+        rt, nt_ = spearman(x[tm], y[tm])
+        follow = np.sign(x) * y
+        pub.append((fc[2:], r, tval(r, n), n, rt, tval(rt, nt_), np.nanmean(follow), np.nanmean(follow > 0), np.nanmean(follow[tm])))
+
+    # ---------- out of sample: train on everything BEFORE the last 12 months, grade ONLY on the last 12 months ----------
+    oos = []
+    for T in (30, 60, 90):
+        g = day_series(T, dirF + mcols + ["rest", "absrest", "remrange", "trendday", "test", "usd_rest"])
+        tr_, te_ = g[g["test"] <= 0.5], g[g["test"] > 0.5]
+        if len(tr_) < 200 or len(te_) < 60:
+            continue
+        X = tr_[dirF].to_numpy()
+        mu, sdv = np.nanmean(X, 0), np.nanstd(X, 0) + 1e-9
+        Z = np.nan_to_num((X - mu) / sdv)
+        y = tr_["rest"].to_numpy()
+        lam = 50.0
+        w = np.linalg.solve(Z.T @ Z + lam * np.eye(Z.shape[1]), Z.T @ np.nan_to_num(y))
+        Zt = np.nan_to_num((te_[dirF].to_numpy() - mu) / sdv)
+        pred = Zt @ w
+        yt = te_["rest"].to_numpy()
+        r, n = spearman(pred, yt)
+        q = pd.qcut(pd.Series(pred).rank(method="first"), 5, labels=False).to_numpy()
+        lsx = np.r_[yt[q == 4], -yt[q == 0]]
+        trade = np.sign(pred) * yt
+        # best single feature picked on TRAIN, graded on TEST
+        best_f, best_t = None, 0
+        for fc in dirF:
+            rr, nn = spearman(tr_[fc].to_numpy(), y)
+            if np.isfinite(rr) and abs(tval(rr, nn)) > abs(best_t):
+                best_f, best_t = fc, tval(rr, nn)
+        rb, nb = spearman(te_[best_f].to_numpy(), yt)
+        sgn = np.sign(best_t)
+        tb = sgn * np.sign(te_[best_f].to_numpy()) * yt
+        # trend-day (magnitude) model
+        Xm = tr_[mcols].to_numpy()
+        mum, sdm = np.nanmean(Xm, 0), np.nanstd(Xm, 0) + 1e-9
+        Zm = np.nan_to_num((Xm - mum) / sdm)
+        wm = np.linalg.solve(Zm.T @ Zm + lam * np.eye(Zm.shape[1]), Zm.T @ np.nan_to_num(tr_["remrange"].to_numpy() - np.nanmean(tr_["remrange"])))
+        pm = np.nan_to_num((te_[mcols].to_numpy() - mum) / sdm) @ wm
+        rm, nm = spearman(pm, te_["remrange"].to_numpy())
+        qm = pd.qcut(pd.Series(pm).rank(method="first"), 5, labels=False).to_numpy()
+        top_w = sorted(zip(dirF, w), key=lambda z: -abs(z[1]))[:5]
+        oos.append(dict(T=T, ic=r, t=tval(r, n), n=n, ls=np.nanmean(lsx), lsw=np.nanmean(lsx > 0), trade=np.nanmean(trade), tradew=np.nanmean(trade > 0),
+                        best=best_f[2:], best_tr=best_t, best_ic=rb, best_t=tval(rb, nb), best_trade=np.nanmean(tb), best_w=np.nanmean(tb > 0),
+                        mag_ic=rm, mag_t=tval(rm, nm), td_top=te_["trendday"].to_numpy()[qm == 4].mean(), td_base=te_["trendday"].mean(),
+                        weights=", ".join(f"{a[2:]} {b:+.2f}" for a, b in top_w)))
+
+    # ---------- report ----------
+    TN = {30: "10:00", 60: "10:30", 90: "11:00", 150: "12:00", 210: "1:00"}
+    first_day, last_day = days[warm], days[-1]
+    md = [f"# WHAT PREDICTS A TREND? - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {first_day} to {last_day} ({ND - warm} days), targets {', '.join(tgt)}, 5-minute bars, regular hours. Breadth basket "
+          f"{len(basket)} symbols ({', '.join(basket)}); other markets {', '.join(s for s in TREND_OTHER if s in A)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min. LAST 12 MONTHS = from {yr_start}.",
+          "**Question:** at 10:00 / 10:30 / 11:00 / 12:00 / 1:00, does anything we can see predict the REST OF THE DAY (to the 4:00 close)? "
+          "Everything is in daily ATR (the 20-day average daily range). **IC** = rank correlation between the reading and the rest-of-day "
+          "move, one observation per day (SPY / QQQ / IWM averaged - they move together). **t** = IC / its noise. **Long top / short "
+          "bottom** = go long on the days in the top 20% of the reading, short on the bottom 20%, hold to the close: average result in daily "
+          "ATR and how often it was green. **Years +** = in how many calendar years the IC was positive.",
+          f"**Luck bar (shuffle test):** the days were shuffled {NP} times so no reading can predict anything; the best |t| among all the "
+          f"direction tests was above **{luck_dir95:.1f}** only 5% of the time (max {luck_dir_max:.1f}). For the trend-day (size) tests: "
+          f"**{luck_mag95:.1f}** (max {luck_mag_max:.1f}). A reading is REAL only above that bar AND positive in most years AND in the "
+          "last 12 months.", ""]
+    stable = ((RS["ic"] > 0) & (RS["yrs_pos"] >= RS["yrs"] - 1)) | ((RS["ic"] < 0) & (RS["yrs"] - RS["yrs_pos"] >= RS["yrs"] - 1))
+    real = RS[(RS["t"].abs() >= luck_dir95) & (np.sign(RS["ic"]) == np.sign(RS["ic_t"])) & stable]
+    md.append("## The answer in 30 seconds")
+    if len(real):
+        md.append(f"- **Readings that predict the rest-of-day DIRECTION (above the luck bar, same sign in most years AND the last 12 months): {len(real)}**")
+        for z in real.sort_values("t", key=lambda v: -v.abs()).head(10).itertuples():
+            md.append(f"  - **{z.f}** at {TN[z.T]} -> {z.o}: IC {z.ic:+.3f} (t {z.t:.1f}), last 12 months IC {z.ic_t:+.3f} (t {z.t_t:.1f}), "
+                      f"years positive {z.yrs_pos}/{z.yrs}; long top 20% / short bottom 20% = {z.ls:+.3f} ATR, green {100 * z.ls_win:.0f}% "
+                      f"(last 12 months {z.ls_t:+.3f})")
+    else:
+        md.append("- **Direction: nothing passed the luck bar with a stable sign.**")
+    realm = MS[(MS["t"].abs() >= luck_mag95) & (np.sign(MS["ic"]) == np.sign(MS["ic_t"]))]
+    if len(realm):
+        md.append(f"- **Readings that predict a BIG rest of day / trend day (size, not direction): {len(realm)}**")
+        for z in realm.sort_values("t", key=lambda v: -v.abs()).head(8).itertuples():
+            md.append(f"  - **{z.f}** at {TN[z.T]} -> {z.o}: IC {z.ic:+.3f} (t {z.t:.1f}), last 12 months {z.ic_t:+.3f} (t {z.t_t:.1f}); "
+                      f"trend days in the top 20% {100 * z.td_top:.0f}% vs bottom 20% {100 * z.td_bot:.0f}% (all days {100 * z.td_base:.0f}%)")
+    else:
+        md.append("- **Size / trend day: nothing passed the luck bar.**")
+    for o in oos:
+        md.append(f"- **Combined model at {TN[o['T']]}, trained on 2020 - last year, graded ONLY on the last 12 months:** direction IC "
+                  f"{o['ic']:+.3f} (t {o['t']:.1f}); trading its sign every day = {o['trade']:+.3f} ATR/day, green {100 * o['tradew']:.0f}%; "
+                  f"trend days when it calls a BIG day: {100 * o['td_top']:.0f}% vs {100 * o['td_base']:.0f}% normally (size IC {o['mag_ic']:+.3f}, t {o['mag_t']:.1f}).")
+    md.append("")
+    md += ["## Direction: every reading x every time (rest of day unless noted)",
+           "| Reading | Time | Outcome | IC (t) all years | Last 12 months IC (t) | Years + | Long top / short bottom 20% (ATR, green) | Last 12 months L/S | " + " / ".join(tgt) + " IC |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for z in RS.sort_values(["f", "T", "o"]).itertuples():
+        md.append(f"| {z.f} | {TN[z.T]} | {z.o} | {z.ic:+.3f} ({z.t:.1f}) | {z.ic_t:+.3f} ({z.t_t:.1f}) | {z.yrs_pos}/{z.yrs} | {z.ls:+.3f} ({100 * z.ls_win:.0f}%) | "
+                  f"{z.ls_t:+.3f} | " + " / ".join(f"{v:+.3f}" for v in z.per) + " |")
+    md += ["", "## Size: does it predict a BIG rest of day (either way) / a trend day?",
+           "absrest = size of the move from here to the close, remrange = the range still to come (both in % of price, log). Every size reading "
+           "except RECENT_VOL is first cleaned of what recent volatility (20-day ATR) already explains, so the IC is what it ADDS. "
+           "Trend day = opened near one end of the day's range and closed near the other (top / bottom 20%).",
+           "| Reading | Time | Outcome | IC (t) | Last 12 months IC (t) | Trend days: top 20% / bottom 20% / all |", "|---|---|---|---|---|---|"]
+    for z in MS.sort_values(["f", "T", "o"]).itertuples():
+        md.append(f"| {z.f} | {TN[z.T]} | {z.o} | {z.ic:+.3f} ({z.t:.1f}) | {z.ic_t:+.3f} ({z.t_t:.1f}) | {100 * z.td_top:.0f}% / {100 * z.td_bot:.0f}% / {100 * z.td_base:.0f}% |")
+    md += ["", "## The published effect: does the first half hour (or 3:00-3:30) predict the LAST half hour?",
+           "| Reading | IC (t) all years | Last 12 months IC (t) | Follow it in the last 30 min (ATR, green) | Last 12 months |", "|---|---|---|---|---|"]
+    for a_, r_, t_, n_, rt_, tt_, fo, fw, fot in pub:
+        md.append(f"| {a_} | {r_:+.3f} ({t_:.1f}) | {rt_:+.3f} ({tt_:.1f}) | {fo:+.3f} ({100 * fw:.0f}%) | {fot:+.3f} |")
+    md += ["", "## Out of sample - trained on 2020 to last year, graded ONLY on the last 12 months",
+           "| Time | Model direction IC (t) | Trade its sign daily (ATR, green) | Long top / short bottom 20% (ATR, green) | Best single reading (picked on train) -> test IC (t), trade | Trend days when it calls BIG vs all | Biggest weights |",
+           "|---|---|---|---|---|---|---|"]
+    for o in oos:
+        md.append(f"| {TN[o['T']]} | {o['ic']:+.3f} ({o['t']:.1f}) | {o['trade']:+.3f} ({100 * o['tradew']:.0f}%) | {o['ls']:+.3f} ({100 * o['lsw']:.0f}%) | "
+                  f"{o['best']} (train t {o['best_tr']:.1f}) -> {o['best_ic']:+.3f} ({o['best_t']:.1f}), {o['best_trade']:+.3f} ({100 * o['best_w']:.0f}%) | "
+                  f"{100 * o['td_top']:.0f}% vs {100 * o['td_base']:.0f}% | {o['weights']} |")
+    # calendar
+    g = day_series(60, ["rest", "absrest", "trendday"])
+    dd = g.index.to_numpy()
+    cal = [("Monday", dow[dd] == 0), ("Tuesday", dow[dd] == 1), ("Wednesday", dow[dd] == 2), ("Thursday", dow[dd] == 3), ("Friday", dow[dd] == 4),
+           ("Monthly options expiration (3rd Friday)", third_fri[dd]), ("First 2 days of the month", pos_in_month[dd] < 2),
+           ("Last 2 days of the month", left_in_month[dd] < 2)]
+    md += ["", "## Calendar (from 10:30 to the close)", "| Days | N | Rest of day (ATR, avg) | Size of the move (ATR) | Trend days |", "|---|---|---|---|---|"]
+    for lab, m in cal:
+        gg = g[m]
+        md.append(f"| {lab} | {len(gg)} | {gg['rest'].mean():+.3f} | {gg['absrest'].mean():.3f} | {100 * gg['trendday'].mean():.0f}% |")
+    md.append(f"| ALL days | {len(g)} | {g['rest'].mean():+.3f} | {g['absrest'].mean():.3f} | {100 * g['trendday'].mean():.0f}% |")
+    md += ["", "**Readings:** MOM_OPEN = move since the open; MOM_PREVCLOSE = since yesterday's close; GAP = the opening gap; EFFICIENCY = "
+           "net move / total path since the open (1 = straight line); VWAP_DIST / VWAP_SIDE = distance from VWAP / share of 5m closes above it; "
+           "OR_POSITION = where price is vs the first 30 minutes' range; RVOL_x_MOM = move since open x relative volume; BREADTH_UP / "
+           "BREADTH_VWAP / BREADTH_MOM = share of the 20-stock/sector basket up on the day / above VWAP / their average move; VIXY_DOWN = VIX "
+           "futures falling; TLT_MOM / HYG_MOM = bonds / credit since the open; PREV_DAY, PREV_CLOSE_LOC, VS_20DAY, RET_5DAY = the daily "
+           "backdrop. Size readings: RVOL, IB_WIDTH (range so far), ABS_GAP, ABS_EFFICIENCY, BREADTH_UNANIMITY, NR7 / INSIDE_DAY (yesterday "
+           "compressed), VIXY_ABS, RECENT_VOL (20-day ATR as % of price). **Trend day** = opened in the bottom 20% of the day's range and closed in the top 20% (or the reverse)."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/trend_{stamp}.md", f"{OUT}/trend_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
