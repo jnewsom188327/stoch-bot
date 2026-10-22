@@ -444,7 +444,8 @@ def main():
     if MODE == "solo":
         return solo_main()
     if MODE == "fire":
-        return fire_main()
+        fire_main(eth=True)          # extended hours ON (4am-8pm candles feed the indicator) - like your chart
+        return fire_main(eth=False)  # regular hours only
     if MODE == "mtf":
         return crun_main(mtf=True)
     if MODE == "crun":
@@ -9597,6 +9598,14 @@ FIRE_CHECKS = {"SPY-2m A: 80/20, 3+1, flow holds 2, avg 10, wait 2, block, candl
                "SPY-2m B: 90/20, 3+1, flow holds 2, avg 10, wait 2, block, candle OFF":
                dict(hi=90, lo=20, pl=3, pr=1, ma=10, need="flow", conf=2, trend="block", bar=0, wait=2)}
 FIRE_NEED_TV = {"pivot": "fire AT the pivot (no flow wait)", "flow": "flow line agrees", "glow": "glowing line (flow + TTM)"}
+# YELLOW entries (what the chart lines showed on 10/21): the stretched side DROPS FAST (fell DROP+ points in 2 candles from FROM+ =
+# the yellow color) -> LONG on fear / SHORT on greed, fired on the first candle within WAIT candles where the TTM rule agrees.
+YEL_FROM = (60, 70, 80, 90)
+YEL_DROP = (15, 25, 35)
+YEL_OTHER = (101, 50)
+YEL_TTM = ("none", "rising candle", "rising 2 in a row", "yellow (below 0, rising)")
+YEL_WAIT = (0, 2, 3, 5)
+YEL_SHOT = dict(fr=60, dp=25, ot=101, ttm="rising candle", trend="off", wait=3)
 FIRE_TREND_TV = {"off": "Off", "block": "Block against a solid trend line", "with": "Only with the trend line"}
 
 
@@ -9679,7 +9688,10 @@ def fire_score(fL, fS, P):
     return r
 
 
-def fire_main():
+_FIRE_DATA = {}
+
+
+def fire_main(eth=False):
     end = datetime.now(timezone.utc) - timedelta(days=1)
     yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
     mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
@@ -9694,10 +9706,14 @@ def fire_main():
     t0 = time.time()
     sym = SYMBOLS[0]
     print(f"\n=== {sym} (FIRE test uses the first ticker only) ===", flush=True)
-    df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+    if sym not in _FIRE_DATA:
+        _FIRE_DATA[sym] = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+    df1, feed = _FIRE_DATA[sym]
+    SESS = "EXTENDED HOURS ON (4am-8pm candles feed the indicator, like your chart)" if eth else "REGULAR HOURS ONLY (9:30-4)"
     allR, yours, speed, ex, checks = [], {}, {}, {}, {}
+    allY, yshot = [], {}
     for tf in tfs:
-        df = to_tf(df1, rth_only=True, mins=tf)                     # regular hours, like your chart
+        df = to_tf(df1, rth_only=not eth, mins=tf)
         ind = indicators(df, 13, 34, True)
         o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
         n = len(o)
@@ -9795,6 +9811,40 @@ def fire_main():
                                     if len(setL) and len(fL):
                                         arm = setL[np.maximum(np.searchsorted(setL, fL, side="right") - 1, 0)]
                                         speed[tf] = float(np.median(fL - arm) + pr)
+        # ---- YELLOW entries: fear (long) / greed (short) DROPPING FAST + the TTM rule
+        mR = S["m"]
+        m1 = np.r_[np.nan, mR[:-1]]
+        ttm_opts = {"none": (np.ones(n, bool), np.ones(n, bool)), "rising candle": (mR > m1, mR < m1),
+                    "rising 2 in a row": (tState == 1, tState == -1),
+                    "yellow (below 0, rising)": ((mR < 0) & (mR > m1), (mR > 0) & (mR < m1))}
+        F2, G2 = np.r_[np.nan, np.nan, F[:-2]], np.r_[np.nan, np.nan, G[:-2]]
+        ynt = {(tn, tr): (fire_next_true(tu & trend_ok[(tr, 1)]), fire_next_true(td & trend_ok[(tr, -1)]))
+               for tn, (tu, td) in ttm_opts.items() for tr in FIRE_TREND}
+        ycnt = 0
+        for fr in YEL_FROM:
+            for dp in YEL_DROP:
+                dfL = (F2 >= fr) & (F <= F2 - dp)
+                dfS = (G2 >= fr) & (G <= G2 - dp)
+                stL0 = dfL & ~np.r_[False, dfL[:-1]] & okw
+                stS0 = dfS & ~np.r_[False, dfS[:-1]] & okw
+                for ot in YEL_OTHER:
+                    setL = np.nonzero(stL0 & (G < ot))[0]
+                    setS = np.nonzero(stS0 & (F < ot))[0]
+                    for (tn, tr), (ntL, ntS) in ynt.items():
+                        for w in YEL_WAIT:
+                            if tn == "none" and tr == "off" and w > 0:
+                                continue
+                            fL, fS = fire_events(setL, setS, ntL, ntS, w, okw)
+                            r = fire_score(fL, fS, P)
+                            if r is None:
+                                continue
+                            ycnt += 1
+                            st_ = dict(tf=tf, fr=fr, dp=dp, ot=ot, ttm=tn, trend=tr, wait=w)
+                            if all(st_[k_] == v_ for k_, v_ in YEL_SHOT.items()):
+                                yshot[tf] = {**st_, **r}
+                            if r["n"] >= MIN_N:
+                                allY.append({**st_, **r})
+        print(f"  {sym} {tf}m: {ycnt:,} YELLOW settings scored ({time.time() - t0:.0f}s)", flush=True)
         ex[tf] = dict(P=P, F=F, G=G, rules={tuple(sorted(rp.items())): nt for rp, nt in rules}, okw=okw)
         print(f"  {sym} {tf}m: {cnt:,} settings scored ({time.time() - t0:.0f}s)", flush=True)
     del df1
@@ -9883,8 +9933,8 @@ def fire_main():
     HEAD = ("| Chart | Settings | Fires (per day) | RUN ATR (vs random, t) | 2:1 odds (vs random, t) | 3:1 odds | TRAIL run | Candles to +1 ATR | "
             "$ run / share | 1st half / 2nd half run vs random | Longs / Shorts run vs random |")
     held = cand[cand["held"] == True]
-    md = [f"# FLOW SUITE 2 FIRE TAGS - EVERY SETTING - {sym} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
-          f"Charts {', '.join(f'{t}m' for t in tfs)} (regular hours, like your chart), {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. DATA ONLY. "
+    md = [f"# FLOW SUITE 2 FIRE TAGS - EVERY SETTING - {sym} - {SESS} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(f'{t}m' for t in tfs)} - {SESS}; only tags 9:30-15:30 are scored, {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. DATA ONLY. "
           f"Runtime {(time.time() - t0) / 60:.0f} min. Settings combinations scored: {len(R):,} (with {MIN_N}+ fires).",
           "**The FIRE tag exactly like FLOW SUITE 2:** a Vix Fix pivot arms it (LONG = fear peaks at HI+ and turns down while greed was under "
           "LO; SHORT = mirror), it fires on the first candle within WAIT candles that passes the fire rule, the trend line filter and the "
@@ -9906,6 +9956,20 @@ def fire_main():
     else:
         md.append(f"- **HELD UP: none** - no setting improved BOTH the run and the 2:1 odds at t {T_PASS:g} with every check.")
     md.append(f"- Best combined t anywhere: {R['score'].max():.1f}.")
+    # ---- YELLOW verdicts (blind test both ways, like the pivot tags)
+    Y = pd.DataFrame(allY)
+    yver = {}
+    if len(Y):
+        for tf in tfs:
+            Yt1 = Y[(Y["tf"] == tf) & (Y["h1_n"] >= MIN_N // 2)]
+            Yt2 = Y[(Y["tf"] == tf) & (Y["h2_n"] >= MIN_N // 2)]
+            if len(Yt1) and len(Yt2):
+                zf = Yt1.sort_values("h1_score", ascending=False).iloc[0]
+                zb = Yt2.sort_values("h2_score", ascending=False).iloc[0]
+                yver[tf] = (zf.h2_t_run1 >= WF_T and zf.h2_t_p2 >= WF_T * 0.75 and zb.h1_t_run1 >= WF_T and zb.h1_t_p2 >= WF_T * 0.75, zf, zb)
+    md.append(f"- **YELLOW entries (stretched side DROPPING FAST + TTM rule) - blind test both ways:** "
+              + (" | ".join(f"{tf}m {'PASS ✅' if v_[0] else 'FAIL'}" for tf, v_ in yver.items()) if yver else "not enough fires")
+              + (f". Best combined t anywhere: {Y['score'].max():.1f}." if len(Y) else ""))
     md.append(f"- **THE REAL TEST - pick the best settings on 6 months, trade them blind on the other 6 (both ways round).** "
               f"PASS = the blind half beats random with t {WF_T:g}+ on the run (and {WF_T * 0.75:g}+ on the 2:1 odds) BOTH ways:")
     for tf in tfs:
@@ -9956,6 +10020,40 @@ def fire_main():
         if e["k"] in ("ma", "conf") and vv == 0:
             vs = "n/a (fire at pivot)"
         md.append(f"| {KN[e['k']]} | {vs} | {e['best']:.1f} | {e['med']:.1f} | {e['run']:+.2f} | {100 * e['top']:.0f}% |")
+    def ytv(z):
+        return (f"fear/greed fell {z.dp:g}+ in 2 candles from {z.fr:g}+ (yellow), other side under "
+                f"{'OFF' if z.ot > 100 else f'{z.ot:g}'}, TTM: {z.ttm}, wait {z.wait}, trend filter {FIRE_TREND_TV[z.trend]}")
+
+    def yrow(z, extra=""):
+        return (f"| {z.tf}m | {ytv(z)} | {z.n} ({z.n / 250:.1f}/day) | {z.raw_run1:.2f} ({z.run1:+.2f}, t {z.t_run1:.1f}) | "
+                f"{100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}, t {z.t_p2:.1f}) | {100 * z.raw_p3:.0f}% | {z.raw_spd:.0f} | ${z.raw_usd1:.2f} | "
+                f"{z.h1_run1:+.2f} / {z.h2_run1:+.2f} | {z.L_run1:+.2f} / {z.S_run1:+.2f} |{extra}")
+    YH = ("| Chart | Settings | Fires (per day) | RUN ATR (vs random, t) | 2:1 odds (vs random, t) | 3:1 odds | Candles to +1 ATR | $ run / share | "
+          "1st half / 2nd half run vs random | Longs / Shorts run vs random |")
+    md += ["", "## YELLOW ENTRIES - the stretched side DROPS FAST (the yellow color on your lines) + the TTM line agrees",
+           "LONG = fear fell DROP+ points in 2 candles from FROM+ (fear line turns yellow); SHORT = the same on greed. It fires on the first "
+           "candle within WAIT candles where the TTM rule agrees (none / the TTM candle rising / rising 2 in a row = background / yellow = below "
+           "zero and rising, for longs). Same scoring as above.", "",
+           "### The rule from your 10/21 screenshots (from 60, fell 25+, TTM candle rising, wait 3, no filters)", YH, "|" + "---|" * 10]
+    for tf in tfs:
+        if tf in yshot:
+            md.append(yrow(pd.Series(yshot[tf])))
+    if len(Y):
+        md += ["", "### Blind test (picked on one half, judged on the other)", "| Chart | Verdict | Picked on months 1-6 -> months 7-12 | Picked on months 7-12 -> months 1-6 |",
+               "|---|---|---|---|"]
+        for tf, (ok_, zf, zb) in yver.items():
+            md.append(f"| {tf}m | {'PASS ✅' if ok_ else 'FAIL'} | {ytv(zf)}: run {zf.h2_run1:+.2f} (t {zf.h2_t_run1:.1f}), 2:1 {100 * zf.h2_p2:+.0f} pts (t {zf.h2_t_p2:.1f}) | "
+                      f"{ytv(zb)}: run {zb.h1_run1:+.2f} (t {zb.h1_t_run1:.1f}), 2:1 {100 * zb.h1_p2:+.0f} pts (t {zb.h1_t_p2:.1f}) |")
+        md += ["", "### Top 20 YELLOW settings", YH, "|" + "---|" * 10]
+        for z in Y.sort_values("score", ascending=False).head(20).itertuples():
+            md.append(yrow(z))
+        md += ["", "### Each YELLOW setting value across all combinations (best t / typical t / share of the top 100)",
+               "| Setting | Value | Best t | Typical t | In top 100 |", "|---|---|---|---|---|"]
+        top100 = Y.nlargest(100, "score")
+        for k_, nm_ in (("fr", "From at least"), ("dp", "Fell at least"), ("ot", "Other side under"), ("ttm", "TTM rule"), ("trend", "Trend filter"), ("wait", "Wait")):
+            for v_, g_ in Y.groupby(k_):
+                vs = "off" if (k_ == "ot" and v_ > 100) else FIRE_TREND_TV.get(v_, v_) if k_ == "trend" else v_
+                md.append(f"| {nm_} | {vs} | {g_['score'].max():.1f} | {g_['score'].median():.1f} | {100 * (top100[k_] == v_).mean():.0f}% |")
     md += ["", "## Cooldown (candles before another fire the same way) on the top 15 settings",
            "| Chart | Settings | " + " | ".join(f"cooldown {cl}: fires, run vs random (t)" for cl in FIRE_COOL) + " |", "|" + "---|" * (2 + len(FIRE_COOL))]
     for z, rr in cool_rows:
@@ -9969,7 +10067,8 @@ def fire_main():
     text = "\n".join(md + [""])
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
-    for path in (f"{OUT}/fire_{stamp}.md", f"{OUT}/fire_latest.md"):
+    sx = "eth" if eth else "rth"
+    for path in (f"{OUT}/fire_{sx}_{stamp}.md", f"{OUT}/fire_{sx}_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm = os.getenv("GITHUB_STEP_SUMMARY")
