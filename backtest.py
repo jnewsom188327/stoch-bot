@@ -1,5 +1,8 @@
 """
-OPENING RANGE - PAYOFF EDGE, SPY / QQQ / IWM (MODE=orb, the default) - first 5/15/30-minute direction, range breakouts and 10:30
+THE DEFAULT RUN (MODE=orb+vspike) = the OPENING RANGE payoff test, then DROPS & POPS (volume-spike candles, 1m / 3m / 5m, last 12
+  months + the year before) - two summaries in one run. DATA ONLY.
+DROPS & POPS (MODE=vspike) - volume-spike candles: do they continue or reverse?
+OPENING RANGE - PAYOFF EDGE, SPY / QQQ / IWM (MODE=orb) - first 5/15/30-minute direction, range breakouts and 10:30
   momentum, small fixed stop, ride to the close / R targets, relative-volume filters, vs coin-flip direction. DATA ONLY.
 WHAT PREDICTS A TREND? - 2020 TO NOW, 5m (MODE=trend) - day context, breadth (20 sector ETFs / mega caps), VIXY /
   TLT / HYG, VWAP, opening range, relative volume, daily backdrop, calendar -> rest of day; shuffle-test luck bar; out of sample. DATA ONLY.
@@ -129,7 +132,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "orb").strip().lower() or "orb"
+MODE = os.getenv("MODE", "orb+vspike").strip().lower() or "orb+vspike"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -429,6 +432,10 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "orb+vspike":
+        return orb_and_vspike_main()
+    if MODE == "vspike":
+        return vspike_main()
     if MODE == "orb":
         return orb_main()
     if MODE == "trend":
@@ -8603,7 +8610,7 @@ def orb_main():
     S = pd.DataFrame(out)
     T_PASS = float(os.getenv("ORB_T", "3.0"))
     S["held"] = (S["t"] >= T_PASS) & (S["t_t"] >= 2.0) & (S["yrs_pos"] >= S["yrs"] - 1) & (S["edge"] > 0) & (S["edge_t"] > 0) & (S["n_t"] >= 100)
-    md = [f"# OPENING RANGE / STOCKS IN PLAY - PAYOFF EDGE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+    md = [f"# OPENING RANGE - PAYOFF EDGE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
           f"Data {days[0]} to {days[-1]} ({ND} days), 5-minute bars, regular hours, universe ({len(syms)}): {', '.join(syms)}. LAST 12 MONTHS = from "
           f"{yr_start} ({ndays_t} days). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. ${ORB_SLIP:.2f}/share slippage each way included.",
           "**Why this test:** direction is ~50/50 on every reading we tried; the SIZE of the day is predictable (relative volume, gap, range so "
@@ -8678,6 +8685,233 @@ def orb_main():
     if sm:
         with open(sm, "a") as f:
             f.write(text + "\n")
+
+
+# ================================================================ DROPS & POPS: VOLUME-SPIKE CANDLES (MODE=vspike) - 1m / 3m / 5m
+# A spike = a candle whose volume is X times the NORMAL volume for that time of day (median of the same candle over the last 20 days,
+# so the open / close volume is not a "spike"). POP = green spike candle, DROP = red. Question: does price CONTINUE (follow the
+# candle) or REVERSE (fade it)? Split by spike size, candle size, candle shape (strong close vs rejection wick), and where it happens
+# (breaking to a new 30-candle high / low vs inside the range). Last 12 months is the main score; the 12 months before it must agree.
+VSP_TFS_DEF = "1,3,5"
+VSP_MULT = (2.0, 3.0, 5.0)
+VSP_SIZE = (0.0, 0.5, 1.0)                     # candle body at least this many ATR (14 candles)
+VSP_SHAPE = ("ANY", "STRONG CLOSE", "REJECTION WICK")
+VSP_LOC = ("ANYWHERE", "NEW 30-CANDLE HIGH/LOW", "INSIDE THE RANGE")
+VSP_K = (1, 2, 3, 5, 10, 20)
+
+
+def vspike_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    prev_start = yr_start - pd.Timedelta(days=365)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (prev_start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("VSP_TFS", VSP_TFS_DEF).split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(29)
+    offs = np.arange(20)
+    KK = len(VSP_K)
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            v = df["volume"].to_numpy()
+            n = len(o)
+            ts = df.index
+            per = np.where(ts >= yr_start, 2, np.where(ts >= prev_start, 1, 0))         # 2 = last 12 months, 1 = the year before
+            half = np.where(ts < mid, 0, 1)
+            dcode = pd.factorize(day)[0]
+            dord = np.array([d_.toordinal() for d_ in day])
+            lastok = pd.Series(np.where(hm < 1555, np.arange(n), -1)).groupby(dcode).transform("max").to_numpy()
+            ok = (per >= 1) & (hm >= 935) & (hm < 1530) & (np.arange(n) + 1 < n)
+            ok[:-1] &= dcode[1:] == dcode[:-1]
+            # normal volume for this time of day = median of the same candle over the previous 20 days
+            vs = pd.Series(v)
+            norm = vs.groupby(hm).transform(lambda s: s.rolling(20, min_periods=10).median().shift(1)).to_numpy()
+            rv = v / np.where(norm > 0, norm, np.nan)
+            body = c - o
+            rngc = h - l
+            sd_c = np.sign(body)
+            pos = np.where(rngc > 0, (c - l) / rngc, 0.5)                 # where it closed in its own candle (1 = at the high)
+            strong = np.where(sd_c > 0, pos >= 0.75, pos <= 0.25)
+            wick = np.where(sd_c > 0, pos <= 0.5, pos >= 0.5)              # a pop that closed in its lower half (rejected), etc.
+            hh30 = pd.Series(h).shift(1).rolling(30, min_periods=10).max().to_numpy()
+            ll30 = pd.Series(l).shift(1).rolling(30, min_periods=10).min().to_numpy()
+            newx = np.where(sd_c > 0, h > hh30, l < ll30)
+
+            def outcomes(idx, sd):
+                e = idx + 1
+                le = lastok[e]
+                en = o[e]
+                A = a[idx]
+                J = np.minimum(e[:, None] + offs[None, :], le[:, None])
+                cl = c[J]
+                s_ = sd[:, None]
+                ret = np.stack([sd * (cl[:, k - 1] - en) for k in VSP_K], 1) / A[:, None]
+                return ret, J, en, A
+
+            # random baseline (follow = long, the other side = short), per period and half
+            pool = np.nonzero(ok)[0]
+            rid = np.sort(rng.choice(pool, size=min(len(pool), 8000), replace=False))
+            BR = {}
+            for sdv in (1, -1):
+                R, _, _, _ = outcomes(rid, np.full(len(rid), sdv))
+                for pp in (1, 2):
+                    for hh in (0, 1):
+                        m = (per[rid] == pp) & (half[rid] == hh)
+                        BR[(sdv, pp, hh)] = np.nanmean(R[m], 0) if m.sum() > 50 else np.nanmean(R, 0)
+            base = ok & (sd_c != 0) & np.isfinite(rv) & np.isfinite(a) & (a > 0)
+            for M in VSP_MULT:
+                for SZ in VSP_SIZE:
+                    for shape in VSP_SHAPE:
+                        for loc in VSP_LOC:
+                            m = base & (rv >= M) & (np.abs(body) >= SZ * a)
+                            if shape == "STRONG CLOSE":
+                                m &= strong
+                            elif shape == "REJECTION WICK":
+                                m &= wick
+                            if loc == "NEW 30-CANDLE HIGH/LOW":
+                                m &= newx
+                            elif loc == "INSIDE THE RANGE":
+                                m &= ~newx
+                            idx = np.nonzero(m)[0]
+                            if len(idx) < 5:
+                                continue
+                            sd = sd_c[idx].astype(float)              # FOLLOW the candle; a minus result = it reversed (fade it)
+                            R, J, en, A = outcomes(idx, sd)
+                            bR = np.stack([BR[(int(s_), int(p_), int(h_))] for s_, p_, h_ in zip(sd, per[idx], half[idx])])
+                            X = R - bR
+                            # trades: FOLLOW with the stop past the spike candle's other end; FADE with the stop past its extreme
+                            stopF = np.where(sd > 0, l[idx], h[idx])
+                            stopD = np.where(sd > 0, h[idx], l[idx])
+                            res = {}
+                            for nm, side, stp in (("F", sd, stopF), ("D", -sd, stopD)):
+                                R0 = np.abs(en - stp)
+                                hi_, lo_ = h[J[:, :10]], l[J[:, :10]]
+                                hitS = np.where(side[:, None] > 0, lo_ <= stp[:, None], hi_ >= stp[:, None])
+                                tgt = en + side * R0
+                                hitT = np.where(side[:, None] > 0, hi_ >= tgt[:, None], lo_ <= tgt[:, None])
+                                hitT[:, 0] = False
+                                fS = np.where(hitS.any(1), hitS.argmax(1), 99)
+                                fT = np.where(hitT.any(1), hitT.argmax(1), 99)
+                                px = c[J[:, 9]]
+                                px = np.where((fS <= fT) & (fS < 99), stp, np.where(fT < 99, tgt, px))
+                                pnl = side * (px - en) - 0.02
+                                okS = np.where(side > 0, stp < en, stp > en)            # the stop must be on the losing side of the entry
+                                with np.errstate(divide="ignore", invalid="ignore"):
+                                    res[nm] = np.where((R0 > 0.01) & okS, pnl / R0, np.nan)
+                            D_ = pd.DataFrame(X.astype(np.float32), columns=[f"x{k}" for k in VSP_K])
+                            D_["F"], D_["D"] = res["F"].astype(np.float32), res["D"].astype(np.float32)
+                            D_["M"], D_["SZ"], D_["shape"], D_["loc"], D_["tf"], D_["sym"] = M, SZ, shape, loc, tf, sym
+                            D_["side"], D_["per"], D_["half"], D_["day"] = sd.astype(np.int8), per[idx].astype(np.int8), half[idx].astype(np.int8), dord[idx]
+                            rows.append(D_)
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    for c_ in ("shape", "loc", "sym"):
+        E[c_] = E[c_].astype("category")
+    T_PASS = float(os.getenv("VSP_T", "3.5"))
+
+    def tday(x, d):
+        x = pd.Series(np.asarray(x, dtype=float)).dropna()
+        if len(x) < 20:
+            return np.nan
+        d = pd.Series(np.asarray(d))[x.index]
+        mu = x.mean()
+        dev = (x - mu).groupby(d.to_numpy()).sum()
+        se = np.sqrt((dev ** 2).sum()) / len(x)
+        return mu / se if se > 0 else np.nan
+
+    out = []
+    for key, g in E.groupby(["tf", "M", "SZ", "shape", "loc"], observed=True):
+        g2, g1 = g[g["per"] == 2], g[g["per"] == 1]
+        if len(g2) < 30:
+            continue
+        r = dict(tf=key[0], M=key[1], SZ=key[2], shape=key[3], loc=key[4], n=len(g2), n1=len(g1))
+        for k in VSP_K:
+            r[f"x{k}"] = g2[f"x{k}"].mean()
+            r[f"p{k}"] = g1[f"x{k}"].mean() if len(g1) else np.nan
+        best_k = max((3, 5, 10), key=lambda k: abs(r[f"x{k}"]))
+        r["k"] = best_k
+        r["t"] = tday(g2[f"x{best_k}"], g2["day"])
+        r["t1"] = tday(g1[f"x{best_k}"], g1["day"]) if len(g1) >= 20 else np.nan
+        r["h1"] = g2[g2["half"] == 0][f"x{best_k}"].mean()
+        r["h2"] = g2[g2["half"] == 1][f"x{best_k}"].mean()
+        r["syms"] = [g2[g2["sym"] == s_][f"x{best_k}"].mean() for s_ in SYMBOLS]
+        r["pops"], r["drops"] = g2[g2["side"] == 1][f"x{best_k}"].mean(), g2[g2["side"] == -1][f"x{best_k}"].mean()
+        r["F"], r["D"] = g2["F"].mean(), g2["D"].mean()
+        r["tF"], r["tD"] = tday(g2["F"], g2["day"]), tday(g2["D"], g2["day"])
+        r["F1"], r["D1"] = g1["F"].mean() if len(g1) else np.nan, g1["D"].mean() if len(g1) else np.nan
+        r["winF"], r["winD"] = (g2["F"] > 0).mean(), (g2["D"] > 0).mean()
+        sgn = np.sign(r[f"x{best_k}"])
+        r["held"] = (abs(r["t"]) >= T_PASS and len(g2) >= 200 and np.sign(r[f"p{best_k}"]) == sgn and np.sign(r["h1"]) == sgn and np.sign(r["h2"]) == sgn
+                     and all(np.sign(v_) == sgn for v_ in r["syms"] if np.isfinite(v_)) and np.isfinite(r["t1"]) and np.sign(r["t1"]) == sgn)
+        out.append(r)
+    S = pd.DataFrame(out)
+    ndays = max(1, len(pd.bdate_range(yr_start.date(), end.date())))
+    md = [f"# DROPS & POPS - VOLUME-SPIKE CANDLES - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"{', '.join(SYMBOLS)}, charts {', '.join(f'{t}m' for t in tfs)}. LAST 12 MONTHS = from {yr_start:%Y-%m-%d} (the main score); "
+          f"the 12 months before it = the check. Spike candles 9:35-15:30, entry at the NEXT candle's open. DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Spike** = the candle's volume is 2x / 3x / 5x the NORMAL volume for that time of day (median of the same candle over the last 20 "
+          "days - so the open and close are not spikes). **POP** = green spike candle, **DROP** = red. **Size** = candle body at least 0 / 0.5 / "
+          "1.0 ATR. **Strong close** = closed in the top 25% of the candle (pop) / bottom 25% (drop); **rejection wick** = a pop that closed in "
+          "its lower half (a drop: upper half). **New 30-candle high/low** = the pop broke above the last 30 candles' high (drop: below the low).",
+          "**Result** = FOLLOW the candle (buy a pop, short a drop), in ATR, minus random entries the same way (the fair score): **+ = it "
+          "CONTINUED, - = it REVERSED** (fade it). **Follow trade / Fade trade** = R per trade with the stop past the spike candle "
+          "(follow: past its other end; fade: past its extreme), target 1R, 10 candles max, $0.02 slippage. **t** = noise measured day by day "
+          f"with all symbols together. **HELD UP** = |t| {T_PASS:g}+ in the last 12 months with 200+ spikes, and the SAME direction in the "
+          "year before, both halves of the last 12 months, and on every symbol.", ""]
+    held = S[S["held"]].copy()
+    md.append("## The answer in 30 seconds")
+    if len(held):
+        held["at"] = held["t"].abs()
+        md.append(f"- **HELD UP: {len(held)}.** Strongest:")
+        for z in held.sort_values("at", ascending=False).head(8).itertuples():
+            word = "CONTINUES" if z.t > 0 else "REVERSES"
+            md.append(f"  - **{z.tf}m, {z.M:g}x volume, body {z.SZ:g}+ ATR, {z.shape}, {z.loc}** -> **{word}**: {getattr(z, 'x' + str(z.k)):+.3f} ATR "
+                      f"vs random after {z.k} candles (t {z.t:.1f}), year before {getattr(z, 'p' + str(z.k)):+.3f}; {z.n} spikes ({z.n / ndays / len(SYMBOLS):.1f} "
+                      f"per symbol per day); follow trade {z.F:+.3f}R ({100 * z.winF:.0f}% win), fade trade {z.D:+.3f}R ({100 * z.winD:.0f}% win)")
+    else:
+        md.append("- **HELD UP: none.**")
+    for tf in tfs:
+        g = S[S["tf"] == tf]
+        if len(g):
+            md.append(f"- **{tf}m**: spikes continued (+) in {int((g['x5'] > 0).sum())} of {len(g)} groups at 5 candles; average {g['x5'].mean():+.3f} ATR; "
+                      f"best follow trade {g['F'].max():+.3f}R, best fade trade {g['D'].max():+.3f}R")
+    md += ["", "## Every group (last 12 months; the year before in the 'Year before' column)",
+           "| Chart | Volume | Body | Shape | Where | Spikes (prev yr) | " + " / ".join(str(k) for k in VSP_K) + " candles (+ continue, - reverse) | "
+           "Best hold: t / year-before t | Year before at best hold | H1 / H2 | " + " / ".join(SYMBOLS) + " | Pops / Drops | Follow trade R (t, win) | "
+           "Fade trade R (t, win) | Prev yr follow / fade R | |", "|" + "---|" * 17]
+    for z in S.sort_values(["tf", "M", "SZ", "shape", "loc"]).itertuples():
+        md.append(f"| {z.tf}m | {z.M:g}x | {z.SZ:g}+ | {z.shape} | {z.loc} | {z.n} ({z.n1}) | " + " / ".join(f"{getattr(z, 'x' + str(k)):+.3f}" for k in VSP_K) +
+                  f" | {z.k} c: {z.t:.1f} / {z.t1:.1f} | {getattr(z, 'p' + str(z.k)):+.3f} | {z.h1:+.3f} / {z.h2:+.3f} | " + " / ".join(f"{v_:+.3f}" for v_ in z.syms) +
+                  f" | {z.pops:+.3f} / {z.drops:+.3f} | {z.F:+.3f} ({z.tF:.1f}, {100 * z.winF:.0f}%) | {z.D:+.3f} ({z.tD:.1f}, {100 * z.winD:.0f}%) | "
+                  f"{z.F1:+.3f} / {z.D1:+.3f} | {'✅' if z.held else ''} |")
+    md += ["", f"**Luck check:** {len(S)} groups x 3 holds are tested. The whole test was run 3 times on random 1-cent-tick prices with "
+           "random volume: the best group reached |t| 2.7-3.5 by chance and nothing passed HELD UP - that is why it needs t 3.5 AND the year "
+           "before, both halves and every symbol to agree. Groups overlap (a 5x spike is also a 2x spike), so neighbors move together."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/vspike_{stamp}.md", f"{OUT}/vspike_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
+
+
+def orb_and_vspike_main():
+    """the default run: the opening-range payoff test, then the drops & pops test (two summaries, one run)"""
+    orb_main()
+    vspike_main()
 
 
 if __name__ == "__main__":
