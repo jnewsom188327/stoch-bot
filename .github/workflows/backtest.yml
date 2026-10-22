@@ -1,370 +1,48 @@
-"""Fear Snap v4.3 backtest - this year only, market hours, Alpaca data.
-Runs from the regular backtest button. Chart minutes come from the TFS box (e.g. 1,2,3)."""
-import os, time, math
-from datetime import datetime, timedelta, timezone
-import numpy as np
-import pandas as pd
-import requests
-from numpy.lib.stride_tricks import sliding_window_view as swv
+name: Trend Flip backtest
 
-# ── Settings (same as Fear Snap v4.3 defaults) ──
-P = dict(pd=22, rng=50, maxLvl=95, zeroLvl=5, holdLvl=91, resetLvl=60, recentBars=3,
-         spdLen=200, spdMult=2.0, spdFloor=8, longDiv=True, shortDiv=False, divBars=90, divTol=0.5,
-         strMin=2.0, strLook=10, strAge=3,
-         retLook=60, retSkip=5, retTol=0.4, retRatio=0.8, retMinSt=1.0,
-         hotLen=300, hotPct=90, maxChase=1.5, coolBars=3,
-         stLen=20, zLen=300, st=(1.0, 1.5, 2.0, 2.5),
-         tpL=1.0, slL=1.5, tpS=1.0, slS=1.0, hold=20, atrLen=14)
-TYPES = {1: "SNAP", 2: "STRETCH", 3: "RETEST"}
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Tickers, comma separated"
+        default: "SPY,QQQ"
+      start:
+        description: "Start date (YYYY-MM-DD)"
+        default: "2020-01-01"
+      tfs:
+        description: "Chart minutes, comma separated"
+        default: "2,3"
 
+permissions:
+  contents: write
 
-# ── Data ──
-def fetch(sym, start, end):
-    url = "https://data.alpaca.markets/v2/stocks/bars"
-    key = os.environ.get("ALPACA_KEY") or os.environ.get("ALPACA_API_KEY")
-    sec = os.environ.get("ALPACA_SECRET") or os.environ.get("ALPACA_SECRET_KEY")
-    hdr = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
-    for feed in ("sip", "iex"):
-        out, tok, ok = [], None, True
-        while True:
-            q = dict(symbols=sym, timeframe="1Min", start=start, end=end, limit=10000,
-                     adjustment="raw", feed=feed, sort="asc")
-            if tok:
-                q["page_token"] = tok
-            r = requests.get(url, headers=hdr, params=q, timeout=60)
-            if r.status_code == 429:
-                time.sleep(3)
-                continue
-            if r.status_code in (401, 403, 422):
-                print(f"{sym}: feed {feed} refused ({r.status_code}) {r.text[:200]}")
-                ok = False
-                break
-            r.raise_for_status()
-            j = r.json()
-            out += (j.get("bars") or {}).get(sym) or []
-            tok = j.get("next_page_token")
-            if not tok:
-                break
-        if ok and out:
-            print(f"{sym}: {len(out)} bars from feed {feed}")
-            df = pd.DataFrame(out)
-            df["t"] = pd.to_datetime(df["t"], utc=True).dt.tz_convert("America/New_York")
-            df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
-            return df[["t", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
-    raise SystemExit(f"No data for {sym}. Check the Alpaca secrets.")
-
-
-# ── Helpers ──
-def norm(x, n):
-    hi, lo = x.rolling(n).max(), x.rolling(n).min()
-    return np.where(hi == lo, 50.0, (x - lo) / (hi - lo) * 100)
-
-
-def pct_rank(a, n):
-    """Pine ta.percentrank: % of the previous n values <= current."""
-    out = np.full(len(a), np.nan)
-    if len(a) <= n:
-        return out
-    w = swv(a[:-1], n)
-    cur = a[n:]
-    for s in range(0, len(cur), 20000):
-        e = s + 20000
-        out[n + s:n + e] = (w[s:e] <= cur[s:e, None]).sum(1) / n * 100
-    return out
-
-
-def bars_ago_of_ext(a, n, highest=True):
-    """Offset (0 = this bar) of the highest/lowest in the last n bars, most recent wins ties."""
-    out = np.full(len(a), np.nan)
-    if len(a) < n:
-        return out
-    w = swv(np.nan_to_num(a, nan=-np.inf if highest else np.inf), n)[:, ::-1]
-    out[n - 1:] = (w.argmax(1) if highest else w.argmin(1))
-    return out
-
-
-def indicators(df):
-    c, h, l = df.close, df.high, df.low
-    hc, lc = c.rolling(P["pd"]).max(), c.rolling(P["pd"]).min()
-    d = pd.DataFrame(index=df.index)
-    d["fr"] = (hc - l) / hc * 100
-    d["gr"] = (h - lc) / lc * 100
-    d["fear"] = norm(d.fr, P["rng"])
-    d["greed"] = norm(d.gr, P["rng"])
-    fC = pd.Series(norm((hc - c) / hc * 100, P["rng"]), index=df.index)
-    gC = pd.Series(norm((c - lc) / lc * 100, P["rng"]), index=df.index)
-    d["dF"], d["dG"] = fC.shift(1) - fC, gC.shift(1) - gC
-    d["nF"] = (fC - fC.shift(1)).abs().rolling(P["spdLen"]).mean()
-    d["nG"] = (gC - gC.shift(1)).abs().rolling(P["spdLen"]).mean()
-    tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(1)
-    d["atr"] = tr.ewm(alpha=1 / P["atrLen"], adjust=False).mean()
-    d["ema"] = c.ewm(span=P["stLen"], adjust=False).mean()
-    hlc3 = (h + l + c) / 3
-    day = df.t.dt.date
-    pv = (hlc3 * df.volume).groupby(day).cumsum()
-    vv = df.volume.groupby(day).cumsum()
-    d["vwap"] = (pv / vv.replace(0, np.nan)).ffill().fillna(c)
-    d["sdE"] = (c - d.ema).rolling(P["zLen"]).std(ddof=0)
-    d["sdV"] = (c - d.vwap).rolling(P["zLen"]).std(ddof=0)
-    d["fPct"] = pct_rank(d.fr.to_numpy(float), P["hotLen"])
-    d["gPct"] = pct_rank(d.gr.to_numpy(float), P["hotLen"])
-    d["fHot"] = pd.Series(d.fPct).rolling(P["strLook"]).max()
-    d["gHot"] = pd.Series(d.gPct).rolling(P["strLook"]).max()
-    L, S = P["strLook"], P["retSkip"]
-    d["loN"], d["hiN"] = l.rolling(L).min(), h.rolling(L).max()
-    d["agoLo"] = bars_ago_of_ext(l.to_numpy(float), L, False)
-    d["agoHi"] = bars_ago_of_ext(h.to_numpy(float), L, True)
-    hS, lS = h.shift(S), l.shift(S)
-    d["pHi"], d["pLo"] = hS.rolling(P["retLook"]).max(), lS.rolling(P["retLook"]).min()
-    d["hiOff"] = S + bars_ago_of_ext(hS.to_numpy(float), P["retLook"], True)
-    d["loOff"] = S + bars_ago_of_ext(lS.to_numpy(float), P["retLook"], False)
-    d["hiR"], d["loR"] = h.rolling(S).max(), l.rolling(S).min()
-    d["gNow"], d["fNow"] = d.gr.rolling(S).max(), d.fr.rolling(S).max()
-    m = df.t.dt.hour * 60 + df.t.dt.minute
-    d["inMkt"] = (m >= 570) & (m < 960)
-    d["mktOk"] = (m >= 580) & (m < 870)          # 9:40-14:30 entry window
-    d["morning"] = (m >= 570) & (m < 660)        # 9:30-11:00
-    return d
-
-
-# ── Signals (bar-by-bar port of the Pine state machine) ──
-def signals(df, d):
-    n = len(df)
-    A = {k: d[k].to_numpy(float) for k in d.columns if d[k].dtype != bool}
-    B = {k: d[k].to_numpy(bool) for k in ("inMkt", "mktOk", "morning")}
-    c, h, l = df.close.to_numpy(float), df.high.to_numpy(float), df.low.to_numpy(float)
-    st = P["st"]
-
-    def dist(ext, dr, i):
-        dE = ((A["ema"][i] - ext) if dr == 1 else (ext - A["ema"][i])) / A["sdE"][i]
-        dV = ((A["vwap"][i] - ext) if dr == 1 else (ext - A["vwap"][i])) / A["sdV"][i]
-        return max(dE, dV)
-
-    def score(x):
-        if np.isnan(x):
-            return 0
-        return 5 if x >= st[3] else 4 if x >= st[2] else 3 if x >= st[1] else 2 if x >= st[0] else 1
-
-    state, lastMax, ext, pk, lastFire = 0, None, np.nan, np.nan, -10**9
-    pPkL = pExL = pPkS = pExS = np.nan
-    pEndL = pEndS = None
-    fires = []
-    warm = max(P["zLen"], P["hotLen"], P["spdLen"], P["retLook"] + P["retSkip"]) + 2
-    for i in range(warm, n):
-        atr = A["atr"][i]
-        if np.isnan(atr) or np.isnan(A["fear"][i]) or np.isnan(A["sdE"][i]) or atr <= 0:
-            continue
-        fr, gr, fear, greed = A["fr"][i], A["gr"][i], A["fear"][i], A["greed"][i]
-        old = state
-        peakNow = max(pk, fr) if state == 1 else max(pk, gr) if state == -1 else np.nan
-        extNow = min(ext, l[i]) if state == 1 else max(ext, h[i]) if state == -1 else np.nan
-        divL = pEndL is not None and i - pEndL <= P["divBars"] and extNow <= pExL + P["divTol"] * atr and peakNow < pPkL
-        divS = pEndS is not None and i - pEndS <= P["divBars"] and extNow >= pExS - P["divTol"] * atr and peakNow < pPkS
-        recent = lastMax is not None and i - lastMax <= P["recentBars"]
-        aL = (state == 1 and recent and A["dF"][i] >= max(P["spdMult"] * A["nF"][i], P["spdFloor"])
-              and c[i] - extNow <= P["maxChase"] * atr and (not P["longDiv"] or divL))
-        aS = (state == -1 and recent and A["dG"][i] >= max(P["spdMult"] * A["nG"][i], P["spdFloor"])
-              and extNow - c[i] <= P["maxChase"] * atr and (not P["shortDiv"] or divS))
-        # STRETCH
-        stLo, stHi = dist(A["loN"][i], 1, i), dist(A["hiN"][i], -1, i)
-        bL = (A["fHot"][i] >= P["hotPct"] and stLo >= P["strMin"] and A["agoLo"][i] <= P["strAge"]
-              and c[i] > h[i - 1] and c[i] - A["loN"][i] <= P["maxChase"] * atr)
-        bS = (A["gHot"][i] >= P["hotPct"] and stHi >= P["strMin"] and A["agoHi"][i] <= P["strAge"]
-              and c[i] < l[i - 1] and A["hiN"][i] - c[i] <= P["maxChase"] * atr)
-        # RETEST
-        cL = cS = False
-        if not np.isnan(A["hiOff"][i]):
-            j = i - int(A["hiOff"][i])
-            cS = (A["gPct"][j] >= P["hotPct"] and A["hiR"][i] >= A["pHi"][i] - P["retTol"] * atr
-                  and A["gNow"][i] < A["gr"][j] * P["retRatio"] and dist(A["hiR"][i], -1, i) >= P["retMinSt"]
-                  and c[i] < l[i - 1] and A["hiR"][i] - c[i] <= P["maxChase"] * atr)
-        if not np.isnan(A["loOff"][i]):
-            j = i - int(A["loOff"][i])
-            cL = (A["fPct"][j] >= P["hotPct"] and A["loR"][i] <= A["pLo"][i] + P["retTol"] * atr
-                  and A["fNow"][i] < A["fr"][j] * P["retRatio"] and dist(A["loR"][i], 1, i) >= P["retMinSt"]
-                  and c[i] > h[i - 1] and c[i] - A["loR"][i] <= P["maxChase"] * atr)
-        canFire = i - lastFire > P["coolBars"]
-        win = B["mktOk"][i]
-        fired = False
-        if (aL or bL or cL) and canFire and win:
-            ty = 1 if aL else 3 if cL else 2
-            sc = score(dist(extNow, 1, i)) if aL else score(dist(A["loR"][i], 1, i)) if cL else score(stLo)
-            fires.append((i, 1, ty, sc))
-            fired = True
-        if (aS or bS or cS) and canFire and win:
-            ty = 1 if aS else 3 if cS else 2
-            sc = score(dist(extNow, -1, i)) if aS else score(dist(A["hiR"][i], -1, i)) if cS else score(stHi)
-            fires.append((i, -1, ty, sc))
-            fired = True
-        if fired:
-            state, lastFire = 0, i
-        if state == 1:
-            lastMax = i if fear >= P["holdLvl"] else lastMax
-            ext, pk = min(ext, l[i]), max(pk, fr)
-            state = 0 if fear < P["resetLvl"] else state
-        elif state == -1:
-            lastMax = i if greed >= P["holdLvl"] else lastMax
-            ext, pk = max(ext, h[i]), max(pk, gr)
-            state = 0 if greed < P["resetLvl"] else state
-        if i - lastFire > P["coolBars"]:
-            if fear >= P["maxLvl"] and greed <= P["zeroLvl"] and state != 1:
-                state, lastMax, ext, pk = 1, i, l[i], fr
-            elif greed >= P["maxLvl"] and fear <= P["zeroLvl"] and state != -1:
-                state, lastMax, ext, pk = -1, i, h[i], gr
-        if old == 1 and state != 1:
-            pPkL, pExL, pEndL = peakNow, extNow, i
-        if old == -1 and state != -1:
-            pPkS, pExS, pEndS = peakNow, extNow, i
-    return fires
-
-
-# ── Grading ──
-def grade(df, d, fires, tpL, slL, tpS, slS, hold):
-    c, h, l = df.close.to_numpy(float), df.high.to_numpy(float), df.low.to_numpy(float)
-    atr, morning = d.atr.to_numpy(float), d.morning.to_numpy(bool)
-    rows = []
-    for i, dr, ty, sc in fires:
-        e, a = c[i], atr[i]
-        tp, sl = (tpL, slL) if dr == 1 else (tpS, slS)
-        mfe = mae = 0.0
-        x, won, bars = None, False, 0
-        for k in range(1, hold + 1):
-            j = i + k
-            if j >= len(c):
-                break
-            fav = (h[j] - e) if dr == 1 else (e - l[j])
-            adv = (e - l[j]) if dr == 1 else (h[j] - e)
-            mfe, mae = max(mfe, fav / a), max(mae, adv / a)
-            if adv >= sl * a:
-                x, bars = -sl, k
-                break
-            if fav >= tp * a:
-                x, won, bars = tp, True, k
-                break
-            if k == hold:
-                x, bars = dr * (c[j] - e) / a, k
-        if x is None:
-            continue
-        rows.append(dict(time=df.t.iloc[i], side="Long" if dr == 1 else "Short", trigger=TYPES[ty],
-                         score=sc, session="Morning" if morning[i] else "Midday", entry=e, atr=a,
-                         x=x, win=won, bars=bars, mfe=mfe, mae=mae))
-    return pd.DataFrame(rows)
-
-
-GROUPS = [("All", lambda t: t.index == t.index), ("Long", lambda t: t.side == "Long"),
-          ("Short", lambda t: t.side == "Short"), ("SNAP", lambda t: t.trigger == "SNAP"),
-          ("STRETCH", lambda t: t.trigger == "STRETCH"), ("RETEST", lambda t: t.trigger == "RETEST"),
-          ("Morning", lambda t: t.session == "Morning"), ("Midday", lambda t: t.session == "Midday"),
-          ("Stretch 4-5", lambda t: t.score >= 4), ("Stretch 2-3", lambda t: (t.score >= 2) & (t.score <= 3))]
-
-
-def stats(t):
-    n = len(t)
-    if n == 0:
-        return None
-    ex = t.x.mean()
-    se = t.x.std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
-    return dict(n=n, win=t.win.mean() * 100, ex=ex, se=se, real=(ex - 2 * se) > 0 if n > 1 else False,
-                run=t.mfe.mean(), heat=t.mae.mean(), bars=t[t.win].bars.mean() if t.win.any() else np.nan)
-
-
-def table(t, days):
-    out = ["| Group | Fires | /day | Win% | Exp ATR | ±2SE | Real? | Run | Heat | Bars |",
-           "|---|---|---|---|---|---|---|---|---|---|"]
-    for name, f in GROUPS:
-        s = stats(t[f(t)]) if len(t) else None
-        if not s:
-            out.append(f"| {name} | 0 | | | | | | | | |")
-            continue
-        out.append(f"| {name} | {s['n']} | {s['n'] / days:.1f} | {s['win']:.0f}% | {s['ex']:+.2f} | "
-                   f"{2 * s['se']:.2f} | {'YES' if s['real'] else 'no'} | {s['run']:.1f}x | {s['heat']:.1f}x | "
-                   f"{s['bars']:.1f} |")
-    return "\n".join(out)
-
-
-def halves(t, split):
-    a, b = t[t.time < split], t[t.time >= split]
-    out = ["| Group | 1st half fires | 1st half Exp | 2nd half fires | 2nd half Exp | Holds? |",
-           "|---|---|---|---|---|---|"]
-    for name, f in GROUPS:
-        sa = stats(a[f(a)]) if len(a) else None
-        sb = stats(b[f(b)]) if len(b) else None
-        ea = f"{sa['ex']:+.2f}" if sa else "-"
-        eb = f"{sb['ex']:+.2f}" if sb else "-"
-        holds = "YES" if sa and sb and sa["ex"] > 0 and sb["ex"] > 0 else "no"
-        out.append(f"| {name} | {sa['n'] if sa else 0} | {ea} | {sb['n'] if sb else 0} | {eb} | {holds} |")
-    return "\n".join(out)
-
-
-def resample(df, tf):
-    if tf == 1:
-        return df
-    g = df.set_index("t").resample(f"{tf}min", origin="start_day", label="left", closed="left")
-    out = pd.DataFrame({"open": g.open.first(), "high": g.high.max(), "low": g.low.min(),
-                        "close": g.close.last(), "volume": g.volume.sum()}).dropna(subset=["close"])
-    return out.reset_index()
-
-
-def main():
-    syms = [s.strip().upper() for s in os.environ.get("SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
-    tfs = [int(x) for x in (os.environ.get("TFS") or "1").replace(" ", "").split(",") if x.isdigit()] or [1]
-    start = f"{datetime.now().year}-01-01"          # this year only (the start box is ignored)
-    end = (datetime.now(timezone.utc) - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    HOLD_MIN = 20
-    md = [f"# Fear Snap v4.3 backtest: {start} to now, market hours 9:40-2:30",
-          f"Long TP {P['tpL']}/SL {P['slL']} ATR, Short TP {P['tpS']}/SL {P['slS']} ATR, hold {HOLD_MIN} minutes. "
-          "**Real? = YES** only when Exp ATR stays above zero even after subtracting 2x its margin of error."]
-    raw = {sym: fetch(sym, f"{start}T00:00:00Z", end) for sym in syms}
-    os.makedirs("results", exist_ok=True)
-    for tf in tfs:
-        P["hold"] = max(1, math.ceil(HOLD_MIN / tf))
-        md.append(f"\n# {tf}-minute chart (hold = {P['hold']} bars)")
-        data = {}
-        for sym in syms:
-            df = resample(raw[sym], tf)
-            d = indicators(df)
-            fires = signals(df, d)
-            data[sym] = (df, d, fires)
-            t = grade(df, d, fires, P["tpL"], P["slL"], P["tpS"], P["slS"], P["hold"])
-            days = df.t.dt.date.nunique()
-            mid = df.t.iloc[len(df) // 2]
-            md += [f"\n## {sym} {tf}m ({days} days)", table(t, days),
-                   f"\n### {sym} {tf}m: does it hold in both halves of the year? (split {mid:%b %d})", halves(t, mid)]
-            t.to_csv(f"results/fearsnap_fires_{sym}_{tf}m.csv", index=False)
-        for side, key in (("Long", 1), ("Short", -1)):
-            md.append(f"\n## {tf}m {side}s: stop x target grid (Exp ATR per fire, {', '.join(syms)} combined)")
-            tps = [0.75, 1.0, 1.5, 2.0]
-            md.append("| SL \\ TP | " + " | ".join(str(x) for x in tps) + " |")
-            md.append("|---|" + "---|" * len(tps))
-            for sl in [0.75, 1.0, 1.5, 2.0]:
-                cells = []
-                for tp in tps:
-                    gs = [grade(df, d, [f for f in fires if f[1] == key], tp, sl, tp, sl, P["hold"])
-                          for df, d, fires in data.values()]
-                    g = pd.concat(gs) if gs else pd.DataFrame()
-                    cells.append(f"{g.x.mean():+.2f}" if len(g) else "-")
-                md.append(f"| {sl} | " + " | ".join(cells) + " |")
-        md.append(f"\n## {tf}m hold-time test (Exp ATR per fire, default stops)")
-        md.append("| Hold minutes | Long | Short | All |")
-        md.append("|---|---|---|---|")
-        for hm in [5, 8, 10, 15, 20, 30]:
-            hb = max(1, math.ceil(hm / tf))
-            gs = [grade(df, d, fires, P["tpL"], P["slL"], P["tpS"], P["slS"], hb) for df, d, fires in data.values()]
-            g = pd.concat(gs)
-            if not len(g):
-                continue
-            lo, sh = g[g.side == "Long"].x.mean(), g[g.side == "Short"].x.mean()
-            md.append(f"| {hm} | {lo:+.2f} | {sh:+.2f} | {g.x.mean():+.2f} |")
-
-    report = "\n".join(md)
-    print(report)
-    with open("results/fearsnap_report.md", "w") as f:
-        f.write(report + "\n")
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if path:
-        with open(path, "a") as f:
-            f.write(report + "\n")
-
-
-if __name__ == "__main__":
-    main()
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run backtest (data only - no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          SYMBOLS: ${{ github.event.inputs.symbols }}
+          START: ${{ github.event.inputs.start }}
+          TFS: ${{ github.event.inputs.tfs }}
+        run: python backtest.py
+      - name: Save results
+        if: always()
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          if [ -d results ]; then git add results; fi
+          if ! git diff --cached --quiet; then
+            git commit -m "backtest results $(date -u +%F)"
+            git pull --rebase origin main || true
+            git push || true
+          fi
