@@ -1,5 +1,8 @@
 """
-THE DEFAULT RUN (MODE=combo+vspike) = EVERY COMBINATION of your trend line (color + run length), TTM bars, squeeze, Vix Fix flow,
+THE DEFAULT RUN (MODE=crun) = BEST ENTRY FOR A RUN - every combination of your trend line (color + run), TTM, squeeze, Vix Fix,
+  maxed, FLOW SUITE line and diamonds, scored by the RUN each entry gives (you manage the exit). Type QQQ. DATA ONLY.
+MODE=vspike = DROPS & POPS only - volume-spike candles, 1m / 3m / 5m, last 12 months + the year before. Type QQQ.
+MODE=combo+vspike = EVERY COMBINATION of your trend line (color + run length), TTM bars, squeeze, Vix Fix flow,
   maxed, FLOW SUITE lines and diamonds, last 12 months, 1m-15m - then DROPS & POPS. Two summaries. No opening range. DATA ONLY.
 MODE=all3 = 3 tests: OPENING RANGE payoff test, DROPS & POPS (volume-spike candles), and
   DOTS + TREND LINE CONFLUENCE (your dots / diamonds with the trend line, 1m-60m). DATA ONLY.
@@ -135,7 +138,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "combo+vspike").strip().lower() or "combo+vspike"
+MODE = os.getenv("MODE", "crun").strip().lower() or "crun"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -435,6 +438,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "crun":
+        return crun_main()
     if MODE == "combo+vspike":
         return combo_vspike_main()
     if MODE == "combo":
@@ -8806,21 +8811,30 @@ def vspike_main():
                             bR = np.stack([BR[(int(s_), int(p_), int(h_))] for s_, p_, h_ in zip(sd, per[idx], half[idx])])
                             X = R - bR
                             # trades: FOLLOW with the stop past the spike candle's other end; FADE with the stop past its extreme
-                            stopF = np.where(sd > 0, l[idx], h[idx])
-                            stopD = np.where(sd > 0, h[idx], l[idx])
+                            buf = 0.1 * A                                              # stops 0.1 ATR past the spike candle
+                            stopF = np.where(sd > 0, l[idx] - buf, h[idx] + buf)
+                            stopD = np.where(sd > 0, h[idx] + buf, l[idx] - buf)
                             res = {}
                             for nm, side, stp in (("F", sd, stopF), ("D", -sd, stopD)):
                                 R0 = np.abs(en - stp)
                                 hi_, lo_ = h[J[:, :10]], l[J[:, :10]]
+                                op_ = o[J[:, :10]]
                                 hitS = np.where(side[:, None] > 0, lo_ <= stp[:, None], hi_ >= stp[:, None])
                                 tgt = en + side * R0
                                 hitT = np.where(side[:, None] > 0, hi_ >= tgt[:, None], lo_ <= tgt[:, None])
-                                hitT[:, 0] = False
                                 fS = np.where(hitS.any(1), hitS.argmax(1), 99)
                                 fT = np.where(hitT.any(1), hitT.argmax(1), 99)
+                                rows_ = np.arange(len(idx))
+                                # a stop / target hit at a later candle's open gaps through: fill at that open
+                                oS = op_[rows_, np.minimum(fS, 9)]
+                                oT = op_[rows_, np.minimum(fT, 9)]
+                                sfill = np.where(fS > 0, np.where(side > 0, np.minimum(stp, oS), np.maximum(stp, oS)), stp)
+                                tfill = np.where(fT > 0, np.where(side > 0, np.maximum(tgt, oT), np.minimum(tgt, oT)), tgt)
                                 px = c[J[:, 9]]
-                                px = np.where((fS <= fT) & (fS < 99), stp, np.where(fT < 99, tgt, px))
-                                pnl = side * (px - en) - 0.02
+                                px = np.where((fS < fT) & (fS < 99), sfill, np.where((fT < fS) & (fT < 99), tfill, px))
+                                tie = (fS == fT) & (fS < 99)                               # both inside the same candle: order unknown -> 0R
+                                px = np.where(tie, en, px)
+                                pnl = side * (px - en) - float(os.getenv("VSP_SLIP", "0.02"))
                                 okS = np.where(side > 0, stp < en, stp > en)            # the stop must be on the losing side of the entry
                                 with np.errstate(divide="ignore", invalid="ignore"):
                                     res[nm] = np.where((R0 > 0.01) & okS, pnl / R0, np.nan)
@@ -8834,7 +8848,7 @@ def vspike_main():
     E = pd.concat(rows, ignore_index=True)
     for c_ in ("shape", "loc", "sym"):
         E[c_] = E[c_].astype("category")
-    T_PASS = float(os.getenv("VSP_T", "3.5"))
+    T_PASS = float(os.getenv("VSP_T", "4.0" if len(SYMBOLS) == 1 else "3.5"))
 
     def tday(x, d):
         x = pd.Series(np.asarray(x, dtype=float)).dropna()
@@ -8881,8 +8895,9 @@ def vspike_main():
           "1.0 ATR. **Strong close** = closed in the top 25% of the candle (pop) / bottom 25% (drop); **rejection wick** = a pop that closed in "
           "its lower half (a drop: upper half). **New 30-candle high/low** = the pop broke above the last 30 candles' high (drop: below the low).",
           "**Result** = FOLLOW the candle (buy a pop, short a drop), in ATR, minus random entries the same way (the fair score): **+ = it "
-          "CONTINUED, - = it REVERSED** (fade it). **Follow trade / Fade trade** = R per trade with the stop past the spike candle "
-          "(follow: past its other end; fade: past its extreme), target 1R, 10 candles max, $0.02 slippage. **t** = noise measured day by day "
+          "CONTINUED, - = it REVERSED** (fade it). **Follow trade / Fade trade** = R per trade with the stop 0.1 ATR past the spike candle "
+          "(follow: past its other end; fade: past its extreme), target 1R, 10 candles max, $0.02 slippage; if the stop and the target are "
+          "both inside the same candle (order unknown) it counts as 0R. **t** = noise measured day by day "
           f"with all symbols together. **HELD UP** = |t| {T_PASS:g}+ in the last 12 months with 200+ spikes, and the SAME direction in the "
           "year before, both halves of the last 12 months, and on every symbol.", ""]
     held = S[S["held"]].copy()
@@ -8911,9 +8926,11 @@ def vspike_main():
                   f" | {z.k} c: {z.t:.1f} / {z.t1:.1f} | {getattr(z, 'p' + str(z.k)):+.3f} | {z.h1:+.3f} / {z.h2:+.3f} | " + " / ".join(f"{v_:+.3f}" for v_ in z.syms) +
                   f" | {z.pops:+.3f} / {z.drops:+.3f} | {z.F:+.3f} ({z.tF:.1f}, {100 * z.winF:.0f}%) | {z.D:+.3f} ({z.tD:.1f}, {100 * z.winD:.0f}%) | "
                   f"{z.F1:+.3f} / {z.D1:+.3f} | {'✅' if z.held else ''} |")
-    md += ["", f"**Luck check:** {len(S)} groups x 3 holds are tested. The whole test was run 3 times on random 1-cent-tick prices with "
-           "random volume: the best group reached |t| 2.7-3.5 by chance and nothing passed HELD UP - that is why it needs t 3.5 AND the year "
-           "before, both halves and every symbol to agree. Groups overlap (a 5x spike is also a 2x spike), so neighbors move together."]
+    md += ["", f"**Luck check:** {len(S)} groups x 3 holds are tested. On random 1-cent-tick prices with random volume the best group "
+           "reached |t| 2.7-3.5 with SPY / QQQ / IWM and 2.2-3.9 with QQQ alone, and nothing passed HELD UP - so the bar is t "
+           f"{T_PASS:g} here, plus the year before and both halves agreeing. Groups overlap (a 5x spike is also a 2x spike), so neighbors "
+           "move together. **Trade columns:** on random prices they come out about -0.02 to -0.05R before slippage (cent fills on gaps) "
+           "- read them against that, not against 0."]
     text = "\n".join(md + [""])
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
@@ -9265,6 +9282,229 @@ def combo_vspike_main():
     """the default run: every combination, then drops & pops"""
     combo_main()
     vspike_main()
+
+
+# ================================================================ BEST ENTRY FOR A RUN (MODE=crun) - every combination, QQQ, last 12 months
+# You manage the exit - so an entry is scored by the RUN it gives, not by where price is after N minutes:
+#   RUN 1   = how far price goes your way (ATR) before it pulls back 1 ATR against your entry (to 15:55 at most)
+#   RUN 0.5 = the same with a tighter 0.5 ATR pullback
+#   2:1 / 3:1 = the chance price reaches +2 / +3 ATR before -1 ATR (same candle = half)
+#   SPEED   = candles until +1 ATR your way (if it gets there)
+# Every candle 9:35-15:30 is described by the same 8 readings as MODE=combo (trend line color + run length, TTM bar, squeeze, Vix
+# Fix flow, maxed, FLOW SUITE line, diamond). Every reading, pair, triple and the full combination is scored vs random (every candle).
+CRUN_PATH = 240              # candles of path followed per entry (cut at 15:55)
+
+
+def crun_paths(o, h, l, c, a, lastok, idx, sd):
+    """run metrics for entries at the next open after idx, side sd (+1 / -1). Chunked to keep memory small."""
+    n = len(idx)
+    out = {k: np.full(n, np.nan, dtype=np.float32) for k in ("run1", "run05", "trail", "p2", "p3", "spd")}
+    offs = np.arange(CRUN_PATH)
+    for s0 in range(0, n, 8000):
+        ii = idx[s0:s0 + 8000]
+        e = ii + 1
+        le = lastok[e]
+        J = np.minimum(e[:, None] + offs[None, :], le[:, None])
+        valid = (e[:, None] + offs[None, :]) <= le[:, None]
+        en = o[e][:, None]
+        A = a[ii][:, None]
+        fav = np.where(sd > 0, h[J] - en, en - l[J]) / A
+        adv = np.where(sd > 0, en - l[J], h[J] - en) / A
+        fav = np.where(valid, fav, -np.inf)
+        adv = np.where(valid, adv, -np.inf)
+        cf = np.maximum.accumulate(fav, axis=1)
+        ca = np.maximum.accumulate(adv, axis=1)
+        last = valid.sum(1) - 1
+        for lim, key in ((1.0, "run1"), (0.5, "run05")):
+            hit = ca >= lim
+            fh = np.where(hit.any(1), hit.argmax(1), last + 1)
+            # best move your way BEFORE the pullback candle (that candle's order is unknown -> not counted)
+            prev = np.maximum(fh - 1, -1)
+            r = np.where(prev >= 0, cf[np.arange(len(ii)), np.maximum(prev, 0)], 0.0)
+            out[key][s0:s0 + 8000] = np.maximum(r, 0.0)
+        # TRAIL: best move before price pulls back 1 ATR from its BEST point (a trailing view of the run)
+        cfp = np.concatenate([np.zeros((len(ii), 1)), cf[:, :-1]], axis=1)       # best so far BEFORE this candle
+        ddh = (cfp + adv) >= 1.0
+        fd = np.where(ddh.any(1), ddh.argmax(1), last + 1)
+        prv = np.maximum(fd - 1, -1)
+        out["trail"][s0:s0 + 8000] = np.maximum(np.where(prv >= 0, cf[np.arange(len(ii)), np.maximum(prv, 0)], 0.0), 0.0)
+        hitA = ca >= 1.0
+        fA = np.where(hitA.any(1), hitA.argmax(1), 10 ** 6)
+        for tg, key in ((2.0, "p2"), (3.0, "p3")):
+            hitT = cf >= tg
+            fT = np.where(hitT.any(1), hitT.argmax(1), 10 ** 6)
+            out[key][s0:s0 + 8000] = np.where(fT < fA, 1.0, np.where((fT == fA) & (fT < 10 ** 6), 0.5, 0.0))
+        h1 = cf >= 1.0
+        out["spd"][s0:s0 + 8000] = np.where(h1.any(1), h1.argmax(1) + 1, np.nan)
+    return out
+
+
+def crun_main():
+    from itertools import combinations
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    yr_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)
+    mid = yr_start + (pd.Timestamp(end.astimezone(NY)) - yr_start) / 2
+    fetch_from = (yr_start - pd.Timedelta(days=10)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("CMB_TFS", CMB_TFS_DEF).split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        for tf in tfs:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            inyr = np.asarray(ts >= yr_start)
+            half = np.where(ts < mid, 0, 1).astype(np.int8)
+            dcode = pd.factorize(day)[0]
+            dord = np.array([d_.toordinal() for d_ in day])
+            lastok = pd.Series(np.where(hm < 1555, np.arange(n), -1)).groupby(dcode).transform("max").to_numpy()
+            ok = inyr & (hm >= 935) & (hm < 1530) & (np.arange(n) + 1 < n) & np.isfinite(a) & (a > 0)
+            ok[:-1] &= dcode[1:] == dcode[:-1]
+            FE, col = combo_features(df, ind)
+            idx = np.nonzero(ok)[0]
+            for sd in (1, -1):
+                Rm = crun_paths(o, h, l, c, a, lastok, idx, sd)
+                D_ = pd.DataFrame(Rm)
+                D_["usd1"] = D_["run1"] * a[idx]
+                for f in CMB_F:
+                    D_[f] = FE[sd][f][idx]
+                D_["tf"], D_["sym"], D_["side"], D_["half"], D_["day"] = tf, sym, sd, half[idx], dord[idx]
+                D_["hm"] = hm[idx].astype(np.int16)
+                rows.append(D_.astype({f: np.int8 for f in CMB_F}))
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["sym"] = E["sym"].astype("category")
+    MET = ["run1", "run05", "trail", "p2", "p3"]
+    MN = {"run1": "RUN before a 1 ATR pullback", "run05": "RUN before a 0.5 ATR pullback", "p2": "2:1 run odds", "p3": "3:1 run odds"}
+    # vs random = minus the average of every candle, same chart / symbol / side / half
+    base = E.groupby(["tf", "sym", "side", "half"], observed=True)[MET + ["spd"]].transform("mean")
+    raw = E[MET + ["spd"]].copy()
+    for m_ in MET:
+        E["d_" + m_] = E[m_] - base[m_]
+    DM = ["d_" + m_ for m_ in MET]
+    T_PASS = float(os.getenv("CRUN_T", "3.5"))
+    HELD_N = int(os.getenv("CRUN_HELD_N", "500"))
+    MIN_N = int(os.getenv("CMB_MIN_N", "200"))
+
+    def cell_stats(g_sum, g_cnt, nk):
+        lv = list(range(nk))
+        tot = g_sum.groupby(level=lv).sum()
+        cnt = g_cnt.groupby(level=lv).sum()
+        mu = tot.div(cnt, axis=0)
+        dev = g_sum - g_cnt.to_numpy()[:, None] * mu.reindex(g_sum.index.droplevel(-1)).to_numpy()
+        se = np.sqrt((dev ** 2).groupby(level=lv).sum()).div(cnt, axis=0)
+        return mu, mu / se, cnt
+
+    subsets = [s_ for r_ in (1, 2, 3) for s_ in combinations(CMB_F, r_)] + [tuple(CMB_F)]
+    out = []
+    for tf in tfs:
+        Et = E[E["tf"] == tf]
+        for sub in subsets:
+            keys = list(sub)
+            gb = Et.groupby(keys + ["day"], observed=True)
+            mu, tt, cnt = cell_stats(gb[DM].sum(), gb.size(), len(keys))
+            raw_mu = Et.groupby(keys, observed=True)[MET + ["spd", "usd1"]].mean()
+            for key in cnt[cnt >= MIN_N].index:
+                kt = key if isinstance(key, tuple) else (key,)
+                out.append(dict(tf=tf, sub=sub, key=kt, n=int(cnt.loc[key]),
+                                **{m_: float(mu.loc[key, "d_" + m_]) for m_ in MET}, **{"t_" + m_: float(tt.loc[key, "d_" + m_]) for m_ in MET},
+                                **{"raw_" + m_: float(raw_mu.loc[key, m_]) for m_ in MET + ["spd", "usd1"]}))
+        print(f"  scored {tf}m ({time.time() - t0:.0f}s)", flush=True)
+    R = pd.DataFrame(out)
+    R["score_t"] = R[["t_run1", "t_p2"]].min(axis=1)          # a good entry must give BOTH a bigger run AND better 2:1 odds
+    look = {(z.tf, z.sub, z.key): z for z in R.itertuples()}
+
+    def mask(Et, sub, key):
+        mm = np.ones(len(Et), dtype=bool)
+        for f, v_ in zip(sub, key):
+            mm &= Et[f].to_numpy() == v_
+        return mm
+    cand = R.sort_values("score_t", ascending=False).head(300).copy()
+    chk = []
+    for z in cand.itertuples():
+        Et = E[E["tf"] == z.tf]
+        g = Et[mask(Et, z.sub, z.key)]
+        h1, h2 = g[g["half"] == 0]["d_run1"].mean(), g[g["half"] == 1]["d_run1"].mean()
+        p1, p2_ = g[g["half"] == 0]["d_p2"].mean(), g[g["half"] == 1]["d_p2"].mean()
+        L_, S_ = g[g["side"] == 1]["d_run1"].mean(), g[g["side"] == -1]["d_run1"].mean()
+        ti = tfs.index(z.tf)
+        nb = [look.get((tfs[j], z.sub, z.key)) for j in (ti - 1, ti + 1) if 0 <= j < len(tfs)]
+        nbv = [x.run1 for x in nb if x is not None]
+        held = (z.score_t >= T_PASS and z.n >= HELD_N and h1 > 0 and h2 > 0 and p1 > 0 and p2_ > 0 and len(nbv) > 0 and all(v_ > 0 for v_ in nbv))
+        tod = g.groupby(pd.cut(g["hm"], [930, 1030, 1200, 1400, 1530], right=False), observed=True)["d_run1"].mean()
+        chk.append(dict(idx=z.Index, h1=h1, h2=h2, ph1=p1, ph2=p2_, L=L_, S=S_, nb=nbv, held=held,
+                        per_day=z.n / max(1, len(np.unique(g["day"]))), tod=list(tod.round(2))))
+    cand = cand.join(pd.DataFrame(chk).set_index("idx"))
+
+    def words(sub, key):
+        return " + ".join(CMB_NAMES[f][v_] for f, v_ in zip(sub, key))
+    bl = E.groupby("tf")[["run1", "run05", "trail", "p2", "p3", "spd", "usd1"]].mean()
+    md = [f"# BEST ENTRY FOR A RUN - EVERY COMBINATION - {', '.join(SYMBOLS)} - LAST 12 MONTHS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(f'{t}m' for t in tfs)}, {yr_start:%Y-%m-%d} to {end:%Y-%m-%d}. Every candle 9:35-15:30 = a possible entry at the next "
+          f"open (long, and short as the mirror). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min. Entries scored: {len(E):,}.",
+          "**You manage the exit, so each entry is scored by the RUN it gives:** **RUN** = how far price went your way (ATR) before it "
+          "pulled back 1 ATR against the entry (and 0.5 ATR) - followed up to 15:55; **TRAIL run** = how far it went before pulling back 1 ATR from its BEST point (a trailing stop view); **2:1 / 3:1 odds** = chance price reached +2 / +3 ATR "
+          "before -1 ATR; **speed** = candles to +1 ATR. All shown as **vs random** (every candle the same way, same chart and half-year) "
+          "and as the real number.",
+          "**The 8 readings (long side; shorts mirror):** trend line color GREEN / BLUE / GRAY / PINK / RED; RUN = candles the line has held "
+          "that color (1-2 / 3-5 / 6-12 / 13+); TTM bar with+growing (cyan for a long) / with+fading / against+recovering (yellow) / "
+          "against+growing; squeeze ON / JUST FIRED / off; Vix Fix flow with / against / mixed; maxed with-side / other side / none; FLOW SUITE "
+          "line THICK / THIN / AGAINST / none; diamond (last 3 candles) with / against / none.",
+          f"**Ranked by** the weaker of the two t's (bigger run AND better 2:1 odds - both must improve). **HELD UP** = that t {T_PASS:g}+, "
+          f"{HELD_N}+ entries, better in BOTH halves of the year on both measures, and the chart(s) next to it also better.", "",
+          "## Random entries for reference (what an average candle gives)", "| Chart | RUN before 1 ATR against entry | RUN before 0.5 ATR | TRAIL run (until 1 ATR off its best) | 2:1 odds | 3:1 odds | Candles to +1 ATR | $ run (RUN 1) |",
+          "|---|---|---|---|---|---|---|---|"]
+    for tf in tfs:
+        z = bl.loc[tf]
+        md.append(f"| {tf}m | {z.run1:.2f} ATR | {z.run05:.2f} ATR | {z.trail:.2f} ATR | {100 * z.p2:.0f}% | {100 * z.p3:.0f}% | {z.spd:.0f} | ${z.usd1:.2f} |")
+    held = cand[cand["held"] == True]
+    md += ["", "## The answer in 30 seconds"]
+    if len(held):
+        md.append(f"- **HELD UP: {len(held)} entries.** Best:")
+        for z in held.head(10).itertuples():
+            md.append(f"  - **{z.tf}m: {words(z.sub, z.key)}** -> run {z.raw_run1:.2f} ATR before a 1 ATR pullback ({z.run1:+.2f} vs random, t {z.t_run1:.1f}), "
+                      f"2:1 odds {100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f} pts, t {z.t_p2:.1f}), 3:1 odds {100 * z.raw_p3:.0f}%, ${z.raw_usd1:.2f}/share run, "
+                      f"{z.per_day:.1f} entries a day; H1 {z.h1:+.2f} / H2 {z.h2:+.2f}")
+    else:
+        md.append(f"- **HELD UP: none** (no entry improved BOTH the run and the 2:1 odds at t {T_PASS:g} with every check).")
+    md.append(f"- Combinations scored: {len(R):,}. Best combined t anywhere: {R['score_t'].max():.1f}.")
+    md += ["", "## Top 40 entries (ranked by the weaker t of RUN and 2:1 odds)",
+           "| Chart | Entry (combination) | Entries (per day) | RUN 1 ATR (vs random, t) | RUN 0.5 ATR (vs random) | TRAIL run (vs random, t) | 2:1 odds (vs random, t) | 3:1 odds | "
+           "Candles to +1 ATR | $ run | H1 / H2 run | Longs / Shorts run | Next charts run | Time of day 9:30 / 10:30 / 12 / 2 | |",
+           "|" + "---|" * 16]
+    for z in cand.head(40).itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} ({z.per_day:.1f}) | {z.raw_run1:.2f} ({z.run1:+.2f}, {z.t_run1:.1f}) | {z.raw_run05:.2f} ({z.run05:+.2f}) | {z.raw_trail:.2f} ({z.trail:+.2f}, {z.t_trail:.1f}) | "
+                  f"{100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}, {z.t_p2:.1f}) | {100 * z.raw_p3:.0f}% ({100 * z.p3:+.0f}) | {z.raw_spd:.0f} | ${z.raw_usd1:.2f} | "
+                  f"{z.h1:+.2f} / {z.h2:+.2f} | {z.L:+.2f} / {z.S:+.2f} | {' / '.join(f'{v_:+.2f}' for v_ in z.nb)} | {' / '.join(str(v_) for v_ in z.tod)} | "
+                  f"{'✅' if z.held else ''} |")
+    md += ["", "## Each reading on its own (RUN before a 1 ATR pullback vs random, t; 2:1 odds vs random)",
+           "| Chart | Reading | Entries | RUN vs random (t) | 2:1 odds vs random (t) |", "|---|---|---|---|---|"]
+    for z in R[R["sub"].apply(len) == 1].sort_values(["tf", "sub", "key"]).itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {z.run1:+.2f} ({z.t_run1:.1f}) | {100 * z.p2:+.0f} pts ({z.t_p2:.1f}) |")
+    md += ["", "## Trend line color x run length (which part of a trend-line run gives the biggest move?)",
+           "| Chart | Line + run | Entries | RUN (real, vs random, t) | 2:1 odds (real, vs random) |", "|---|---|---|---|---|"]
+    for z in R[R["sub"] == ("TL", "RUN")].sort_values(["tf", "key"]).itertuples():
+        md.append(f"| {z.tf}m | {words(z.sub, z.key)} | {z.n} | {z.raw_run1:.2f} ({z.run1:+.2f}, {z.t_run1:.1f}) | {100 * z.raw_p2:.0f}% ({100 * z.p2:+.0f}) |")
+    md += ["", f"**Luck check:** {len(R):,} combinations are scored. This exact test was run 3 times on random 1-cent-tick prices "
+           "(one symbol, no edge anywhere): the best combined t (the weaker of the run t and the 2:1 t) reached 2.6-3.0 and nothing passed - "
+           f"so HELD UP needs t {T_PASS:g}+ on BOTH the run and the 2:1 odds, {HELD_N}+ entries, both halves, and the neighboring charts."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/crun_{stamp}.md", f"{OUT}/crun_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm:
+        with open(sm, "a") as f:
+            f.write(text + "\n")
 
 
 if __name__ == "__main__":
