@@ -1,5 +1,8 @@
 """
-THE DEFAULT RUN (MODE=confirm) = CONFIRM: your AGREE DOTS diamond vs the 1m-tuned diamond (TTM 30 / Vix 30 / same candle) on the
+THE DEFAULT RUN (MODE=lab) = DIAMOND OPTIONS LAB: every diamond (yours + tuned, SPY + QQQ, 1/2/3/5m) on REAL option prices
+  since Feb 2024 - 0DTE vs 1DTE, 2 ITM to 2 OTM, trend line / structure / option exits, Kelly for every combination, every
+  reading as a filter, the 9:45 straddle cheap / rich study, blind tests. DATA ONLY.
+MODE=confirm = CONFIRM: your AGREE DOTS diamond vs the 1m-tuned diamond (TTM 30 / Vix 30 / same candle) on the
   YEAR BEFORE (never seen) + the last 12 months, each ticker (type SPY,QQQ,IWM), each quarter, 1/2/3/5m. DATA ONLY.
 MODE=dial = DIAL IN THE DIAMOND: every bar-count setting of your AGREE DOTS diamond (311,040 per chart) + every
   reading at each diamond (inside the diamond, the run into it, colors, trend line, VWAP, the day, real VIX), alone and in every
@@ -159,7 +162,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "confirm").strip().lower() or "confirm"
+MODE = os.getenv("MODE", "lab").strip().lower() or "lab"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -459,6 +462,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "lab":
+        return lab_main()
     if MODE == "confirm":
         return cf_main()
     if MODE == "dial":
@@ -12972,6 +12977,669 @@ def cf_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/confirm_{stamp}.md", f"{OUT}/confirm_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as f:
+            f.write(text + "\n")
+
+# ================================================================ DIAMOND OPTIONS LAB (MODE=lab)
+# Every AGREE DOTS diamond (YOUR + TUNED settings, SPY + QQQ, 1/2/3/5m) traded on REAL historical option prices (Alpaca OPRA
+# 1-minute bars, Feb 2024 on): 0DTE vs 1DTE, 2 strikes in the money to 2 out, entry at the diamond or on the trend-line cross,
+# trend-line / structure / option-% exits - Kelly for every combination - then every Vix Fix / TTM / trend line / VWAP /
+# day / real VIX reading as a filter, blind-tested. Plus: what the at-the-money straddle costs vs the move that comes.
+LAB_TFS_DEF = "1,2,3,5"
+LAB_START = os.getenv("LAB_START", "2024-02-15")
+LAB_STRIKES = [-2, -1, 0, 1, 2]          # strikes from the money: - = IN the money, + = OUT of the money
+LAB_EXPS = [0, 1]                        # 0DTE, 1DTE (next trading day)
+LAB_ENTRIES = ["AT THE DIAMOND", "TREND LINE CROSS"]
+LAB_EXITS = ["LINE BREAK", "LINE COLOR", "STRUCTURE", "LINE OR STRUCTURE", "TRAIL STRUCTURE", "OPPOSITE DIAMOND",
+             "OPTION +10% / -10%", "OPTION TRAIL 15%"]
+LAB_EXIT_WHY = {
+    "LINE BREAK": "ride until a candle closes back through the trend line (armed once a candle closed on your side)",
+    "LINE COLOR": "ride until the trend line turns the other color (red / pink for longs, green / blue for shorts)",
+    "STRUCTURE": "stop $0.05 past the last 10 candles' low (longs) / high (shorts), checked every minute",
+    "LINE OR STRUCTURE": "whichever comes first: line break or the structure stop",
+    "TRAIL STRUCTURE": "structure stop that trails: each closed candle moves it to the last 3 candles' low / high",
+    "OPPOSITE DIAMOND": "ride until the opposite diamond on the same chart",
+    "OPTION +10% / -10%": "the option itself: out at +10% or -10% (1-minute closes)",
+    "OPTION TRAIL 15%": "the option itself: out when it falls 15% from its best, or -10% from entry",
+}
+LAB_HOLD = 120                           # minutes max for every exit; everything flat by 15:55
+LAB_ENTRY_FROM, LAB_ENTRY_TO = 945, 1430
+LAB_F = ["SNOW", "ONOW", "SPK", "MAXD", "OMAX", "SCOL", "OCOL", "SDROP", "OCH", "FLOW", "GLOW", "TCOL", "TPK", "TLC", "PXL",
+         "ANG", "SQZ", "VWAP", "RUN", "PB", "TRND", "WITH", "VIXD", "VIXR", "RICH"]
+LAB_NAMES = {
+    "SNOW": ("Stretched side now (fear for longs / greed for shorts)", ["0-35", "35-60", "60-85", "85+"]),
+    "ONOW": ("Other side now", ["0-10", "10-20", "20-35", "35+"]),
+    "SPK": ("Stretched side's peak, last 10 candles", ["under 70", "70-85", "85-95", "95-99", "MAXED 100"]),
+    "MAXD": ("Stretched side MAXED (95+) in the last 10 candles", ["no", "YES"]),
+    "OMAX": ("Other side MAXED (95+) in the last 30 candles", ["no", "YES"]),
+    "SCOL": ("Stretched LINE COLOR", _RUNC2),
+    "OCOL": ("Other LINE COLOR", _RUNC2),
+    "SDROP": ("Stretched side: points dropped in the last 2 candles", ["rising / under 5", "5-15", "15-30", "30+"]),
+    "OCH": ("Other side: change in the last 2 candles", ["flat / falling", "up 5-15", "up 15-30", "up 30+"]),
+    "FLOW": ("Vix flow (greed + fear averages)", ["YOUR way", "none", "the RUN way"]),
+    "GLOW": ("Lines GLOW (Vix flow + TTM agree)", ["glow YOUR way", "no glow", "glow the RUN way"]),
+    "TCOL": ("TTM COLOR", ["RUN STILL PUSHING (cyan shorts / red longs)", "RUN FADING (blue shorts / yellow longs)",
+                           "FLIPPED YOUR WAY (red shorts / cyan longs)", "FLIPPED, BOUNCING (yellow shorts / blue longs)"]),
+    "TPK": ("TTM average peak before the turn (ATR)", ["under 1.5", "1.5-2", "2-3", "3+"]),
+    "TLC": ("TREND LINE COLOR", ["RUN SIDE STRONG (green shorts / red longs)", "RUN SIDE FADING (blue shorts / pink longs)", "GRAY",
+                                 "YOUR SIDE FADING (pink shorts / blue longs)", "YOUR SIDE STRONG (red shorts / green longs)"]),
+    "PXL": ("Price vs trend line (ATR)", ["through it to YOUR side", "at the line", "0.25-1 ATR on the run side", "1+ ATR on the run side"]),
+    "ANG": ("Trend line angle (+ = the run's way)", ["your way 5+", "flat (-5 to +5)", "run way 5-15", "run way 15+"]),
+    "SQZ": ("TTM squeeze", ["ON", "just fired", "off"]),
+    "VWAP": ("Price vs VWAP (ATR, + = run side)", ["your side", "-1 to +1", "+1 to +3", "+3 or more"]),
+    "RUN": ("The move into the diamond (last 20 candles, $)", ["under $0.75", "$0.75-1.50", "$1.50-3", "$3+"]),
+    "PB": ("Price already came back from the extreme ($)", ["under $0.20", "$0.20-0.50", "$0.50-1", "$1+"]),
+    "TRND": ("Day so far: net move / range", ["round trips (under 30%)", "30-60%", "trending (60%+)"]),
+    "WITH": ("Diamond vs the day's move so far", ["WITH the day", "AGAINST the day"]),
+    "VIXD": ("REAL VIX today (VIXY vs yesterday)", ["down", "up 0-3%", "up 3%+"]),
+    "VIXR": ("REAL VIX vs its 20-day average", ["LOW (5%+ under)", "normal", "HIGH (5%+ over)"]),
+    "RICH": ("Options today: 9:45 ATM straddle vs the last 20 days' real move", ["CHEAP (under 0.8x)", "fair (0.8-1.2x)",
+                                                                                 "RICH (over 1.2x)", "unknown (before 9:45)"]),
+}
+
+
+def lab_occ(sym, day, cp, k):
+    return f"{sym}{day:%y%m%d}{cp}{int(round(k * 1000)):08d}"
+
+
+def lab_fetch_opt(oc, contracts, day):
+    """1-minute closes for each contract on `day`, 9:30-15:59 ET -> {contract: np.array(390) with NaN gaps filled up to 5 min}"""
+    from alpaca.data.requests import OptionBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    start = pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30)
+    end = start + pd.Timedelta(minutes=390)
+    out = {}
+    cl = sorted(contracts)
+    for k0 in range(0, len(cl), 60):
+        chunk = cl[k0:k0 + 60]
+        df = None
+        for attempt in range(4):
+            try:
+                df = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
+                                                          start=start.tz_convert("UTC").to_pydatetime(),
+                                                          end=end.tz_convert("UTC").to_pydatetime())).df
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  option bars {day} failed ({attempt + 1}/4): {str(e)[:200]}", flush=True)
+                time.sleep(5 * (attempt + 1))
+        if df is None or not len(df):
+            continue
+        if not isinstance(df.index, pd.MultiIndex):
+            continue
+        for sym_, g in df.groupby(level=0):
+            g = g.droplevel(0)
+            ix = g.index.tz_convert(NY)
+            mm = (ix.hour * 60 + ix.minute - 570).to_numpy()
+            ok = (mm >= 0) & (mm < 390)
+            a = np.full(390, np.nan)
+            a[mm[ok]] = g["close"].to_numpy()[ok]
+            out[sym_] = pd.Series(a).ffill(limit=5).to_numpy()
+    return out
+
+
+def lab_fake_opt(contracts, day, spot_by_sym):
+    """TEST mode: option closes from a simple pricing model on the fake underlying (no data needed)"""
+    out = {}
+    for c in contracts:
+        sym, exp, cp, k = c[:3], pd.Timestamp("20" + c[3:9]).date(), c[9], int(c[10:]) / 1000
+        s = spot_by_sym.get(sym)
+        if s is None:
+            continue
+        mins = np.arange(390)
+        left = (390 - mins) + (390 * np.busday_count(day, exp) if exp > day else 0)
+        tv = 0.9 * np.sqrt(np.maximum(left, 1) / 390) * np.exp(-np.abs(s - k) / (2 + left / 390))
+        intr = np.maximum(s - k, 0) if cp == "C" else np.maximum(k - s, 0)
+        out[c] = np.round(intr + tv, 2)
+    return out
+
+
+def lab_kelly(r):
+    """exact Kelly for the trades' returns on premium: the fraction of the account put into premium that maximizes growth"""
+    r = np.clip(np.asarray(r, float), -0.999, None)
+    if len(r) < 10 or r.mean() <= 0:
+        return 0.0, 0.0
+    fs = np.linspace(0.01, 1.0, 100)
+    g = np.array([np.mean(np.log1p(f * r)) for f in fs])
+    j = int(np.argmax(g))
+    return float(fs[j]), float(g[j])
+
+
+def lab_main():
+    from itertools import combinations
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
+    start = pd.Timestamp(LAB_START, tz=NY)
+    fetch_from = (start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("LAB_TFS", LAB_TFS_DEF).split(",")]
+    syms = [s_ for s_ in SYMBOLS if s_ in ("SPY", "QQQ", "IWM")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    oc = None
+    if not test:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+    vx1, _ = fake_1m("VIXY", fetch_from, end) if test else fetch_1m("VIXY", fetch_from, end)
+    vxc = vx1["close"]
+    vday = vxc.groupby(vxc.index.date).last()
+    vday_prev = pd.Series(vday.shift(1).values, index=pd.to_datetime(vday.index))
+    vday_avg20 = pd.Series(vday.rolling(20).mean().shift(1).values, index=pd.to_datetime(vday.index))
+    ENT = []           # one row per (diamond, entry variant): exits (minute of day) + features
+    STK = {}           # sym -> dict(day -> (open1m 390, high, low, close))
+    for sym in syms:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df1 = df1[(df1.index.hour * 100 + df1.index.minute >= 400) & (df1.index.hour * 100 + df1.index.minute < 2000)]
+        o1, h1, l1, c1 = (df1[k].to_numpy() for k in ("open", "high", "low", "close"))
+        t1 = df1.index
+        hm1 = (t1.hour * 100 + t1.minute).to_numpy()
+        mod1 = (t1.hour * 60 + t1.minute).to_numpy() - 570              # minute of the regular session
+        dd1 = np.array(t1.date)
+        # per-day regular-session 1m arrays (for the straddle study + the fake option model)
+        rth1 = (mod1 >= 0) & (mod1 < 390)
+        dmap = {}
+        for d_, ix in pd.Series(np.nonzero(rth1)[0]).groupby(dd1[rth1]):
+            arr = np.full((4, 390), np.nan)
+            ii = ix.to_numpy()
+            for r_, src in enumerate((o1, h1, l1, c1)):
+                arr[r_, mod1[ii]] = src[ii]
+            dmap[d_] = pd.DataFrame(arr.T).ffill().bfill().to_numpy().T
+        STK[sym] = dmap
+        days_sorted = sorted(dmap)
+        next_day = {d_: (days_sorted[i + 1] if i + 1 < len(days_sorted) else None) for i, d_ in enumerate(days_sorted)}
+        for tf in tfs:
+            ch = f"{sym} {tf}m"
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            e = np.minimum(np.searchsorted(t1.values, (ts + pd.Timedelta(minutes=tf)).values), len(t1) - 1)   # 1m index right after the close
+            sh = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+            col, ef = tlt_colors(df, ind)
+            ang = np.nan_to_num(ang_series(df, ind, 5))
+            vw = ind["vwap"]
+            S_ = agr_series(df, ind)
+            m, st_ = S_["m"], S_["st"]
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F), np.nan_to_num(G)
+            cs = df["close"]
+            hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+            wvf, wvs = (hc22 - df["low"]) / hc22 * 100, (df["high"] - lc22) / lc22 * 100
+            fspk = ((wvf >= wvf.rolling(20).mean() + 2 * wvf.rolling(20).std(ddof=0)) | (wvf >= wvf.rolling(50).max() * 0.85)).to_numpy()
+            gspk = ((wvs >= wvs.rolling(20).mean() + 2 * wvs.rolling(20).std(ddof=0)) | (wvs >= wvs.rolling(50).max() * 0.85)).to_numpy() & ~fspk
+            fRun, gRun = sm_frun(F, fspk), sm_frun(G, gspk)
+            gAm, fAm = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy(), pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+            upFlow, dnFlow = (gAm > sh(gAm, 1)) & (fAm < sh(fAm, 1)), (gAm < sh(gAm, 1)) & (fAm > sh(fAm, 1))
+            av = pd.Series(m).ewm(span=5, adjust=False).mean().to_numpy()
+            av1 = sh(av, 1)
+            dev = 2 * cs.rolling(20).std(ddof=0)
+            trr = pd.concat([df["high"] - df["low"], (df["high"] - cs.shift(1)).abs(), (df["low"] - cs.shift(1)).abs()], axis=1).max(axis=1)
+            sq = (dev < 1.5 * trr.ewm(alpha=1 / 20, adjust=False).mean()).to_numpy()
+            fired = ~sq & (pd.Series(sq.astype(float)).shift(1).rolling(3, min_periods=1).max().fillna(0).to_numpy() > 0)
+            sqz = np.where(sq, 0, np.where(fired, 1, 2))
+            rth = (hm >= 930) & (hm < 1600)
+            dord = np.array([d_.toordinal() for d_ in day])
+            dkey = pd.Series(dord)
+            o930 = pd.Series(np.where(rth, o, np.nan)).groupby(dkey).transform("first").to_numpy()
+            hi_sf = pd.Series(np.where(rth, h, -np.inf)).groupby(dkey).cummax().to_numpy()
+            lo_sf = pd.Series(np.where(rth, l, np.inf)).groupby(dkey).cummin().to_numpy()
+            rng_ = np.where(np.isfinite(hi_sf - lo_sf), hi_sf - lo_sf, 0)
+            move = c - o930
+            trnd = np.nan_to_num(np.abs(move) / np.where(rng_ > 0, rng_, np.nan))
+            vxa = vxc.reindex(ts + pd.Timedelta(minutes=tf) - pd.Timedelta(minutes=1), method="ffill").to_numpy()
+            dts = pd.to_datetime(pd.Index(ts.date))
+            vxd = (vxa / vday_prev.reindex(dts).to_numpy() - 1) * 100
+            vxr = (vxa / vday_avg20.reindex(dts).to_numpy() - 1) * 100
+            lo10 = pd.Series(l).rolling(10, min_periods=1).min().to_numpy()
+            hi10 = pd.Series(h).rolling(10, min_periods=1).max().to_numpy()
+            lo3 = pd.Series(l).rolling(3, min_periods=1).min().to_numpy()
+            hi3 = pd.Series(h).rolling(3, min_periods=1).max().to_numpy()
+            ok_win = np.asarray(ts >= start) & np.isfinite(a) & (a > 0)
+            for book, stg in CF_SETS + [("RANDOM", None)]:
+                if stg is None:          # RANDOM = the same number of entries as YOUR diamonds, at random candles, random side
+                    yb, ys = cf_marks(df, CF_SETS[0][1])
+                    rg = np.random.default_rng(tf * 1000 + len(sym))
+                    pick = np.sort(rg.choice(np.arange(100, n), min(n - 100, len(yb) + len(ys)), replace=False))
+                    sides = rg.random(len(pick)) < 0.5
+                    bull, bear = pick[sides], pick[~sides]
+                else:
+                    bull, bear = cf_marks(df, stg)
+                bmark = np.zeros(n, bool)
+                smark = np.zeros(n, bool)
+                bmark[bull] = True
+                smark[bear] = True
+                for sd, idxs in ((1, bull), (-1, bear)):
+                    opp_marks = np.nonzero(smark if sd == 1 else bmark)[0]
+                    runc = -sd
+                    Sx, Ox = (F, G) if sd == 1 else (G, F)
+                    sRun, oRun = (fRun, gRun) if sd == 1 else (gRun, fRun)
+                    mm_ = m * runc
+                    rise_r = mm_ > sh(mm_, 1)
+                    tcol = np.where(mm_ >= 0, np.where(rise_r, 0, 1), np.where(rise_r, 3, 2))
+                    glow_y = (upFlow & (st_ == 1)) if sd == 1 else (dnFlow & (st_ == -1))
+                    glow_r = (dnFlow & (st_ == -1)) if sd == 1 else (upFlow & (st_ == 1))
+                    flow_y, flow_r = (upFlow, dnFlow) if sd == 1 else (dnFlow, upFlow)
+                    mx10 = pd.Series(Sx).rolling(10, min_periods=1).max().to_numpy()
+                    omx30 = pd.Series(Ox).rolling(30, min_periods=1).max().to_numpy()
+                    for i in idxs:
+                        if not ok_win[i] or hm[i] < 900:
+                            continue
+                        # entry variants
+                        nxt_opp = opp_marks[np.searchsorted(opp_marks, i + 1)] if np.searchsorted(opp_marks, i + 1) < len(opp_marks) else n + 10
+                        for ev in LAB_ENTRIES:
+                            if ev == "AT THE DIAMOND":
+                                k = i
+                            else:
+                                k = None
+                                for j in range(i, min(n, i + 11)):
+                                    if j >= nxt_opp or day[j] != day[i]:
+                                        break
+                                    if (c[j] - ef[j]) * sd > 0:
+                                        k = j
+                                        break
+                                if k is None:
+                                    continue
+                            ek = int(e[k])
+                            if dd1[ek] != day[k]:
+                                continue
+                            m_e = int(mod1[ek])
+                            if not (LAB_ENTRY_FROM <= hm1[ek] < LAB_ENTRY_TO + 1) or m_e < 0 or m_e >= 390:
+                                continue
+                            m_cap = min(m_e - 1 + LAB_HOLD, 385)                 # 15:55 (minute-of-session index)
+                            # candle-close exits (exit minute = the minute right after the candle closes)
+                            ex = {}
+                            js = np.arange(k + 1, min(n, k + 1 + LAB_HOLD // tf + 2))
+                            js = js[(dd1[np.minimum(e[js], len(dd1) - 1)] == day[k])]
+                            mins_j = (mod1[e[js]] - 1) if len(js) else np.array([], int)     # the candle's last minute
+                            sel = mins_j <= m_cap
+                            js, mins_j = js[sel], mins_j[sel]
+                            side_ok = (c - ef) * sd > 0
+                            armed = bool(side_ok[k])
+                            lb = None
+                            for j, mj in zip(js, mins_j):
+                                if armed and not side_ok[j]:
+                                    lb = int(mj)
+                                    break
+                                if side_ok[j]:
+                                    armed = True
+                            ex["LINE BREAK"] = lb if lb is not None else m_cap
+                            lc_ = [int(mj) for j, mj in zip(js, mins_j) if col[j] * sd <= -1]
+                            ex["LINE COLOR"] = lc_[0] if lc_ else m_cap
+                            od = [int(mj) for j, mj in zip(js, mins_j) if (smark if sd == 1 else bmark)[j]]
+                            ex["OPPOSITE DIAMOND"] = od[0] if od else m_cap
+                            # 1-minute structure stops
+                            D_ = STK[sym][day[k]]
+                            path_lo, path_hi = D_[2, m_e:m_cap + 1], D_[1, m_e:m_cap + 1]
+                            lvl = (lo10[k] - 0.05) if sd == 1 else (hi10[k] + 0.05)
+                            hit = np.nonzero((path_lo <= lvl) if sd == 1 else (path_hi >= lvl))[0]
+                            ex["STRUCTURE"] = m_e + int(hit[0]) if len(hit) else m_cap
+                            ex["LINE OR STRUCTURE"] = min(ex["LINE BREAK"], ex["STRUCTURE"])
+                            # trailing structure: after each closed candle, the level moves to the last 3 candles' low / high
+                            lvl_t = np.full(len(path_lo), lvl)
+                            for j, mj in zip(js, mins_j):
+                                nl = (lo3[j] - 0.05) if sd == 1 else (hi3[j] + 0.05)
+                                p0 = int(mj) - m_e + 1
+                                if 0 <= p0 < len(lvl_t):
+                                    lvl_t[p0:] = np.maximum(lvl_t[p0:], nl) if sd == 1 else np.minimum(lvl_t[p0:], nl)
+                            hit = np.nonzero((path_lo <= lvl_t) if sd == 1 else (path_hi >= lvl_t))[0]
+                            ex["TRAIL STRUCTURE"] = m_e + int(hit[0]) if len(hit) else m_cap
+                            spot = float(D_[0, m_e])
+                            row = dict(sym=sym, tf=tf, ch=ch, book=book, side=sd, entry=ev, day=day[k], dord=dord[k], m_e=m_e, m_cap=m_cap,
+                                       spot=spot, nday=next_day.get(day[k]))
+                            for x_ in ex:
+                                row[f"x{LAB_EXITS.index(x_)}"] = ex[x_]
+                            ii = i
+                            lo20 = max(0, ii - 19)
+                            run = float(h[lo20:ii + 1].max() - l[lo20:ii + 1].min())
+                            pb = float((c[ii] - l[lo20:ii + 1].min()) if sd == 1 else (h[lo20:ii + 1].max() - c[ii]))
+                            row.update(
+                                SNOW=np.digitize(Sx[ii], [35, 60, 85]), ONOW=np.digitize(Ox[ii], [10, 20, 35]),
+                                SPK=np.digitize(mx10[ii], [70, 85, 95, 99.5]), MAXD=int(mx10[ii] >= 95), OMAX=int(omx30[ii] >= 95),
+                                SCOL=int(sRun[ii]), OCOL=int(oRun[ii]),
+                                SDROP=np.digitize(np.nan_to_num(sh(Sx, 2)[ii] - Sx[ii]), [5, 15, 30]),
+                                OCH=np.digitize(np.nan_to_num(Ox[ii] - sh(Ox, 2)[ii]), [5, 15, 30]),
+                                FLOW=0 if flow_y[ii] else (2 if flow_r[ii] else 1), GLOW=0 if glow_y[ii] else (2 if glow_r[ii] else 1),
+                                TCOL=int(tcol[ii]), TPK=np.digitize(abs(np.nan_to_num(av1[ii])), [1.5, 2, 3]),
+                                TLC=int(2 - col[ii] * runc), PXL=np.digitize((c[ii] - ef[ii]) / a[ii] * runc, [-0.25, 0.25, 1]),
+                                ANG=np.digitize(ang[ii] * runc, [-5, 5, 15]), SQZ=int(sqz[ii]),
+                                VWAP=np.digitize((c[ii] - vw[ii]) / a[ii] * runc, [-1, 1, 3]),
+                                RUN=np.digitize(run, [0.75, 1.5, 3]), PB=np.digitize(pb, [0.2, 0.5, 1]),
+                                TRND=np.digitize(trnd[ii], [0.3, 0.6]), WITH=0 if move[ii] * sd > 0 else 1,
+                                VIXD=np.digitize(np.nan_to_num(vxd[ii]), [0, 3]), VIXR=np.digitize(np.nan_to_num(vxr[ii]), [-5, 5]))
+                            ENT.append(row)
+            print(f"  {ch}: entries so far {len(ENT):,} ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.DataFrame(ENT)
+    if not len(E):
+        print("no entries")
+        return
+    # ---- options, day by day: every contract each entry needs (5 strikes x 0DTE / 1DTE) + the 9:45 straddles
+    XN = LAB_EXITS
+    NE, NS, NX = len(E), len(LAB_STRIKES), len(LAB_EXPS)
+    RET = np.full((NE, len(XN), NS, NX), np.nan, dtype=np.float32)
+    STR = []
+    n_req = n_got = 0
+    cost = lambda p: np.maximum(0.01, 0.005 * p)
+    E["k0"] = np.round(E["spot"])
+    days = sorted(E["day"].unique(), reverse=True)          # newest first, so a time cut keeps the recent data
+    budget = float(os.getenv("LAB_BUDGET_MIN", "75")) * 60
+    cut_at = None
+    for di, d_ in enumerate(days):
+        if time.time() - t0 > budget:
+            cut_at = d_
+            print(f"  time budget reached - option prices stop at {d_}", flush=True)
+            break
+        Ed = E[E["day"] == d_]
+        for sym in syms:
+            Es = Ed[Ed["sym"] == sym]
+            nd = None
+            if d_ in STK[sym]:
+                ds_ = sorted(STK[sym])
+                ix_ = ds_.index(d_)
+                nd = ds_[ix_ + 1] if ix_ + 1 < len(ds_) else None
+            spot945 = float(STK[sym][d_][0, 15]) if d_ in STK[sym] else None
+            need = set()
+            if spot945:
+                k945 = round(spot945)
+                for xe, ed in ((0, d_), (1, nd)):
+                    if ed is None:
+                        continue
+                    need |= {lab_occ(sym, ed, "C", k945), lab_occ(sym, ed, "P", k945)}
+            for z in Es.itertuples():
+                for xi, xe in enumerate(LAB_EXPS):
+                    ed = d_ if xe == 0 else z.nday
+                    if ed is None:
+                        continue
+                    for off in LAB_STRIKES:
+                        kk = z.k0 + off * z.side
+                        need.add(lab_occ(sym, ed, "C" if z.side == 1 else "P", kk))
+            if not need:
+                continue
+            if test:
+                OP = lab_fake_opt(need, d_, {sym: STK[sym][d_][3]})
+            else:
+                OP = lab_fetch_opt(oc, need, d_)
+            n_req += len(need)
+            n_got += len(OP)
+            # straddle study (9:45 ATM straddle, held to 15:55)
+            if spot945:
+                for xe, ed in ((0, d_), (1, nd)):
+                    if ed is None:
+                        continue
+                    cc, pp = OP.get(lab_occ(sym, ed, "C", k945)), OP.get(lab_occ(sym, ed, "P", k945))
+                    if cc is None or pp is None or not np.isfinite(cc[15]) or not np.isfinite(pp[15]) or not np.isfinite(cc[385]) or not np.isfinite(pp[385]):
+                        continue
+                    prem = cc[15] + pp[15]
+                    real = abs(STK[sym][d_][3, 385] - spot945)
+                    STR.append(dict(sym=sym, day=d_, exp=xe, prem=prem, val_close=cc[385] + pp[385], real_move=real,
+                                    day_range=float(np.nanmax(STK[sym][d_][1, 15:386]) - np.nanmin(STK[sym][d_][2, 15:386]))))
+            # every entry x exit x strike x expiration
+            for z in Es.itertuples():
+                for xi, xe in enumerate(LAB_EXPS):
+                    ed = d_ if xe == 0 else z.nday
+                    if ed is None:
+                        continue
+                    for si, off in enumerate(LAB_STRIKES):
+                        P = OP.get(lab_occ(sym, ed, "C" if z.side == 1 else "P", z.k0 + off * z.side))
+                        if P is None:
+                            continue
+                        pe = P[z.m_e - 1] if z.m_e >= 1 else P[0]
+                        if not np.isfinite(pe) or pe < 0.05:
+                            continue
+                        buy = pe + cost(pe)
+                        for xj, xn in enumerate(XN):
+                            if xn.startswith("OPTION"):
+                                path = P[z.m_e:z.m_cap + 1]
+                                rr = path / pe - 1
+                                if xn == "OPTION +10% / -10%":
+                                    hit = np.nonzero((rr >= 0.10) | (rr <= -0.10))[0]
+                                else:
+                                    best = np.fmax.accumulate(np.where(np.isfinite(path), path, -np.inf))
+                                    hit = np.nonzero((path <= 0.85 * best) | (rr <= -0.10))[0]
+                                mx = z.m_e + int(hit[0]) if len(hit) else z.m_cap
+                            else:
+                                mx = int(getattr(z, f"x{xj}"))
+                            px = P[min(max(mx, z.m_e), 389)]
+                            if not np.isfinite(px):
+                                continue
+                            RET[z.Index, xj, si, xi] = (px - cost(px)) / buy - 1
+        if di % 20 == 0:
+            print(f"  options: day {di + 1}/{len(days)} {d_} ({time.time() - t0:.0f}s)", flush=True)
+    # ---- RICH feature: 9:45 straddle vs the last 20 days' real 9:45->15:55 move
+    SD = pd.DataFrame(STR)
+    rich = {}
+    if len(SD):
+        for sym in syms:
+            s0 = SD[(SD["sym"] == sym) & (SD["exp"] == 0)].sort_values("day")
+            avgmv = s0["real_move"].rolling(20, min_periods=10).mean().shift(1)
+            for d_, pr, am in zip(s0["day"], s0["prem"], avgmv):
+                if np.isfinite(am) and am > 0:
+                    rich[(sym, d_)] = np.digitize(pr / am, [0.8, 1.2])
+    E["RICH"] = [rich.get((s_, d_), 3) if m_ >= 15 else 3 for s_, d_, m_ in zip(E["sym"], E["day"], E["m_e"])]
+    midord = E["dord"].median()
+    E["half"] = (E["dord"] >= midord).astype(int)
+    E["entry_i"] = E["entry"].map({x: i for i, x in enumerate(LAB_ENTRIES)})
+
+    # ---- score every combination
+    def stats(r, dordv, kel=True):
+        ok = np.isfinite(r)
+        r, dv = r[ok], dordv[ok]
+        if len(r) < 30:
+            return None
+        s_ = pd.Series(r).groupby(dv).agg(["sum", "count"])
+        mu = s_["sum"].sum() / s_["count"].sum()
+        se = np.sqrt(((s_["sum"] - s_["count"] * mu) ** 2).sum()) / s_["count"].sum()
+        f, g = lab_kelly(r) if kel else (0.0, 0.0)
+        fh, gh = (f / 2, float(np.mean(np.log1p(f / 2 * np.clip(r, -0.999, None))))) if f > 0 else (0.0, 0.0)
+        return dict(n=len(r), days=len(s_), win=float((r > 0).mean()), avg=float(mu), t=float(mu / se) if se > 0 else np.nan,
+                    avgw=float(r[r > 0].mean()) if (r > 0).any() else 0.0, avgl=float(r[r <= 0].mean()) if (r <= 0).any() else 0.0,
+                    kelly=f, g=g, half_g=gh)
+    groups = [(f"{'+'.join(syms)} ALL timeframes", np.ones(NE, bool))]
+    for tf in tfs:
+        groups.append((f"{'+'.join(syms)} {tf}m", (E["tf"] == tf).to_numpy()))
+    for sym in syms:
+        for tf in tfs:
+            groups.append((f"{sym} {tf}m", ((E["sym"] == sym) & (E["tf"] == tf)).to_numpy()))
+    rows = []
+    dv_all = E["dord"].to_numpy()
+    hv = E["half"].to_numpy()
+    for book, _ in CF_SETS + [("RANDOM", None)]:
+        bm = (E["book"] == book).to_numpy()
+        for gname, gm in groups:
+            for ei, ev in enumerate(LAB_ENTRIES):
+                m0 = bm & gm & (E["entry_i"] == ei).to_numpy()
+                if m0.sum() < 30:
+                    continue
+                for xj, xn in enumerate(XN):
+                    for si, off in enumerate(LAB_STRIKES):
+                        for xi, xe in enumerate(LAB_EXPS):
+                            r = RET[m0, xj, si, xi]
+                            z = stats(r, dv_all[m0])
+                            if z is None:
+                                continue
+                            h0 = stats(r[hv[m0] == 0], dv_all[m0][hv[m0] == 0], kel=False)
+                            h1 = stats(r[hv[m0] == 1], dv_all[m0][hv[m0] == 1], kel=False)
+                            rows.append(dict(book=book, group=gname, entry=ev, exit=xn, strike=off, exp=xe, **z,
+                                             avg_h1=h0["avg"] if h0 else np.nan, avg_h2=h1["avg"] if h1 else np.nan,
+                                             t_h1=h0["t"] if h0 else np.nan, t_h2=h1["t"] if h1 else np.nan))
+    R = pd.DataFrame(rows)
+    R["both"] = (R["avg_h1"] > 0) & (R["avg_h2"] > 0)
+    sname = lambda off: "ATM" if off == 0 else (f"{abs(off)} ITM" if off < 0 else f"{off} OTM")
+    ename = lambda xe: "0DTE" if xe == 0 else "1DTE"
+    md = [f"# DIAMOND OPTIONS LAB - EVERY DIAMOND ON REAL OPTION PRICES - {', '.join(syms)} - {LAB_START} to now - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Runtime {(time.time() - t0) / 60:.0f} min. Diamond entries: {len(E):,} (both books, {', '.join(str(t) + 'm' for t in tfs)}, "
+          f"both entry types). Option prices = {'FAKE (test mode)' if test else 'Alpaca OPRA 1-minute bars'}: {n_got:,} of {n_req:,} "
+          f"contract-days found" + (f" (time limit: option prices only back to {cut_at})" if cut_at else "") + ". DATA ONLY.",
+          "**Each trade** buys the option at the close of the signal minute (+ cost) and sells at the exit minute's close (- cost). "
+          "**Cost** = $0.01 or 0.5% of the price per side, whichever is bigger. Entries 9:45-14:30, everything out by 15:55, "
+          f"max {LAB_HOLD} minutes. **Return** = % on the premium paid.",
+          "**Kelly** = the share of the ACCOUNT to put into premium per trade that grows it fastest (exact, from the trades' "
+          "returns). **Growth/trade** = the typical account growth per trade at full Kelly (half Kelly keeps ~75% of it with "
+          "half the swings). 0 = no edge: any size loses.",
+          "**Strikes:** ATM = nearest strike; 1-2 ITM / OTM = $1 strikes in / out of the money. **0DTE** = expires today, "
+          "**1DTE** = the next trading day's expiration (still closed the same day).", "",
+          "**Exits:**"] + [f"- **{k}** - {v}" for k, v in LAB_EXIT_WHY.items()] + [
+          "- **Entries:** AT THE DIAMOND = right after the diamond candle closes. TREND LINE CROSS = wait (up to 10 candles) for the "
+          "first candle that closes on your side of the trend line.", ""]
+    # ---- 1. pricing
+    md += ["## 1. ARE 0DTE / 1DTE OPTIONS CHEAP OR RICH? (9:45 at-the-money straddle, held to 15:55)",
+           "Straddle P&L = what the call + put are worth at 15:55 vs what they cost at 9:45 (no costs). Negative = buyers overpay."]
+    if len(SD):
+        SD["pnl"] = SD["val_close"] / SD["prem"] - 1
+        SD = SD.merge(E.groupby(["sym", "day"])[["VIXR", "VIXD"]].first().reset_index(), on=["sym", "day"], how="left")
+        md += ["| Group | Expiration | Days | Straddle cost | Real move 9:45-15:55 | Straddle P&L (avg) | Days it made money |", "|---|---|---|---|---|---|---|"]
+        for xe in (0, 1):
+            s0 = SD[SD["exp"] == xe]
+            for gname, gg in [("all days", s0)] + [(f"VIX {LAB_NAMES['VIXR'][1][v]}", s0[s0["VIXR"] == v]) for v in range(3)] + \
+                    [(f"VIX today {LAB_NAMES['VIXD'][1][v]}", s0[s0["VIXD"] == v]) for v in range(3)]:
+                if len(gg) < 5:
+                    continue
+                md.append(f"| {gname} | {ename(xe)} | {len(gg)} | ${gg['prem'].mean():.2f} | ${gg['real_move'].mean():.2f} | "
+                          f"**{100 * gg['pnl'].mean():+.1f}%** | {100 * (gg['pnl'] > 0).mean():.0f}% |")
+    # ---- 2. the grid
+    TH = "| Book | Chart | Entry | Exit | Strike | Exp | Trades | Win % | Avg return | Avg win / loss | t | Kelly | Growth / trade | 1st / 2nd half |"
+    TS = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+
+    def trow(z):
+        return (f"| {z.book} | {z.group} | {z.entry} | {z.exit} | {sname(z.strike)} | {ename(z.exp)} | {z.n} | {100 * z.win:.0f}% | "
+                f"**{100 * z.avg:+.1f}%** | {100 * z.avgw:+.0f}% / {100 * z.avgl:+.0f}% | {z.t:.1f} | {100 * z.kelly:.0f}% | "
+                f"{100 * z.g:+.2f}% | {100 * z.avg_h1:+.1f}% / {100 * z.avg_h2:+.1f}% |")
+    md += ["", "## 2. 0DTE vs 1DTE, EVERY STRIKE - average return per trade (all charts together, entry at the diamond)",
+           "Each cell: avg return on premium (Kelly %). Kelly 0 = no edge."]
+    for book, _ in CF_SETS + [("RANDOM", None)]:
+        for ev in LAB_ENTRIES:
+            md += ["", f"### {book} - {ev}" + (" (the bar to beat: random candles, random side, same exits)" if book == "RANDOM" else ""), "| Exit | " + " | ".join(f"{sname(o)} {ename(x)}" for x in LAB_EXPS for o in LAB_STRIKES) + " |",
+                   "|---|" + "---|" * (NS * NX)]
+            q = R[(R["book"] == book) & (R["group"] == groups[0][0]) & (R["entry"] == ev)]
+            for xn in XN:
+                cells = []
+                for xe in LAB_EXPS:
+                    for o in LAB_STRIKES:
+                        z = q[(q["exit"] == xn) & (q["strike"] == o) & (q["exp"] == xe)]
+                        cells.append(f"{100 * z['avg'].iloc[0]:+.1f}% ({100 * z['kelly'].iloc[0]:.0f}%)" if len(z) else "-")
+                md.append(f"| {xn} | " + " | ".join(cells) + " |")
+    good = R[(R["t"] >= 2.5) & R["both"] & (R["kelly"] > 0) & (R["book"] != "RANDOM")].sort_values("g", ascending=False)
+    rnd_good = R[(R["t"] >= 2.5) & R["both"] & (R["kelly"] > 0) & (R["book"] == "RANDOM")]
+    md += ["", f"## 3. THE BEST COMBINATIONS (t 2.5+, positive in both halves, Kelly > 0) - {len(good):,} of "
+           f"{len(R[R['book'] != 'RANDOM']):,} (RANDOM entries: {len(rnd_good):,} of {len(R[R['book'] == 'RANDOM']):,} - if random "
+           "entries pass too, it is the option prices / exits, not the diamond)", TH, TS]
+    for z in good.head(40).itertuples():
+        md.append(trow(z))
+    for tf in tfs:
+        md += ["", f"### {tf}m charts - best 8", TH, TS]
+        for z in good[good["group"].str.endswith(f" {tf}m")].head(8).itertuples():
+            md.append(trow(z))
+    # ---- blind tests for the combinations
+    md += ["", "## 4. BLIND TESTS - the best combination picked on ONE half (by t), judged on the OTHER half (✅ = avg +3%+ and t 2.5+)"]
+    for book, _ in CF_SETS + [("RANDOM", None)]:
+        for gname, gm in groups[:1 + len(tfs)]:
+            for pick in (0, 1):
+                q = R[(R["book"] == book) & (R["group"] == gname)]
+                tc_ = "t_h1" if pick == 0 else "t_h2"
+                q = q[np.isfinite(q[tc_])]
+                if not len(q):
+                    continue
+                z = q.sort_values(tc_, ascending=False).iloc[0]
+                m0 = ((E["book"] == book).to_numpy() & gm & (E["entry"] == z["entry"]).to_numpy() & (hv != pick))
+                r = RET[m0, XN.index(z["exit"]), LAB_STRIKES.index(z["strike"]), LAB_EXPS.index(z["exp"])]
+                s_ = stats(r, dv_all[m0])
+                if s_ is None:
+                    continue
+                ok = s_["avg"] >= 0.03 and s_["t"] >= 2.5
+                md.append(f"- **{book} {gname}**, picked on {'the 1st half' if pick == 0 else 'the 2nd half'}: {z['entry']} / {z['exit']} / "
+                          f"{sname(z['strike'])} {ename(z['exp'])} (t {z[tc_]:.1f}) -> other half: **{s_['n']} trades, {100 * s_['win']:.0f}% win, "
+                          f"{100 * s_['avg']:+.1f}%/trade, Kelly {100 * s_['kelly']:.0f}%** (t {s_['t']:.1f}) {'✅' if ok else ''}")
+    # ---- 5. every reading as a filter, on the best combinations + a reference one
+    ref = [("TUNED", groups[0][0], "AT THE DIAMOND", "LINE OR STRUCTURE", 0, 0), ("YOURS", groups[0][0], "AT THE DIAMOND", "LINE OR STRUCTURE", 0, 0)]
+    tops = [(z.book, z.group, z.entry, z.exit, z.strike, z.exp) for z in good[good["group"] == groups[0][0]].head(3).itertuples()]
+    md += ["", "## 5. EVERY READING AS A FILTER (Vix Fix, colors, TTM, trend line, VWAP, the day, real VIX, option prices)",
+           "For the 3 best all-chart combinations + YOUR / TUNED at the diamond, line-or-structure exit, ATM 0DTE. "
+           "✅ = t 2.5+, positive in both halves."]
+    FR = []
+    for cfg in tops + ref:
+        book, gname, ev, xn, off, xe = cfg
+        gm = dict(groups)[gname]
+        m0 = (E["book"] == book).to_numpy() & gm & (E["entry"] == ev).to_numpy()
+        r_all = RET[:, XN.index(xn), LAB_STRIKES.index(off), LAB_EXPS.index(xe)]
+        title = f"{book} / {gname} / {ev} / {xn} / {sname(off)} {ename(xe)}"
+        md += ["", f"### {title}", "| Reading | Trades | Win % | Avg return | t | Kelly | Growth / trade | 1st / 2nd half | |", "|---|---|---|---|---|---|---|---|---|"]
+        base = stats(r_all[m0], dv_all[m0])
+        if base:
+            md.append(f"| (no filter) | {base['n']} | {100 * base['win']:.0f}% | {100 * base['avg']:+.1f}% | {base['t']:.1f} | {100 * base['kelly']:.0f}% | "
+                      f"{100 * base['g']:+.2f}% | | |")
+        best_pairs = []
+        for sub in [s_ for r_ in (1, 2) for s_ in combinations(LAB_F, r_)]:
+            keyc = E.loc[m0, list(sub)].astype(int).astype(str).agg("|".join, axis=1) if len(sub) > 1 else E.loc[m0, sub[0]].astype(int).astype(str)
+            rr_, dv_, hh_ = r_all[m0], dv_all[m0], hv[m0]
+            keyv = np.asarray(keyc.to_numpy(), dtype=str)
+            for kv in np.unique(keyv):
+                ix = np.nonzero(keyv == kv)[0]
+                if len(ix) < 40:
+                    continue
+                s_ = stats(rr_[ix], dv_[ix])
+                if s_ is None:
+                    continue
+                a1 = np.nanmean(rr_[ix][hh_[ix] == 0]) if (hh_[ix] == 0).any() else np.nan
+                a2 = np.nanmean(rr_[ix][hh_[ix] == 1]) if (hh_[ix] == 1).any() else np.nan
+                vals = [int(v) for v in kv.split("|")]
+                words_ = " + ".join(f"{LAB_NAMES[f][0]}: {LAB_NAMES[f][1][v] if v < len(LAB_NAMES[f][1]) else v}" for f, v in zip(sub, vals))
+                rec = dict(cfg=title, sub=sub, vals=tuple(vals), readings=words_, size=len(sub), a1=a1, a2=a2, **s_)
+                FR.append(rec)
+                if len(sub) == 1:
+                    ok = s_["t"] >= 2.5 and a1 > 0 and a2 > 0
+                    md.append(f"| {words_} | {s_['n']} | {100 * s_['win']:.0f}% | {100 * s_['avg']:+.1f}% | {s_['t']:.1f} | {100 * s_['kelly']:.0f}% | "
+                              f"{100 * s_['g']:+.2f}% | {100 * a1:+.1f}% / {100 * a2:+.1f}% | {'✅' if ok else ''} |")
+                else:
+                    best_pairs.append(rec)
+        bp = sorted([b for b in best_pairs if b["t"] >= 2.5 and b["a1"] > 0 and b["a2"] > 0], key=lambda b: -b["g"])[:12]
+        if bp:
+            md += ["", f"**Best pairs for this combination ({len(bp)} shown):**", "| Readings | Trades | Win % | Avg return | t | Kelly | Growth / trade | 1st / 2nd half |",
+                   "|---|---|---|---|---|---|---|---|"]
+            for b in bp:
+                md.append(f"| {b['readings']} | {b['n']} | {100 * b['win']:.0f}% | {100 * b['avg']:+.1f}% | {b['t']:.1f} | {100 * b['kelly']:.0f}% | "
+                          f"{100 * b['g']:+.2f}% | {100 * b['a1']:+.1f}% / {100 * b['a2']:+.1f}% |")
+        # blind: best reading / pair picked on one half -> the other half
+        for pick in (0, 1):
+            best = None
+            rr_, dv_, hh_ = r_all[m0], dv_all[m0], hv[m0]
+            for sub in [s_ for r_ in (1, 2) for s_ in combinations(LAB_F, r_)]:
+                keyc = np.asarray(E.loc[m0, list(sub)].astype(int).astype(str).agg("|".join, axis=1).to_numpy(), dtype=str)
+                for kv in np.unique(keyc):
+                    ix = np.nonzero((keyc == kv) & (hh_ == pick))[0]
+                    if len(ix) < 25:
+                        continue
+                    s_ = stats(rr_[ix], dv_[ix], kel=False) if len(ix) >= 30 else None
+                    if s_ and np.isfinite(s_["t"]) and (best is None or s_["t"] > best[2]):
+                        best = (sub, kv, s_["t"])
+            if best is None:
+                continue
+            sub, kv, tp = best
+            keyc = np.asarray(E.loc[m0, list(sub)].astype(int).astype(str).agg("|".join, axis=1).to_numpy(), dtype=str)
+            ix = np.nonzero((keyc == kv) & (hh_ != pick))[0]
+            s_ = stats(rr_[ix], dv_[ix]) if len(ix) >= 30 else None
+            vals = [int(v) for v in kv.split("|")]
+            words_ = " + ".join(f"{LAB_NAMES[f][0]}: {LAB_NAMES[f][1][v] if v < len(LAB_NAMES[f][1]) else v}" for f, v in zip(sub, vals))
+            if s_ is None:
+                md.append(f"- BLIND, picked on {'the 1st half' if pick == 0 else 'the 2nd half'}: {words_} (t {tp:.1f}) -> other half: too few trades ({len(ix)})")
+                continue
+            ok = s_["avg"] >= 0.03 and s_["t"] >= 2.5
+            md.append(f"- BLIND, picked on {'the 1st half' if pick == 0 else 'the 2nd half'}: {words_} (t {tp:.1f}) -> other half: **{s_['n']} trades, "
+                      f"{100 * s_['win']:.0f}% win, {100 * s_['avg']:+.1f}%/trade, Kelly {100 * s_['kelly']:.0f}%** (t {s_['t']:.1f}) {'✅' if ok else ''}")
+    md += ["", "**Luck check:** thousands of combinations and filters are scored, so some look great by chance. The BLIND TESTS "
+           "(picked on one half, judged on the other) are what count."]
+    R.to_csv(f"{OUT}/lab_combinations.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    if FR:
+        pd.DataFrame(FR).drop(columns=["sub", "vals"]).to_csv(f"{OUT}/lab_filters.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    if len(SD):
+        SD.to_csv(f"{OUT}/lab_straddles.csv", index=False, float_format="%.4f")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/lab_{stamp}.md", f"{OUT}/lab_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm_ = os.getenv("GITHUB_STEP_SUMMARY")
