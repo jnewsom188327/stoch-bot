@@ -20,6 +20,10 @@ PLAN Q (3 MORE contracts on every diamond, decided on the OPTION price):
         Q1 sells 1 at +5% | Q2 sells 1 at +10% | Q3 = the runner: sells when the option falls 15% from its best,
         or after 30 minutes | all three: stop -10% on the option. Targets trigger on the bid, stops on the mid.
         An opposite diamond or 15:55 closes them too.
+PLAN D1 (TUNED diamonds only - 3 MORE contracts, but the NEXT expiration = 1DTE, at the money, same exits as plan Q):
+        D1 +5% / D1 +10% / D1 runner (15% off its best, 30 min) / stop -10% on the option. Traded like a 0DTE:
+        everything is closed the same day (15:55 at the latest). 1DTE moves slower than 0DTE - the point is a
+        smaller swing against you before the stop.
 FULL RECORD:
   diamond_signals.csv - every diamond on every chart and book, its readings, and what the bot did with it
   diamond_trades.csv  - one row per exit plan per trade (real or shadow), stock + option prices, $ and %
@@ -56,6 +60,9 @@ Q_QTY = 3                    # plan Q: extra contracts on every diamond (option-
 Q_PLANS = [("Q1 +5%", 5.0, None), ("Q2 +10%", 10.0, None), ("Q3 runner trail 15%", None, 15.0)]   # name, target %, trail %
 Q_SL = 10.0                  # option % stop for all Q contracts
 Q_RUN_MAX = 30               # minutes the Q3 runner may ride
+D1_QTY = 3                   # plan D1: extra contracts on TUNED diamonds, next expiration (1DTE), same exits as plan Q
+D1_BOOKS = ["TUNED"]
+D1_PLANS = [("D1 +5%", 5.0, None), ("D1 +10%", 10.0, None), ("D1 runner trail 15%", None, 15.0)]
 SWING_N, SWING_BUF = 10, 0.05
 ENTRY_FROM, ENTRY_TO, END_AT = 945, 1430, 1555
 CHECK_SECS = 5
@@ -254,7 +261,7 @@ def stock_prices(dc, syms):
 
 
 # ===== Options + orders =====
-def pick_atm(tc, sym, side, spot, today):
+def pick_atm(tc, sym, side, spot, today, after_today=False):
     from alpaca.trading.enums import ContractType
     from alpaca.trading.requests import GetOptionContractsRequest
     req = GetOptionContractsRequest(
@@ -264,7 +271,12 @@ def pick_atm(tc, sym, side, spot, today):
     cs = tc.get_option_contracts(req).option_contracts or []
     if not cs:
         return None
-    exp = min(pd.Timestamp(x.expiration_date).date() for x in cs)
+    exps = sorted({pd.Timestamp(x.expiration_date).date() for x in cs})
+    if after_today:
+        exps = [x for x in exps if x > today]
+        if not exps:
+            return None
+    exp = exps[0]
     cs = [x for x in cs if pd.Timestamp(x.expiration_date).date() == exp]
     return min(cs, key=lambda x: (abs(float(x.strike_price) - spot), float(x.strike_price)))
 
@@ -374,24 +386,40 @@ def open_trade(tc, oc, key, book, sym, tf, side, spot, swing_px, sig, today):
             for nm, tp, trail in Q_PLANS:
                 plans.append(dict(name=nm, qty=1, kind="opt", fill=qfill, peak=qfill, tp=tp, trail=trail, sl=Q_SL,
                                   target=f"+{tp:g}%" if tp else f"trail {trail:g}%", stop=f"-{Q_SL:g}%", ride=False, open=True))
+    d1 = None
+    if D1_QTY > 0 and book in D1_BOOKS:
+        try:
+            c1 = pick_atm(tc, sym, side, spot, today, after_today=True)
+        except Exception as e:
+            c1 = None
+            log(f"{key}: 1DTE lookup failed: {e}")
+        if c1:
+            dfill, _, _ = market(tc, oc, c1.symbol, D1_QTY, True, f"{book} {sym} {tf}m PLAN D1 1DTE ({D1_QTY} contracts)")
+            if dfill is not None:
+                d1 = (c1.symbol, dfill)
+                for nm, tp, trail in D1_PLANS:
+                    plans.append(dict(name=nm, qty=1, kind="opt", contract=c1.symbol, strike=float(c1.strike_price), fill=dfill,
+                                      peak=dfill, tp=tp, trail=trail, sl=Q_SL, target=f"+{tp:g}%" if tp else f"trail {trail:g}%",
+                                      stop=f"-{Q_SL:g}%", ride=False, open=True))
     tr = dict(key=key, book=book, sym=sym, tf=tf, side=side, contract=c.symbol, strike=float(c.strike_price), qty=qty,
               fill=fill, bid=fb, ask=fa, spot=spot, swing=round(swing_px, 2), t=now_et().isoformat(), plans=plans, sig=sig,
               qfill=qfill)
     log(f"ENTER {key} {'LONG - CALLS' if side == 1 else 'SHORT - PUTS'}: BUY {qty} {c.symbol} @ {fill:.2f} "
         f"(${fill * 100 * qty:,.0f}) | {sym} {spot:.2f}, swing stop {swing_px:.2f} | plans {deal(qty)}"
-        + (f" | plan Q: BUY {Q_QTY} @ {qfill:.2f}" if qfill is not None else ""))
+        + (f" | plan Q: BUY {Q_QTY} @ {qfill:.2f}" if qfill is not None else "")
+        + (f" | plan D1: BUY {D1_QTY} {d1[0]} @ {d1[1]:.2f}" if d1 else ""))
     return tr, "ENTER"
 
 
 def close_plan(tc, oc, tr, p, reason, spot):
     """exit one plan: sell its contracts (real) or log the live mid (shadow)"""
     if p["qty"] > 0:
-        px, bid, ask = market(tc, oc, tr["contract"], p["qty"], False, f"{tr['key']} {p['name']} {reason}")
+        px, bid, ask = market(tc, oc, p.get("contract", tr["contract"]), p["qty"], False, f"{tr['key']} {p['name']} {reason}")
         if px is None:
             return False
         real = 1
     else:
-        bid, ask, px = quote(oc, tr["contract"])
+        bid, ask, px = quote(oc, p.get("contract", tr["contract"]))
         if px is None:
             px = ""
         real = 0
@@ -404,7 +432,7 @@ def close_plan(tc, oc, tr, p, reason, spot):
     s = tr.get("sig", {})
     append_csv(TRADES_LOG, dict(
         date=t.strftime("%Y-%m-%d"), book=tr["book"], ticker=tr["sym"], tf=tr["tf"], side="LONG" if tr["side"] == 1 else "SHORT",
-        contract=tr["contract"], strike=tr["strike"], plan=p["name"], real=real, contracts=p["qty"],
+        contract=p.get("contract", tr["contract"]), strike=p.get("strike", tr["strike"]), plan=p["name"], real=real, contracts=p["qty"],
         entry_time=t0.strftime("%H:%M:%S"), exit_time=t.strftime("%H:%M:%S"), minutes=round((t - t0).total_seconds() / 60, 1),
         reason=reason, stock_entry=round(tr["spot"], 2), target=p["target"] if p["target"] is not None else "", stop=p["stop"],
         stock_exit=round(spot, 2) if spot else "", stock_pts=pts, opt_entry=fin, opt_exit=px if px == "" else round(px, 2),
@@ -421,7 +449,7 @@ def close_plan(tc, oc, tr, p, reason, spot):
 def manage(tc, oc, trades, spots, now):
     """every few seconds: targets, stops, time stops"""
     changed = False
-    need = {tr["contract"] for tr in trades.values() if any(p["open"] and p.get("kind") == "opt" for p in tr["plans"])}
+    need = {p.get("contract", tr["contract"]) for tr in trades.values() for p in tr["plans"] if p["open"] and p.get("kind") == "opt"}
     oq = quotes(oc, need) if need else {}
     for key, tr in list(trades.items()):
         s = spots.get(tr["sym"])
@@ -431,7 +459,7 @@ def manage(tc, oc, trades, spots, now):
                 continue
             why = None
             if p.get("kind") == "opt":
-                q = oq.get(tr["contract"])
+                q = oq.get(p.get("contract", tr["contract"]))
                 if q:
                     bid, _, mid = q
                     p["peak"] = max(p["peak"], mid)
@@ -475,7 +503,8 @@ def recover_check(tc, trades):
         log(f"positions check failed: {e}")
         return trades
     for key, tr in list(trades.items()):
-        if held.get(tr["contract"], 0) <= 0 and any(p["open"] and p["qty"] > 0 for p in tr["plans"]):
+        if all(held.get(p.get("contract", tr["contract"]), 0) <= 0 for p in tr["plans"] if p["open"] and p["qty"] > 0) \
+                and any(p["open"] and p["qty"] > 0 for p in tr["plans"]):
             log(f"{key}: saved trade {tr['contract']} is no longer held - forgetting it")
             del trades[key]
         else:
