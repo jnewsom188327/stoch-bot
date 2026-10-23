@@ -13794,6 +13794,39 @@ def edge_grid_stats(Rm, dix):
     return n, mu, t, win, avgw, avgl
 
 
+def edge_fetch_raw(oc, contracts, day):
+    """1-minute closes 9:30-15:59 ET per contract - REAL trades only (NaN where the option did not trade that minute)"""
+    from alpaca.data.requests import OptionBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    start = pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30)
+    end = start + pd.Timedelta(minutes=390)
+    out = {}
+    cl = sorted(contracts)
+    for k0 in range(0, len(cl), 60):
+        chunk = cl[k0:k0 + 60]
+        df = None
+        for attempt in range(4):
+            try:
+                df = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
+                                                          start=start.tz_convert("UTC").to_pydatetime(),
+                                                          end=end.tz_convert("UTC").to_pydatetime())).df
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  option bars {day} failed ({attempt + 1}/4): {str(e)[:200]}", flush=True)
+                time.sleep(5 * (attempt + 1))
+        if df is None or not len(df) or not isinstance(df.index, pd.MultiIndex):
+            continue
+        for sym_, g in df.groupby(level=0):
+            g = g.droplevel(0)
+            ix = g.index.tz_convert(NY)
+            mm = (ix.hour * 60 + ix.minute - 570).to_numpy()
+            ok = (mm >= 0) & (mm < 390)
+            a = np.full(390, np.nan)
+            a[mm[ok]] = g["close"].to_numpy()[ok]
+            out[sym_] = a
+    return out
+
+
 def edge_main():
     from datetime import date
     end = datetime.now(timezone.utc) - timedelta(minutes=20)
@@ -14083,7 +14116,8 @@ def edge_main():
     print(f"\nentries: {NE:,} ({time.time() - t0:.0f}s)", flush=True)
     # ---- options, day by day (newest first)
     NX, NS, NP = len(EDGE_X), len(EDGE_STRIKES), len(EDGE_EXPS)
-    RET = np.full((NE, NX, NS, NP), np.nan, dtype=np.float32)
+    RET = np.full((NE, NX, NS, NP), np.nan, dtype=np.float32)     # STRICT: real trades only (used everywhere below)
+    RETL = np.full((NE, NX, NS, NP), np.nan, dtype=np.float32)    # LOOSE: last price carried forward (the first run's way)
     XMO = np.zeros((NE, NX, NS, NP), dtype=np.int16)
     cost = lambda p: np.maximum(0.01, 0.005 * p)
     k0 = np.round(E["spot"])
@@ -14096,7 +14130,55 @@ def edge_main():
     done_days = []
     cut_at = None
     n_req = n_got = 0
+    n_try = n_fill = n_tryl = 0
     W = EDGE_HOLD + 1
+
+    def decide(P_, ME_, MC_, X8_, pe_, st_):
+        """exit decision minutes for all 15 exits (+ plan Q's 3 lots); option exits watch the option from minute st_"""
+        cols = np.minimum(st_[:, None] + np.arange(W), 389)
+        valid = np.arange(W)[None, :] <= (MC_ - st_)[:, None]
+        path = np.where(valid, P_[cols], np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rr = path / pe_[:, None] - 1
+            best = np.fmax.accumulate(np.where(np.isfinite(path), path, -np.inf), axis=1)
+            stop10, stop20 = rr <= -0.10, rr <= -0.20
+            t5, t10, t20 = rr >= 0.05, rr >= 0.10, rr >= 0.20
+            trail = (path <= 0.85 * best) | stop10
+
+        def fx(mask):
+            f_ = edge_first(mask & valid)
+            return np.where(f_ >= 0, st_ + f_, MC_)
+        XM = np.empty((len(ME_), NX), np.int64)
+        XM[:, :8] = X8_
+        XM[:, 8], XM[:, 9], XM[:, 10], XM[:, 11] = fx(t5 | stop10), fx(t10 | stop10), fx(t20 | stop10), fx(t10 | stop20)
+        XM[:, 12] = fx(trail)
+        XM[:, 14] = np.minimum(X8_[:, 0], fx(t20))
+        s_ = fx(stop10)
+        l1, l2 = np.minimum(fx(t5), s_), np.minimum(fx(t10), s_)
+        cap30 = np.minimum(st_ + 30, MC_)
+        f_ = edge_first(trail & valid & (np.arange(W)[None, :] <= (cap30 - st_)[:, None]))
+        l3 = np.where(f_ >= 0, st_ + f_, cap30)
+        XM[:, 13] = np.maximum(np.maximum(l1, l2), l3)
+        return XM, (l1, l2, l3)
+
+    def priced(XM, lots, buy, pxfn):
+        ret = np.full((len(buy), NX), np.nan)
+        XJ = np.zeros((len(buy), NX), np.int64)
+        with np.errstate(invalid="ignore"):
+            for xj in range(NX):
+                if xj == 13:
+                    continue
+                px, j = pxfn(XM[:, xj])
+                ret[:, xj] = (px - cost(px)) / buy - 1
+                XJ[:, xj] = j
+            rq, jq = [], []
+            for lx in lots:
+                px, j = pxfn(lx)
+                rq.append((px - cost(px)) / buy - 1)
+                jq.append(j)
+            ret[:, 13] = np.mean(rq, axis=0)
+            XJ[:, 13] = np.max(jq, axis=0)
+        return ret, XJ
     for di, d_ in enumerate(days):
         if time.time() - t0 > budget:
             cut_at = date.fromordinal(d_)
@@ -14126,73 +14208,61 @@ def edge_main():
             if not need:
                 continue
             if test:
-                OP = lab_fake_opt(need, dday, {sym: STK[sym][1][3][STK[sym][0][d_]]})
+                rgx = np.random.default_rng(d_)
+                OPR = {c_: np.where(rgx.random(390) < 0.5, np.nan, a_) for c_, a_ in
+                       lab_fake_opt(need, dday, {sym: STK[sym][1][3][STK[sym][0][d_]]}).items()}
             else:
-                OP = lab_fetch_opt(oc, need, dday)
+                OPR = edge_fetch_raw(oc, need, dday)
             n_req += len(need)
-            n_got += len(OP)
+            n_got += len(OPR)
             MEr, MCr, Xr = E["m_e"][rows].astype(np.int64), E["m_cap"][rows].astype(np.int64), E["X"][rows].astype(np.int64)
             for (pi_, si2), nm in CK.items():
                 for cname in np.unique(nm):
-                    P = OP.get(cname)
-                    if P is None:
+                    Praw = OPR.get(cname)
+                    if Praw is None:
                         continue
-                    sel = np.nonzero(nm == cname)[0]
-                    ME, MC, X8 = MEr[sel], MCr[sel], Xr[sel]
-                    pe = P[ME - 1]
+                    P = pd.Series(Praw).ffill(limit=5).to_numpy()
+                    fin = np.isfinite(Praw)
+                    nxt = angs_next_true(fin)                                         # first real trade at / after a minute
+                    prv = np.maximum.accumulate(np.where(fin, np.arange(390), -1))    # last real trade at / before a minute
+                    sel0 = np.nonzero(nm == cname)[0]
+                    ME0, MC0, X80 = MEr[sel0], MCr[sel0], Xr[sel0]
+                    # LOOSE: buy at the signal minute's (carried-forward) close, sell at the exit minute's
+                    pe = P[ME0 - 1]
                     okp = np.isfinite(pe) & (pe >= 0.05)
-                    if not okp.any():
+                    n_tryl += len(sel0)
+                    if okp.any():
+                        sel, ME, MC, X8, pel = sel0[okp], ME0[okp], MC0[okp], X80[okp], pe[okp]
+                        XM, lots = decide(P, ME, MC, X8, pel, ME)
+                        ret, _ = priced(XM, lots, pel + cost(pel), lambda m, ME=ME: (P[np.clip(m, ME, 389)], m))
+                        RETL[rows[sel], :, si2, pi_] = ret.astype(np.float32)
+                    # STRICT: buy at the first REAL trade after the signal (within 3 min), sell at the first real trade after the exit
+                    n_try += len(sel0)
+                    m_in = nxt[np.minimum(ME0, 389)]
+                    ok = (m_in < 390) & (m_in <= ME0 + 2)
+                    pes = np.where(ok, Praw[np.minimum(m_in, 389)], np.nan)
+                    ok &= np.isfinite(pes) & (pes >= 0.05)
+                    if not ok.any():
                         continue
-                    sel, ME, MC, X8, pe = sel[okp], ME[okp], MC[okp], X8[okp], pe[okp]
-                    buy = pe + cost(pe)
-                    cols = np.minimum(ME[:, None] + np.arange(W), 389)
-                    valid = np.arange(W)[None, :] <= (MC - ME)[:, None]
-                    path = np.where(valid, P[cols], np.nan)
-                    rr = path / pe[:, None] - 1
-                    best = np.fmax.accumulate(np.where(np.isfinite(path), path, -np.inf), axis=1)
+                    n_fill += int(ok.sum())
+                    sel, ME, MC, X8, pes, m_in = sel0[ok], ME0[ok], MC0[ok], X80[ok], pes[ok], m_in[ok]
+                    XM, lots = decide(P, ME, MC, np.maximum(X8, m_in[:, None]), pes, m_in + 1)
 
-                    def fx(mask, cap=None):
-                        f_ = edge_first(mask & valid)
-                        return np.where(f_ >= 0, ME + f_, MC if cap is None else cap)
-                    with np.errstate(invalid="ignore"):
-                        stop10, stop20 = rr <= -0.10, rr <= -0.20
-                        t5, t10, t20 = rr >= 0.05, rr >= 0.10, rr >= 0.20
-                        trail = (path <= 0.85 * best) | stop10
-                    XM = np.empty((len(sel), NX), np.int64)
-                    XM[:, :8] = X8
-                    XM[:, 8] = fx(t5 | stop10)
-                    XM[:, 9] = fx(t10 | stop10)
-                    XM[:, 10] = fx(t20 | stop10)
-                    XM[:, 11] = fx(t10 | stop20)
-                    XM[:, 12] = fx(trail)
-                    XM[:, 14] = np.minimum(X8[:, 0], fx(t20))
-                    ret = np.full((len(sel), NX), np.nan)
-                    for xj in range(NX):
-                        if xj == 13:
-                            continue
-                        px = P[np.clip(XM[:, xj], ME, 389)]
-                        ret[:, xj] = (px - cost(px)) / buy - 1
-                    # plan Q: 3 lots
-                    s_ = fx(stop10)
-                    l1, l2 = np.minimum(fx(t5), s_), np.minimum(fx(t10), s_)
-                    cap30 = np.minimum(ME + 30, MC)
-                    f_ = edge_first(trail & valid & (np.arange(W)[None, :] <= (cap30 - ME)[:, None]))
-                    l3 = np.where(f_ >= 0, ME + f_, cap30)
-                    rq = []
-                    for lx in (l1, l2, l3):
-                        px = P[np.clip(lx, ME, 389)]
-                        rq.append((px - cost(px)) / buy - 1)
-                    ret[:, 13] = np.mean(rq, axis=0)
-                    XM[:, 13] = np.maximum(np.maximum(l1, l2), l3)
+                    def pxs(m):
+                        q = np.clip(m + 1, 0, 389)
+                        j = nxt[q]
+                        j = np.where(j < 390, j, prv[np.clip(m, 0, 389)])
+                        return np.where(j >= 0, Praw[np.clip(j, 0, 389)], np.nan), j
+                    ret, XJ = priced(XM, lots, pes + cost(pes), pxs)
                     RET[rows[sel], :, si2, pi_] = ret.astype(np.float32)
-                    XMO[rows[sel], :, si2, pi_] = XM.astype(np.int16)
+                    XMO[rows[sel], :, si2, pi_] = XJ.astype(np.int16)
         done_days.append(d_)
         if di % 20 == 0:
             print(f"  options: day {di + 1}/{len(days)} {dday} - {n_got:,} of {n_req:,} contract-days ({time.time() - t0:.0f}s)", flush=True)
     done = np.isin(E["dord"], np.array(done_days))
     keep = np.nonzero(done)[0]
     E = {k: v[keep] for k, v in E.items()}
-    RET, XMO = RET[keep], XMO[keep]
+    RET, RETL, XMO = RET[keep], RETL[keep], XMO[keep]
     NE = len(keep)
     udays = np.array(sorted(set(E["dord"].tolist())))
     dix = np.searchsorted(udays, E["dord"])
@@ -14225,6 +14295,8 @@ def edge_main():
             dv = dix[m0]
             hv = half[m0]
             n_, mu, t_, win, aw, al = edge_grid_stats(Rm, dv)
+            with np.errstate(invalid="ignore"):
+                muL = np.nanmean(RETL[m0].reshape(int(m0.sum()), NSTR).astype(np.float64), axis=0)
             hh = [edge_grid_stats(Rm[hv == q], dv[hv == q]) if (hv == q).sum() >= 10 else None for q in (0, 1)]
             for j, (xj, si2, pi_) in enumerate(SIDX):
                 if n_[j] < 30:
@@ -14232,7 +14304,7 @@ def edge_main():
                 rows_.append(dict(trigger=EDGE_TRIG[tg], entry=EDGE_ENT[ent], group=gname, exit=EDGE_X[xj], strike=EDGE_STRIKES[si2],
                                   exp=EDGE_EXPS[pi_], n=int(n_[j]), fpd=n_[j] / Dall, win=win[j], avg=mu[j], t=t_[j], avgw=aw[j], avgl=al[j],
                                   avg_h1=hh[0][1][j] if hh[0] else np.nan, avg_h2=hh[1][1][j] if hh[1] else np.nan,
-                                  t_h1=hh[0][2][j] if hh[0] else np.nan, t_h2=hh[1][2][j] if hh[1] else np.nan))
+                                  t_h1=hh[0][2][j] if hh[0] else np.nan, t_h2=hh[1][2][j] if hh[1] else np.nan, loose_avg=muL[j]))
     R = pd.DataFrame(rows_)
     R["both"] = (R["avg_h1"] > 0) & (R["avg_h2"] > 0)
     rnd = R[R["trigger"] == "RANDOM"].set_index(["entry", "group", "exit", "strike", "exp"])["avg"]
@@ -14401,7 +14473,28 @@ def edge_main():
           "**Each trade** buys the option at the close of the signal minute (+ cost) and sells at the exit minute's close (- cost). "
           f"**Cost** = $0.01 or 0.5% of the price per side, whichever is bigger. Entries 9:35-14:45, out by 15:55, max {EDGE_HOLD} min. "
           "**Return** = % on the premium paid. **Fires/day** = trades per trading day, SPY + QQQ together.",
-          "**Halves** = the older and newer half of the days. **BLIND** = picked or learned on one half, judged on the half it never saw.", "",
+          "**Prices = STRICT:** buy at the first REAL option trade after the signal (within 3 minutes - otherwise no trade), sell at the "
+          "first real trade after the exit. Nothing carried forward. (The first run used the last price carried forward up to 5 minutes = LOOSE.)",
+          "**Halves** = the older and newer half of the days. **BLIND** = picked or learned on one half, judged on the half it never saw.", ""]
+    md += ["## 0. PRICE CHECK - LOOSE (last price carried forward) vs STRICT (real trades only)",
+           f"Entries that got a real option trade within 3 minutes: **{100 * n_fill / max(n_try, 1):.0f}%** ({n_fill:,} of {n_try:,} entry x contract tries).",
+           "Median average return per trade over every exit and chart (SPY+QQQ per chart). If STRICT falls apart where LOOSE looked great, the "
+           "first run's edge was stale prices.", "| Option | Signals LOOSE | Signals STRICT | Random LOOSE | Random STRICT | Signal setups passing (STRICT) |",
+           "|---|---|---|---|---|---|"]
+    tfo = [f"{'+'.join(syms)} {tf}m" for tf in tfs]
+    for s2 in EDGE_STRIKES:
+        for p_ in EDGE_EXPS:
+            q = R[(R["strike"] == s2) & (R["exp"] == p_) & R["group"].isin(tfo)]
+            qs, qr = q[q["trigger"] != "RANDOM"], q[q["trigger"] == "RANDOM"]
+            ps = ((qs["t"] >= 2.5) & qs["both"] & (qs["avg"] > 0)).mean() if len(qs) else np.nan
+            md.append(f"| {sname(s2)} {pname(p_)} | {100 * qs['loose_avg'].median():+.1f}% | **{100 * qs['avg'].median():+.1f}%** | "
+                      f"{100 * qr['loose_avg'].median():+.1f}% | **{100 * qr['avg'].median():+.1f}%** | {100 * ps:.0f}% |")
+    md += ["", "**By exit, 3 ITM 2DTE (the first run's winner):**", "| Exit | Signals LOOSE | Signals STRICT | Random LOOSE | Random STRICT |", "|---|---|---|---|---|"]
+    for xn in EDGE_X:
+        q = R[(R["strike"] == -3) & (R["exp"] == 2) & (R["exit"] == xn) & R["group"].isin(tfo)]
+        qs, qr = q[q["trigger"] != "RANDOM"], q[q["trigger"] == "RANDOM"]
+        md.append(f"| {xn} | {100 * qs['loose_avg'].median():+.1f}% | **{100 * qs['avg'].median():+.1f}%** | {100 * qr['loose_avg'].median():+.1f}% | **{100 * qr['avg'].median():+.1f}%** |")
+    md += ["",
           "**Signals:**"] + [f"- **{k}** - {v}" for k, v in EDGE_TRIG_WHY.items()] + ["", "**Exits:**"] + [f"- **{k}** - {v}" for k, v in EDGE_XWHY.items()] + [""]
     # how often each fires
     md += ["## 1. HOW OFTEN EACH SIGNAL FIRES (per trading day, SPY + QQQ together, entries with option prices)",
