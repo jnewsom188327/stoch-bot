@@ -1,5 +1,8 @@
 """
-THE DEFAULT RUN (MODE=lab) = DIAMOND OPTIONS LAB: every diamond (yours + tuned, SPY + QQQ, 1/2/3/5m) on REAL option prices
+THE DEFAULT RUN (MODE=edge) = EDGE FINDER: every Edge Scorecard signal (trend line cross, line color, angle 23, fear / greed
+  maxed, gap & go, pause then go) + both diamonds + random, SPY + QQQ 1/2/3/5m, on REAL option prices since Feb 2024 - 15 exits,
+  3 ITM to 1 OTM, 0/1/2DTE - then 33 readings as blind-tested confluence and one stacked scalp book on unseen days. DATA ONLY.
+MODE=lab = DIAMOND OPTIONS LAB: every diamond (yours + tuned, SPY + QQQ, 1/2/3/5m) on REAL option prices
   since Feb 2024 - 0DTE vs 1DTE, 2 ITM to 2 OTM, trend line / structure / option exits, Kelly for every combination, every
   reading as a filter, the 9:45 straddle cheap / rich study, blind tests. DATA ONLY.
 MODE=confirm = CONFIRM: your AGREE DOTS diamond vs the 1m-tuned diamond (TTM 30 / Vix 30 / same candle) on the
@@ -162,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "lab").strip().lower() or "lab"
+MODE = os.getenv("MODE", "edge").strip().lower() or "edge"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -462,6 +465,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "edge":
+        return edge_main()
     if MODE == "lab":
         return lab_main()
     if MODE == "confirm":
@@ -13646,6 +13651,890 @@ def lab_main():
     if sm_:
         with open(sm_, "a") as f:
             f.write(text + "\n")
+
+
+# ================================================================ EDGE FINDER: SCORECARD x DIAMONDS x OPTIONS (MODE=edge)
+# Every entry signal that scored on the Edge Scorecard + both diamonds, SPY + QQQ, 1/2/3/5m, traded on REAL option prices
+# (Alpaca OPRA 1-minute bars): 15 exits (chart, time and option-% exits, your 3-lot plan) x 5 strikes (3 ITM to 1 OTM) x
+# 0DTE / 1DTE / 2DTE. Then 33 readings (Vix Fix, TTM, trend line, angle, VWAP, day size, gap, real VIX, higher chart,
+# diamonds nearby, volume, pause) as CONFLUENCE: learned on one half of the days, judged on the other half. Then the
+# best ones STACKED into one scalp book (one trade at a time per ticker) on the half it never saw. DATA ONLY.
+EDGE_START = os.getenv("EDGE_START", "2024-02-15")
+EDGE_TFS_DEF = "1,2,3,5"
+EDGE_STRIKES = [-3, -2, -1, 0, 1]        # - = IN the money
+EDGE_EXPS = [0, 1, 2]                    # 0DTE, 1DTE, 2DTE (all closed the same day)
+EDGE_HOLD = 90                           # minutes max; everything flat by 15:55
+EDGE_FROM, EDGE_TO = 935, 1445
+EDGE_TRIG = ["DIAMOND (YOURS)", "DIAMOND (TUNED)", "TREND LINE CROSS", "LINE TURNS YOUR COLOR", "ANGLE UP THROUGH 23",
+             "ANGLE FLATTENS THROUGH 23", "FEAR / GREED MAXED", "GAP & GO", "PAUSE THEN GO", "RANDOM"]
+EDGE_TRIG_WHY = {
+    "DIAMOND (YOURS)": "AGREE DOTS diamond, your settings (TTM 20/14/5/1, Vix 22/50/10/50, within 2)",
+    "DIAMOND (TUNED)": "AGREE DOTS diamond, 1m-tuned settings (TTM 30/14/3/1, Vix 30/50/5/70, same candle)",
+    "TREND LINE CROSS": "a candle closes through the trend line (EMA 13) to the other side - every one",
+    "LINE TURNS YOUR COLOR": "the trend line turns green / blue (long) or red / pink (short)",
+    "ANGLE UP THROUGH 23": "trend-line angle crosses up through 23 deg (long) / down through -23 (short) - scorecard 37",
+    "ANGLE FLATTENS THROUGH 23": "a steep line flattens back through 23 deg (long) / -23 (short) - scorecard 50",
+    "FEAR / GREED MAXED": "Vix Fix fear hits 95+ (long) / greed hits 95+ (short) - scorecard 52",
+    "GAP & GO": "0.3+ daily-ATR gap, first candle from 9:35 that holds the gap side of yesterday's close and VWAP - scorecard 56",
+    "PAUSE THEN GO": "a steep line (20+ deg) stalls under 5 deg, then the angle turns back up through 10 (long) / mirror - scorecard 47",
+    "RANDOM": "random candles, random side - the bar to beat",
+}
+EDGE_TWO = {0, 1, 6, 9}                  # triggers against the move: also tested waiting for the trend-line cross
+EDGE_ENT = ["AT THE SIGNAL", "WAIT FOR THE LINE CROSS"]
+EDGE_X = ["LINE BREAK", "LINE OR STRUCTURE", "TRAIL STRUCTURE", "LINE COLOR", "ANGLE BACK -20", "5 MINUTES", "15 MINUTES",
+          "30 MINUTES", "OPTION +5% / -10%", "OPTION +10% / -10%", "OPTION +20% / -10%", "OPTION +10% / -20%",
+          "OPTION TRAIL 15%", "PLAN Q (3 LOTS)", "LINE BREAK OR +20%"]
+EDGE_XWHY = {
+    "LINE BREAK": "ride until a candle closes back through the trend line",
+    "LINE OR STRUCTURE": "line break, or $0.05 past the last 10 candles' low / high (1-minute check), whichever first",
+    "TRAIL STRUCTURE": "structure stop that trails to the last 3 candles' low / high after every closed candle",
+    "LINE COLOR": "ride until the line turns the other color",
+    "ANGLE BACK -20": "ride until the trend-line angle crosses -20 deg against you (the angle study's best exit)",
+    "5 MINUTES": "out after 5 minutes", "15 MINUTES": "out after 15 minutes", "30 MINUTES": "out after 30 minutes",
+    "OPTION +5% / -10%": "the option: out at +5% or -10%", "OPTION +10% / -10%": "the option: out at +10% or -10%",
+    "OPTION +20% / -10%": "the option: out at +20% or -10%", "OPTION +10% / -20%": "the option: out at +10% or -20%",
+    "OPTION TRAIL 15%": "the option: out 15% off its best, or -10%",
+    "PLAN Q (3 LOTS)": "your Diamond-bot plan Q: 1 lot at +5%, 1 at +10%, runner trails 15% (30 min max), -10% stop on all",
+    "LINE BREAK OR +20%": "line break, or the option +20%, whichever first",
+}
+EDGE_F = ["FGA", "FGW", "MAXA", "MAXW", "COLA", "COLW", "DROPA", "CHW", "FLOW", "GLOW", "TCOL", "TPK", "TLC", "PXL", "ANG", "SQZ",
+          "VWAP", "RUN", "EXT", "TRND", "WITH", "VIXD", "VIXR", "RICH", "DSIZE", "VOLR", "GAP", "HTF", "DIAM", "DIAMX", "STALL",
+          "VOLX", "TLAGE"]
+EDGE_FN = {
+    "FGA": ("Vix Fix AGAINST you now (fear for longs / greed for shorts)", ["0-10", "10-35", "35-60", "60-85", "85+"]),
+    "FGW": ("Vix Fix YOUR side now (greed for longs / fear for shorts)", ["0-10", "10-35", "35-60", "60-85", "85+"]),
+    "MAXA": ("Against side MAXED (95+) in the last 10 candles", ["no", "YES"]),
+    "MAXW": ("Your side MAXED (95+) in the last 30 candles", ["no", "YES"]),
+    "COLA": ("Against side Vix LINE COLOR", _RUNC2),
+    "COLW": ("Your side Vix LINE COLOR", _RUNC2),
+    "DROPA": ("Against side: points dropped in the last 2 candles", ["rising / under 5", "5-15", "15-30", "30+"]),
+    "CHW": ("Your side: change in the last 2 candles", ["flat / falling", "up 5-15", "up 15-30", "up 30+"]),
+    "FLOW": ("Vix flow (greed + fear averages)", ["YOUR way", "none", "AGAINST you"]),
+    "GLOW": ("Lines GLOW (Vix flow + TTM agree)", ["glow YOUR way", "no glow", "glow AGAINST you"]),
+    "TCOL": ("TTM color", ["your way, rising", "your way, fading", "against you, turning your way", "against you, still pushing"]),
+    "TPK": ("TTM average size before now (ATR)", ["under 1.5", "1.5-2", "2-3", "3+"]),
+    "TLC": ("Trend line color", ["AGAINST you strong", "against you fading", "GRAY", "your way fading", "YOUR WAY strong"]),
+    "PXL": ("Price vs trend line (ATR)", ["1+ wrong side", "0.25-1 wrong side", "at the line", "0.25-1 your side", "1+ your side"]),
+    "ANG": ("Trend line angle (+ = your way)", ["-15 or less", "-15 to -5", "flat -5 to +5", "+5 to +15", "+15 to +23", "+23 or more"]),
+    "SQZ": ("TTM squeeze", ["ON", "just fired", "off"]),
+    "VWAP": ("Price vs VWAP (ATR, + = your side)", ["3+ wrong side", "1-3 wrong side", "-1 to +1", "1-3 your side", "3+ your side"]),
+    "RUN": ("Range of the last 20 candles ($)", ["under $0.75", "$0.75-1.50", "$1.50-3", "$3+"]),
+    "EXT": ("Distance from the 20-candle extreme behind you ($)", ["under $0.20", "$0.20-0.50", "$0.50-1", "$1+"]),
+    "TRND": ("Day so far: net move / range", ["round trips (under 30%)", "30-60%", "trending (60%+)"]),
+    "WITH": ("Trade vs the day's move so far", ["WITH the day", "AGAINST the day"]),
+    "VIXD": ("REAL VIX today (VIXY vs yesterday)", ["down", "up 0-3%", "up 3%+"]),
+    "VIXR": ("REAL VIX vs its 20-day average", ["LOW (5%+ under)", "normal", "HIGH (5%+ over)"]),
+    "RICH": ("Options today: 9:45 straddle vs the last 20 days' move", ["CHEAP (under 0.8x)", "fair", "RICH (over 1.2x)", "unknown"]),
+    "DSIZE": ("Day's range so far vs the 20-day average day", ["under 40%", "40-70%", "70-100%", "already a full day+"]),
+    "VOLR": ("Chart ATR vs its recent average", ["calm (under 0.8x)", "normal", "busy (1.2-1.6x)", "wild (1.6x+)"]),
+    "GAP": ("Today's gap (daily ATR, + = your way)", ["0.3+ AGAINST you", "no real gap", "0.3+ YOUR way"]),
+    "HTF": ("Higher chart (5m, or 15m for 5m) vs its trend line", ["AGAINST you", "WITH you"]),
+    "DIAM": ("A diamond YOUR way in the last 10 candles (either setting)", ["no", "YES"]),
+    "DIAMX": ("A diamond AGAINST you in the last 10 candles", ["no", "YES"]),
+    "STALL": ("Trend paused: angle was 20+ your way, dipped under 5 (last 15 candles)", ["no", "YES"]),
+    "VOLX": ("Volume vs this time of day (20-day avg)", ["below normal", "1-2.5x", "2.5x+"]),
+    "TLAGE": ("Candles closed on your side of the trend line in a row", ["0 (wrong side)", "1-2", "3-5", "6-15", "16+"]),
+}
+
+
+def edge_runlen(flag):
+    f = np.asarray(flag, bool).astype(np.int64)
+    cs = np.cumsum(f)
+    return cs - np.maximum.accumulate(np.where(f == 0, cs, 0))
+
+
+def edge_first(mask):
+    """first True column per row, -1 if none"""
+    if mask.shape[1] == 0:
+        return np.full(mask.shape[0], -1)
+    i = mask.argmax(1)
+    return np.where(mask[np.arange(len(i)), i], i, -1)
+
+
+def edge_htf(df1, ts, tf, H):
+    """+1 / -1: the higher chart's last CLOSED candle vs its own trend line (EMA 13), at each chart candle's close"""
+    cc = df1["close"].groupby(df1.index.floor(f"{H}min")).last()
+    efh = cc.ewm(span=13, adjust=False).mean()
+    hs = pd.DataFrame({"end": cc.index + pd.Timedelta(minutes=H), "s": np.sign((cc - efh).to_numpy())})
+    bars = pd.DataFrame({"t": ts + pd.Timedelta(minutes=tf)})
+    m_ = pd.merge_asof(bars, hs, left_on="t", right_on="end", direction="backward")
+    return m_["s"].fillna(0).to_numpy()
+
+
+def edge_stats(r, dix, D):
+    ok = np.isfinite(r)
+    r, d = r[ok], dix[ok]
+    n = len(r)
+    if n < 20:
+        return None
+    mu = float(r.mean())
+    S, C = np.bincount(d, weights=r), np.bincount(d)
+    se = float(np.sqrt(((S - C * mu) ** 2).sum()) / n)
+    w = r > 0
+    return dict(n=n, fpd=n / max(D, 1), win=float(w.mean()), avg=mu, t=mu / se if se > 0 else np.nan,
+                avgw=float(r[w].mean()) if w.any() else 0.0, avgl=float(r[~w].mean()) if (~w).any() else 0.0)
+
+
+def edge_grid_stats(Rm, dix):
+    """stats for every column of Rm (rows = trades, columns = structures) at once, day-clustered t"""
+    fin = np.isfinite(Rm)
+    Rz = np.where(fin, Rm, 0.0).astype(np.float64)
+    n = fin.sum(0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mu = Rz.sum(0) / n
+        S = pd.DataFrame(Rz).groupby(dix).sum().to_numpy()
+        C = pd.DataFrame(fin.astype(np.float64)).groupby(dix).sum().to_numpy()
+        se = np.sqrt(((S - C * mu) ** 2).sum(0)) / n
+        t = mu / se
+        pos = Rz > 0
+        win = pos.sum(0) / n
+        avgw = np.where(pos.any(0), (Rz * pos).sum(0) / np.maximum(pos.sum(0), 1), 0.0)
+        neg = fin & ~pos
+        avgl = np.where(neg.any(0), (Rz * neg).sum(0) / np.maximum(neg.sum(0), 1), 0.0)
+    return n, mu, t, win, avgw, avgl
+
+
+def edge_main():
+    from datetime import date
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
+    start = pd.Timestamp(EDGE_START, tz=NY)
+    fetch_from = (start - pd.Timedelta(days=45)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("EDGE_TFS", EDGE_TFS_DEF).split(",")]
+    syms = [s_ for s_ in SYMBOLS if s_ in ("SPY", "QQQ", "IWM")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    oc = None
+    if not test:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+    vx1, _ = fake_1m("VIXY", fetch_from, end) if test else fetch_1m("VIXY", fetch_from, end)
+    vxc = vx1["close"]
+    vday = vxc.groupby(vxc.index.date).last()
+    vday_prev = pd.Series(vday.shift(1).values, index=pd.to_datetime(vday.index))
+    vday_avg20 = pd.Series(vday.rolling(20).mean().shift(1).values, index=pd.to_datetime(vday.index))
+    # RICH from the lab's straddle file (9:45 ATM straddle vs the last 20 days' real move)
+    rich = {}
+    try:
+        SDs = pd.read_csv(f"{OUT}/lab_straddles.csv")
+        SDs["day"] = pd.to_datetime(SDs["day"]).dt.date
+        for sym in syms:
+            s0 = SDs[(SDs["sym"] == sym) & (SDs["exp"] == 0)].sort_values("day")
+            avgmv = s0["real_move"].rolling(20, min_periods=10).mean().shift(1)
+            for d_, pr, am in zip(s0["day"], s0["prem"], avgmv):
+                if np.isfinite(am) and am > 0:
+                    rich[(sym, d_)] = int(np.digitize(pr / am, [0.8, 1.2]))
+        print(f"  RICH readings: {len(rich):,} ticker-days from lab_straddles.csv", flush=True)
+    except Exception as e_:  # noqa: BLE001
+        print(f"  no lab_straddles.csv ({str(e_)[:80]}) - RICH = unknown", flush=True)
+    NF = len(EDGE_F)
+    EV = {k: [] for k in ("sym", "tf", "trig", "ent", "sd", "dord", "m_e", "m_cap", "spot", "X", "FT")}
+    STK = {}
+    DAYS = {}
+    sh = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+    for si_, sym in enumerate(syms):
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df1 = df1[(df1.index.hour * 100 + df1.index.minute >= 400) & (df1.index.hour * 100 + df1.index.minute < 2000)]
+        o1, h1, l1, c1 = (df1[k].to_numpy() for k in ("open", "high", "low", "close"))
+        t1 = df1.index
+        hm1 = (t1.hour * 100 + t1.minute).to_numpy()
+        mod1 = (t1.hour * 60 + t1.minute).to_numpy() - 570
+        dord1 = np.array([d_.toordinal() for d_ in t1.date])
+        rth1 = (mod1 >= 0) & (mod1 < 390)
+        dl_ = sorted(set(dord1[rth1].tolist()))
+        drow = {d_: i_ for i_, d_ in enumerate(dl_)}
+        M4 = np.full((4, len(dl_), 390), np.nan)
+        ii = np.nonzero(rth1)[0]
+        rr_ = np.array([drow[d_] for d_ in dord1[ii]])
+        for r_, src in enumerate((o1, h1, l1, c1)):
+            M4[r_, rr_, mod1[ii]] = src[ii]
+        for r_ in range(4):
+            M4[r_] = pd.DataFrame(M4[r_].T).ffill().bfill().to_numpy().T
+        STK[sym] = (drow, M4)
+        DAYS[sym] = dl_
+        # day range history (RTH)
+        rdf = df1[rth1]
+        gd = rdf.groupby(rdf.index.date)
+        drange = gd["high"].max() - gd["low"].min()
+        dr20 = pd.Series(drange.rolling(20, min_periods=10).mean().shift(1).values, index=pd.to_datetime(drange.index))
+        for tf in tfs:
+            ch = f"{sym} {tf}m"
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            e = np.minimum(np.searchsorted(t1.values, (ts + pd.Timedelta(minutes=tf)).values), len(t1) - 1)
+            col, ef = tlt_colors(df, ind)
+            ang = np.nan_to_num(ang_series(df, ind, 5))
+            vw = ind["vwap"]
+            S_ = agr_series(df, ind)
+            m, st_ = S_["m"], S_["st"]
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F), np.nan_to_num(G)
+            cs = df["close"]
+            hc22, lc22 = cs.rolling(22).max(), cs.rolling(22).min()
+            wvf, wvs = (hc22 - df["low"]) / hc22 * 100, (df["high"] - lc22) / lc22 * 100
+            fspk = ((wvf >= wvf.rolling(20).mean() + 2 * wvf.rolling(20).std(ddof=0)) | (wvf >= wvf.rolling(50).max() * 0.85)).to_numpy()
+            gspk = ((wvs >= wvs.rolling(20).mean() + 2 * wvs.rolling(20).std(ddof=0)) | (wvs >= wvs.rolling(50).max() * 0.85)).to_numpy() & ~fspk
+            fRun, gRun = sm_frun(F, fspk), sm_frun(G, gspk)
+            gAm, fAm = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy(), pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+            upFlow, dnFlow = (gAm > sh(gAm, 1)) & (fAm < sh(fAm, 1)), (gAm < sh(gAm, 1)) & (fAm > sh(fAm, 1))
+            av = pd.Series(m).ewm(span=5, adjust=False).mean().to_numpy()
+            av1 = sh(av, 1)
+            dev = 2 * cs.rolling(20).std(ddof=0)
+            trr = pd.concat([df["high"] - df["low"], (df["high"] - cs.shift(1)).abs(), (df["low"] - cs.shift(1)).abs()], axis=1).max(axis=1)
+            sq = (dev < 1.5 * trr.ewm(alpha=1 / 20, adjust=False).mean()).to_numpy()
+            fired = ~sq & (pd.Series(sq.astype(float)).shift(1).rolling(3, min_periods=1).max().fillna(0).to_numpy() > 0)
+            sqz = np.where(sq, 0, np.where(fired, 1, 2))
+            rth = (hm >= 930) & (hm < 1600)
+            dord = np.array([d_.toordinal() for d_ in day])
+            dkey = pd.Series(dord)
+            o930 = pd.Series(np.where(rth, o, np.nan)).groupby(dkey).transform("first").to_numpy()
+            hi_sf = pd.Series(np.where(rth, h, -np.inf)).groupby(dkey).cummax().to_numpy()
+            lo_sf = pd.Series(np.where(rth, l, np.inf)).groupby(dkey).cummin().to_numpy()
+            rng_ = np.where(np.isfinite(hi_sf - lo_sf), hi_sf - lo_sf, 0)
+            move = c - o930
+            trnd = np.nan_to_num(np.abs(move) / np.where(rng_ > 0, rng_, np.nan))
+            vxa = vxc.reindex(ts + pd.Timedelta(minutes=tf) - pd.Timedelta(minutes=1), method="ffill").to_numpy()
+            dts = pd.to_datetime(pd.Index(ts.date))
+            vxd = np.nan_to_num((vxa / vday_prev.reindex(dts).to_numpy() - 1) * 100)
+            vxr = np.nan_to_num((vxa / vday_avg20.reindex(dts).to_numpy() - 1) * 100)
+            lo10 = pd.Series(l).rolling(10, min_periods=1).min().to_numpy()
+            hi10 = pd.Series(h).rolling(10, min_periods=1).max().to_numpy()
+            lo3 = pd.Series(l).rolling(3, min_periods=1).min().to_numpy()
+            hi3 = pd.Series(h).rolling(3, min_periods=1).max().to_numpy()
+            lo20 = pd.Series(l).rolling(20, min_periods=1).min().to_numpy()
+            hi20 = pd.Series(h).rolling(20, min_periods=1).max().to_numpy()
+            run20 = hi20 - lo20
+            dsz = np.nan_to_num(rng_ / dr20.reindex(dts).to_numpy(), nan=0.5)
+            volr = np.nan_to_num(a / pd.Series(a).rolling(2000, min_periods=200).mean().shift(1).to_numpy(), nan=1.0)
+            lv = daily_levels(df1, df)
+            gapv = np.nan_to_num(((lv["dopen"] - lv["pdc"]) / lv["datr"]).to_numpy())
+            hst = edge_htf(df1, ts, tf, 5 if tf < 5 else 15)
+            vol = df["volume"].to_numpy()
+            todv = pd.Series(vol).groupby(hm).transform(lambda s_: s_.shift(1).rolling(20, min_periods=5).mean()).to_numpy()
+            volx = np.nan_to_num(vol / todv, nan=1.0)
+            dYL, dYS = cf_marks(df, CF_SETS[0][1])
+            dTL, dTS = cf_marks(df, CF_SETS[1][1])
+            dmL, dmS = np.zeros(n), np.zeros(n)
+            dmL[np.union1d(dYL, dTL)] = 1
+            dmS[np.union1d(dYS, dTS)] = 1
+            dmL10 = pd.Series(dmL).rolling(10, min_periods=1).max().to_numpy() > 0
+            dmS10 = pd.Series(dmS).rolling(10, min_periods=1).max().to_numpy() > 0
+            sokL, sokS = c > ef, c < ef
+            angmx15, angmn15 = pd.Series(ang).rolling(15, min_periods=1).max().to_numpy(), pd.Series(ang).rolling(15, min_periods=1).min().to_numpy()
+            angmn8, angmx8 = pd.Series(ang).rolling(8, min_periods=1).min().to_numpy(), pd.Series(ang).rolling(8, min_periods=1).max().to_numpy()
+            # ---- features for each side (full arrays)
+            FEAT = {}
+            for sd in (1, -1):
+                A_, W_ = (F, G) if sd == 1 else (G, F)
+                ru_a, ru_w = (fRun, gRun) if sd == 1 else (gRun, fRun)
+                fy, fa = (upFlow, dnFlow) if sd == 1 else (dnFlow, upFlow)
+                gy = (upFlow & (st_ == 1)) if sd == 1 else (dnFlow & (st_ == -1))
+                ga = (dnFlow & (st_ == -1)) if sd == 1 else (upFlow & (st_ == 1))
+                mm_ = m * sd
+                rise = mm_ > sh(mm_, 1)
+                ext = (c - lo20) if sd == 1 else (hi20 - c)
+                FEAT[sd] = np.stack([
+                    np.digitize(A_, [10, 35, 60, 85]), np.digitize(W_, [10, 35, 60, 85]),
+                    (pd.Series(A_).rolling(10, min_periods=1).max().to_numpy() >= 95).astype(int),
+                    (pd.Series(W_).rolling(30, min_periods=1).max().to_numpy() >= 95).astype(int),
+                    ru_a.astype(int), ru_w.astype(int),
+                    np.digitize(np.nan_to_num(sh(A_, 2) - A_), [5, 15, 30]), np.digitize(np.nan_to_num(W_ - sh(W_, 2)), [5, 15, 30]),
+                    np.where(fy, 0, np.where(fa, 2, 1)), np.where(gy, 0, np.where(ga, 2, 1)),
+                    np.where(mm_ >= 0, np.where(rise, 0, 1), np.where(rise, 2, 3)),
+                    np.digitize(np.abs(np.nan_to_num(av1)), [1.5, 2, 3]),
+                    (2 + col * sd).astype(int),
+                    np.digitize(np.nan_to_num((c - ef) / a * sd), [-1, -0.25, 0.25, 1]),
+                    np.digitize(ang * sd, [-15, -5, 5, 15, 23]),
+                    sqz.astype(int),
+                    np.digitize(np.nan_to_num((c - vw) / a * sd), [-3, -1, 1, 3]),
+                    np.digitize(run20, [0.75, 1.5, 3]), np.digitize(ext, [0.2, 0.5, 1]),
+                    np.digitize(trnd, [0.3, 0.6]), np.where(move * sd > 0, 0, 1),
+                    np.digitize(vxd, [0, 3]), np.digitize(vxr, [-5, 5]),
+                    np.full(n, 3),                                                          # RICH, filled per event below
+                    np.digitize(dsz, [0.4, 0.7, 1.0]), np.digitize(volr, [0.8, 1.2, 1.6]),
+                    np.digitize(gapv * sd, [-0.3, 0.3]), (hst * sd > 0).astype(int),
+                    (dmL10 if sd == 1 else dmS10).astype(int), (dmS10 if sd == 1 else dmL10).astype(int),
+                    (((angmx15 >= 20) & (angmn8 < 5)) if sd == 1 else ((angmn15 <= -20) & (angmx8 > -5))).astype(int),
+                    np.digitize(volx, [1, 2.5]),
+                    np.digitize(edge_runlen(sokL if sd == 1 else sokS), [1, 3, 6, 16]),
+                ], axis=1).astype(np.int8)
+            # ---- triggers
+            ok_win = np.asarray(ts >= start) & np.isfinite(a) & (a > 0)
+            prevsame = np.r_[False, dord[1:] == dord[:-1]]
+            okc = ok_win & prevsame & (hm >= 930) & (hm <= EDGE_TO)
+            pcol, pang, pF, pG = sh(col.astype(float), 1), sh(ang, 1), sh(F, 1), sh(G, 1)
+            pk20 = pd.Series(ang).rolling(20, min_periods=1).max().shift(1).to_numpy()
+            mn10 = pd.Series(ang).rolling(10, min_periods=1).min().shift(1).to_numpy()
+            pk20s = pd.Series(ang).rolling(20, min_periods=1).min().shift(1).to_numpy()
+            mx10s = pd.Series(ang).rolling(10, min_periods=1).max().shift(1).to_numpy()
+            gs = gap_events(df, df1, ind, 0.3, 935, True)
+            TR = {
+                2: (sokL & ~np.r_[False, sokL[:-1]], sokS & ~np.r_[False, sokS[:-1]]),
+                3: ((col >= 1) & (pcol <= 0), (col <= -1) & (pcol >= 0)),
+                4: ((pang < 23) & (ang >= 23), (pang > -23) & (ang <= -23)),
+                5: ((pang > 23) & (ang <= 23), (pang < -23) & (ang >= -23)),
+                6: ((F >= 95) & (pF < 95), (G >= 95) & (pG < 95)),
+                7: (gs == 1, gs == -1),
+                8: ((pang < 10) & (ang >= 10) & (pk20 >= 20) & (mn10 < 5), (pang > -10) & (ang <= -10) & (pk20s <= -20) & (mx10s > -5)),
+            }
+            sig = []
+            for tg, (Lm, Sm) in TR.items():
+                Lm, Sm = np.asarray(Lm, bool) & okc, np.asarray(Sm, bool) & okc
+                sig.append((tg, np.nonzero(Lm)[0], 1))
+                sig.append((tg, np.nonzero(Sm)[0], -1))
+            for tg, (bl, br) in ((0, (dYL, dYS)), (1, (dTL, dTS))):
+                sig.append((tg, bl[okc[bl]], 1))
+                sig.append((tg, br[okc[br]], -1))
+            elig = np.nonzero(okc)[0]
+            nr = max(200, int((TR[2][0] & okc).sum() + (TR[2][1] & okc).sum()) // 2)
+            rg = np.random.default_rng(tf * 1000 + len(sym) * 7 + si_)
+            pick = np.sort(rg.choice(elig, min(nr, len(elig)), replace=False)) if len(elig) else np.empty(0, int)
+            sides = rg.random(len(pick)) < 0.5
+            sig.append((9, pick[sides], 1))
+            sig.append((9, pick[~sides], -1))
+            nxtL, nxtS = angs_next_true(sokL), angs_next_true(sokS)
+            nnL, nnS = angs_next_true(~sokL), angs_next_true(~sokS)
+            ncL, ncS = angs_next_true(col <= -1), angs_next_true(col >= 1)
+            naL, naS = angs_next_true(ang < -20), angs_next_true(ang > 20)
+            drow_, M4_ = STK[sym]
+            cnt0 = 0
+            for tg, I, sd in sig:
+                if not len(I):
+                    continue
+                for ent in ((0, 1) if tg in EDGE_TWO else (0,)):
+                    if ent == 0:
+                        K = I.copy()
+                    else:
+                        K = (nxtL if sd == 1 else nxtS)[I]
+                        good = (K < n) & (K - I <= 10)
+                        K = np.where(good, K, 0)
+                        good &= dord[np.minimum(K, n - 1)] == dord[I]
+                        I_, K = I[good], K[good]
+                    I_ = I if ent == 0 else I_
+                    if not len(K):
+                        continue
+                    ek = e[K]
+                    keep = (dord1[ek] == dord[K]) & (hm1[ek] >= EDGE_FROM) & (hm1[ek] <= EDGE_TO) & (mod1[ek] >= 1) & (mod1[ek] < 380)
+                    I_, K, ek = I_[keep], K[keep], ek[keep]
+                    if not len(K):
+                        continue
+                    ME = mod1[ek].astype(np.int64)
+                    MC = np.minimum(ME - 1 + EDGE_HOLD, 385)
+                    DK = dord[K]
+
+                    def cmin(j):
+                        jj = np.minimum(j, n - 1)
+                        ej = e[jj]
+                        valid = (j < n) & (j > K) & (dord1[ej] == DK)
+                        return np.where(valid, np.minimum(mod1[ej] - 1, MC), MC)
+                    a_ = (nxtL if sd == 1 else nxtS)[K]
+                    a1 = np.minimum(a_ + 1, n - 1)
+                    lbj = np.where(a_ < n - 1, (nnL if sd == 1 else nnS)[a1], n)
+                    x_lb = cmin(lbj)
+                    k1 = np.minimum(K + 1, n - 1)
+                    x_lc = cmin(np.where(K + 1 < n, (ncL if sd == 1 else ncS)[k1], n))
+                    x_an = cmin(np.where(K + 1 < n, (naL if sd == 1 else naS)[k1], n))
+                    W = EDGE_HOLD + 1
+                    dr_ = np.array([drow_.get(d_, -1) for d_ in DK])
+                    x_st = np.empty(len(K), np.int64)
+                    x_tr = np.empty(len(K), np.int64)
+                    Jm = W // tf + 2
+                    for c0 in range(0, len(K), 20000):
+                        sl = slice(c0, c0 + 20000)
+                        Kc, MEc, MCc, drc = K[sl], ME[sl], MC[sl], np.maximum(dr_[sl], 0)
+                        colsW = np.minimum(MEc[:, None] + np.arange(W), 389)
+                        valid = np.arange(W)[None, :] <= (MCc - MEc)[:, None]
+                        Lsig = M4_[2][drc[:, None], colsW] if sd == 1 else -M4_[1][drc[:, None], colsW]
+                        lvl0 = (lo10[Kc] - 0.05) if sd == 1 else -(hi10[Kc] + 0.05)
+                        f_ = edge_first((Lsig <= lvl0[:, None]) & valid)
+                        x_st[sl] = np.where(f_ >= 0, MEc + f_, MCc)
+                        Jx = np.minimum(Kc[:, None] + np.arange(1, Jm + 1), n - 1)
+                        nl = (lo3[Jx] - 0.05) if sd == 1 else -(hi3[Jx] + 0.05)
+                        CM = np.maximum.accumulate(nl, axis=1)
+                        q = np.arange(W) // tf
+                        lvlw = np.where(q[None, :] >= 1, np.maximum(lvl0[:, None], CM[:, np.maximum(q - 1, 0)]), lvl0[:, None])
+                        f_ = edge_first((Lsig <= lvlw) & valid)
+                        x_tr[sl] = np.where(f_ >= 0, MEc + f_, MCc)
+                    X8 = np.stack([x_lb, np.minimum(x_lb, x_st), x_tr, x_lc, x_an, np.minimum(ME - 1 + 5, MC),
+                                   np.minimum(ME - 1 + 15, MC), np.minimum(ME - 1 + 30, MC)], axis=1).astype(np.int16)
+                    FT = FEAT[sd][I_].copy()
+                    if rich:
+                        FT[:, EDGE_F.index("RICH")] = [rich.get((sym, date.fromordinal(int(d_))), 3) if me_ >= 16 else 3 for d_, me_ in zip(dord[K], ME)]
+                    spot = M4_[0][np.maximum(dr_, 0), ME]
+                    nK = len(K)
+                    EV["sym"].append(np.full(nK, si_, np.int8)); EV["tf"].append(np.full(nK, tf, np.int8))
+                    EV["trig"].append(np.full(nK, tg, np.int8)); EV["ent"].append(np.full(nK, ent, np.int8))
+                    EV["sd"].append(np.full(nK, sd, np.int8)); EV["dord"].append(DK.astype(np.int64))
+                    EV["m_e"].append(ME.astype(np.int16)); EV["m_cap"].append(MC.astype(np.int16)); EV["spot"].append(spot)
+                    EV["X"].append(X8); EV["FT"].append(FT)
+                    cnt0 += nK
+            print(f"  {ch}: {cnt0:,} entries ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = {k: np.concatenate(v) if v else np.empty(0) for k, v in EV.items()}
+    del EV
+    NE = len(E["sym"])
+    if not NE:
+        print("no entries")
+        return
+    print(f"\nentries: {NE:,} ({time.time() - t0:.0f}s)", flush=True)
+    # ---- options, day by day (newest first)
+    NX, NS, NP = len(EDGE_X), len(EDGE_STRIKES), len(EDGE_EXPS)
+    RET = np.full((NE, NX, NS, NP), np.nan, dtype=np.float32)
+    XMO = np.zeros((NE, NX, NS, NP), dtype=np.int16)
+    cost = lambda p: np.maximum(0.01, 0.005 * p)
+    k0 = np.round(E["spot"])
+    order = np.lexsort((E["sym"], E["dord"]))
+    keys = E["dord"][order] * 10 + E["sym"][order]
+    bounds = np.r_[0, np.nonzero(np.diff(keys))[0] + 1, len(keys)]
+    blocks = {int(keys[bounds[i_]]): order[bounds[i_]:bounds[i_ + 1]] for i_ in range(len(bounds) - 1)}
+    days = sorted(set(E["dord"].tolist()), reverse=True)
+    budget = float(os.getenv("EDGE_BUDGET_MIN", "88")) * 60
+    done_days = []
+    cut_at = None
+    n_req = n_got = 0
+    W = EDGE_HOLD + 1
+    for di, d_ in enumerate(days):
+        if time.time() - t0 > budget:
+            cut_at = date.fromordinal(d_)
+            print(f"  time budget reached - option prices stop at {cut_at}", flush=True)
+            break
+        dday = date.fromordinal(d_)
+        for si_, sym in enumerate(syms):
+            rows = blocks.get(d_ * 10 + si_)
+            if rows is None or not len(rows):
+                continue
+            dl_ = DAYS[sym]
+            ix_ = dl_.index(d_) if d_ in STK[sym][0] else None
+            if ix_ is None:
+                continue
+            exd = [dday] + [date.fromordinal(dl_[ix_ + q]) if ix_ + q < len(dl_) else None for q in (1, 2)]
+            sdv = E["sd"][rows]
+            CK = {}
+            need = set()
+            for pi_, ed in enumerate(exd):
+                if ed is None:
+                    continue
+                for si2, off in enumerate(EDGE_STRIKES):
+                    kk = k0[rows] + off * sdv
+                    names = [lab_occ(sym, ed, "C" if s_ == 1 else "P", k_) for s_, k_ in zip(sdv, kk)]
+                    CK[(pi_, si2)] = np.array(names)
+                    need.update(names)
+            if not need:
+                continue
+            if test:
+                OP = lab_fake_opt(need, dday, {sym: STK[sym][1][3][STK[sym][0][d_]]})
+            else:
+                OP = lab_fetch_opt(oc, need, dday)
+            n_req += len(need)
+            n_got += len(OP)
+            MEr, MCr, Xr = E["m_e"][rows].astype(np.int64), E["m_cap"][rows].astype(np.int64), E["X"][rows].astype(np.int64)
+            for (pi_, si2), nm in CK.items():
+                for cname in np.unique(nm):
+                    P = OP.get(cname)
+                    if P is None:
+                        continue
+                    sel = np.nonzero(nm == cname)[0]
+                    ME, MC, X8 = MEr[sel], MCr[sel], Xr[sel]
+                    pe = P[ME - 1]
+                    okp = np.isfinite(pe) & (pe >= 0.05)
+                    if not okp.any():
+                        continue
+                    sel, ME, MC, X8, pe = sel[okp], ME[okp], MC[okp], X8[okp], pe[okp]
+                    buy = pe + cost(pe)
+                    cols = np.minimum(ME[:, None] + np.arange(W), 389)
+                    valid = np.arange(W)[None, :] <= (MC - ME)[:, None]
+                    path = np.where(valid, P[cols], np.nan)
+                    rr = path / pe[:, None] - 1
+                    best = np.fmax.accumulate(np.where(np.isfinite(path), path, -np.inf), axis=1)
+
+                    def fx(mask, cap=None):
+                        f_ = edge_first(mask & valid)
+                        return np.where(f_ >= 0, ME + f_, MC if cap is None else cap)
+                    with np.errstate(invalid="ignore"):
+                        stop10, stop20 = rr <= -0.10, rr <= -0.20
+                        t5, t10, t20 = rr >= 0.05, rr >= 0.10, rr >= 0.20
+                        trail = (path <= 0.85 * best) | stop10
+                    XM = np.empty((len(sel), NX), np.int64)
+                    XM[:, :8] = X8
+                    XM[:, 8] = fx(t5 | stop10)
+                    XM[:, 9] = fx(t10 | stop10)
+                    XM[:, 10] = fx(t20 | stop10)
+                    XM[:, 11] = fx(t10 | stop20)
+                    XM[:, 12] = fx(trail)
+                    XM[:, 14] = np.minimum(X8[:, 0], fx(t20))
+                    ret = np.full((len(sel), NX), np.nan)
+                    for xj in range(NX):
+                        if xj == 13:
+                            continue
+                        px = P[np.clip(XM[:, xj], ME, 389)]
+                        ret[:, xj] = (px - cost(px)) / buy - 1
+                    # plan Q: 3 lots
+                    s_ = fx(stop10)
+                    l1, l2 = np.minimum(fx(t5), s_), np.minimum(fx(t10), s_)
+                    cap30 = np.minimum(ME + 30, MC)
+                    f_ = edge_first(trail & valid & (np.arange(W)[None, :] <= (cap30 - ME)[:, None]))
+                    l3 = np.where(f_ >= 0, ME + f_, cap30)
+                    rq = []
+                    for lx in (l1, l2, l3):
+                        px = P[np.clip(lx, ME, 389)]
+                        rq.append((px - cost(px)) / buy - 1)
+                    ret[:, 13] = np.mean(rq, axis=0)
+                    XM[:, 13] = np.maximum(np.maximum(l1, l2), l3)
+                    RET[rows[sel], :, si2, pi_] = ret.astype(np.float32)
+                    XMO[rows[sel], :, si2, pi_] = XM.astype(np.int16)
+        done_days.append(d_)
+        if di % 20 == 0:
+            print(f"  options: day {di + 1}/{len(days)} {dday} - {n_got:,} of {n_req:,} contract-days ({time.time() - t0:.0f}s)", flush=True)
+    done = np.isin(E["dord"], np.array(done_days))
+    keep = np.nonzero(done)[0]
+    E = {k: v[keep] for k, v in E.items()}
+    RET, XMO = RET[keep], XMO[keep]
+    NE = len(keep)
+    udays = np.array(sorted(set(E["dord"].tolist())))
+    dix = np.searchsorted(udays, E["dord"])
+    med = np.median(udays)
+    half = (E["dord"] >= med).astype(int)
+    Dall = len(udays)
+    Dh = [int((udays < med).sum()), int((udays >= med).sum())]
+    print(f"scoring {NE:,} entries on {Dall} days ({time.time() - t0:.0f}s)", flush=True)
+    sname = lambda off: "ATM" if off == 0 else (f"{abs(off)} ITM" if off < 0 else f"{off} OTM")
+    pname = lambda xe: f"{xe}DTE"
+    TRIG, ENT, TF, SYM = E["trig"].astype(int), E["ent"].astype(int), E["tf"].astype(int), E["sym"].astype(int)
+    groups = [(f"{'+'.join(syms)} {tf}m", TF == tf) for tf in tfs] + [(f"{'+'.join(syms)} ALL CHARTS", np.ones(NE, bool))]
+    groups += [(f"{sym} {tf}m", (SYM == si_) & (TF == tf)) for si_, sym in enumerate(syms) for tf in tfs]
+    GM = dict(groups)
+    NSTR = NX * NS * NP
+    SIDX = [(xj, si2, pi_) for xj in range(NX) for si2 in range(NS) for pi_ in range(NP)]
+
+    def cfgs():
+        for tg in range(len(EDGE_TRIG)):
+            for ent in ((0, 1) if tg in EDGE_TWO else (0,)):
+                yield tg, ent
+    # ---- 1. every structure
+    rows_ = []
+    for tg, ent in cfgs():
+        for gname, gm in groups:
+            m0 = (TRIG == tg) & (ENT == ent) & gm
+            if m0.sum() < 30:
+                continue
+            Rm = RET[m0].reshape(int(m0.sum()), NSTR)
+            dv = dix[m0]
+            hv = half[m0]
+            n_, mu, t_, win, aw, al = edge_grid_stats(Rm, dv)
+            hh = [edge_grid_stats(Rm[hv == q], dv[hv == q]) if (hv == q).sum() >= 10 else None for q in (0, 1)]
+            for j, (xj, si2, pi_) in enumerate(SIDX):
+                if n_[j] < 30:
+                    continue
+                rows_.append(dict(trigger=EDGE_TRIG[tg], entry=EDGE_ENT[ent], group=gname, exit=EDGE_X[xj], strike=EDGE_STRIKES[si2],
+                                  exp=EDGE_EXPS[pi_], n=int(n_[j]), fpd=n_[j] / Dall, win=win[j], avg=mu[j], t=t_[j], avgw=aw[j], avgl=al[j],
+                                  avg_h1=hh[0][1][j] if hh[0] else np.nan, avg_h2=hh[1][1][j] if hh[1] else np.nan,
+                                  t_h1=hh[0][2][j] if hh[0] else np.nan, t_h2=hh[1][2][j] if hh[1] else np.nan))
+    R = pd.DataFrame(rows_)
+    R["both"] = (R["avg_h1"] > 0) & (R["avg_h2"] > 0)
+    rnd = R[R["trigger"] == "RANDOM"].set_index(["entry", "group", "exit", "strike", "exp"])["avg"]
+    R["rnd_avg"] = [rnd.get((en_, g_, x_, s_, p_), np.nan) for en_, g_, x_, s_, p_ in zip(R["entry"], R["group"], R["exit"], R["strike"], R["exp"])]
+    R["vs_rnd"] = R["avg"] - R["rnd_avg"]
+    R.to_csv(f"{OUT}/edge_structures.csv.gz", index=False, compression="gzip", float_format="%.4f")
+    print(f"  structures scored: {len(R):,} ({time.time() - t0:.0f}s)", flush=True)
+
+    def kel(tg, ent, gname, xj, si2, pi_, mask=None):
+        m0 = (TRIG == tg) & (ENT == ent) & GM[gname]
+        if mask is not None:
+            m0 &= mask
+        r = RET[m0, xj, si2, pi_]
+        return lab_kelly(r[np.isfinite(r)])
+    # ---- 2. blind confluence: structure + score learned on one half, judged on the other
+    BL, PR, ST = [], [], []
+    tf_groups = [g for g, _ in groups[:len(tfs) + 1]]
+    FTall = E["FT"]
+    ks = [0, 1, 2, 3, 4, 5, 6, 8]
+    for pick in (0, 1):
+        other = 1 - pick
+        cand = []
+        for tg, ent in cfgs():
+            for gname in tf_groups:
+                m0 = (TRIG == tg) & (ENT == ent) & GM[gname]
+                mP, mO = m0 & (half == pick), m0 & (half == other)
+                if mP.sum() < 60 or mO.sum() < 30:
+                    continue
+                RmP = RET[mP].reshape(int(mP.sum()), NSTR)
+                nP, muP, tP, *_ = edge_grid_stats(RmP, dix[mP])
+                tP = np.where(nP >= 60, np.nan_to_num(tP, nan=-99), -99)
+                j = int(np.argmax(tP))
+                xj, si2, pi_ = SIDX[j]
+                rP = RET[mP, xj, si2, pi_]
+                rO = RET[mO, xj, si2, pi_]
+                FP, FO = FTall[mP], FTall[mO]
+                # learn the helpful / harmful readings on the pick half
+                okP = np.isfinite(rP)
+                rr0, dd0, FF0 = rP[okP], dix[mP][okP], FP[okP]
+                base = rr0.mean() if len(rr0) else 0.0
+                pro, con = [], []
+                for fi in range(NF):
+                    x = FF0[:, fi]
+                    for v in np.unique(x):
+                        mk = x == v
+                        nn = int(mk.sum())
+                        if nn < 40 or nn > 0.9 * len(rr0):
+                            continue
+                        rs, ds = rr0[mk], dd0[mk]
+                        mu_ = rs.mean()
+                        S_, C_ = np.bincount(ds, weights=rs), np.bincount(ds)
+                        se_ = np.sqrt(((S_ - C_ * mu_) ** 2).sum()) / nn
+                        if se_ <= 0:
+                            continue
+                        tl = (mu_ - base) / se_
+                        if tl >= 2 and mu_ > 0:
+                            pro.append((fi, int(v), tl, mu_, nn))
+                        elif tl <= -2:
+                            con.append((fi, int(v), tl, mu_, nn))
+                pro.sort(key=lambda z: -z[2])
+                con.sort(key=lambda z: z[2])
+
+                def score(FF):
+                    sc = np.zeros(len(FF), int)
+                    for fi, v, *_ in pro:
+                        sc += FF[:, fi] == v
+                    for fi, v, *_ in con:
+                        sc -= FF[:, fi] == v
+                    return sc
+                scP, scO = score(FP), score(FO)
+                mR = (TRIG == 9) & (ENT == ent) & GM[gname] & (half == other)
+                rR = RET[mR, xj, si2, pi_]
+                scR = score(FTall[mR])
+                words = lambda lst: "; ".join(f"{EDGE_FN[EDGE_F[fi]][0]}: {EDGE_FN[EDGE_F[fi]][1][v] if v < len(EDGE_FN[EDGE_F[fi]][1]) else v}"
+                                              for fi, v, *_ in lst[:10])
+                for kk in ks:
+                    if kk > 0 and kk > len(pro):
+                        break
+                    sP = edge_stats(rP[scP >= kk], dix[mP][scP >= kk], Dh[pick])
+                    sO = edge_stats(rO[scO >= kk], dix[mO][scO >= kk], Dh[other])
+                    sR = edge_stats(rR[scR >= kk], dix[mR][scR >= kk], Dh[other])
+                    if sO is None:
+                        continue
+                    kf = lab_kelly(rO[(scO >= kk) & np.isfinite(rO)])
+                    rec = dict(pick=f"learned on {'1st' if pick == 0 else '2nd'} half", trigger=EDGE_TRIG[tg], entry=EDGE_ENT[ent], group=gname,
+                               exit=EDGE_X[xj], strike=EDGE_STRIKES[si2], exp=EDGE_EXPS[pi_], k=kk, n_pro=len(pro), n_con=len(con),
+                               p_n=sP["n"] if sP else 0, p_avg=sP["avg"] if sP else np.nan, p_t=sP["t"] if sP else np.nan,
+                               n=sO["n"], fpd=sO["fpd"], win=sO["win"], avg=sO["avg"], t=sO["t"], avgw=sO["avgw"], avgl=sO["avgl"],
+                               kelly=kf[0], growth=kf[1],
+                               rnd_n=sR["n"] if sR else 0, rnd_avg=sR["avg"] if sR else np.nan, rnd_t=sR["t"] if sR else np.nan,
+                               helps=words(pro), hurts=words(con))
+                    BL.append(rec)
+                    if tg != 9 and gname != tf_groups[-1] and sP and sP["avg"] >= 0.02 and sP["t"] >= 2.5 and sP["n"] >= 30:
+                        cand.append((kk, tg, ent, gname, xj, si2, pi_, scO, mO, sP["avg"]))
+                # best single reading / pair, picked on this half by t, judged on the other
+                best = None
+                rPf, FPf = rP[okP], FP[okP]
+                for f1 in range(NF):
+                    for f2 in range(f1, NF):
+                        code = FPf[:, f1].astype(np.int64) * 16 + (FPf[:, f2].astype(np.int64) if f2 != f1 else 0)
+                        cn = np.bincount(code, minlength=256)
+                        s1 = np.bincount(code, weights=rPf, minlength=256)
+                        s2 = np.bincount(code, weights=rPf * rPf, minlength=256)
+                        with np.errstate(invalid="ignore", divide="ignore"):
+                            mu_ = s1 / cn
+                            tt = mu_ / np.sqrt(np.maximum(s2 / cn - mu_ ** 2, 1e-12) / cn)
+                        tt = np.where(cn >= 40, np.nan_to_num(tt, nan=-99), -99)
+                        c_ = int(np.argmax(tt))
+                        if best is None or tt[c_] > best[0]:
+                            best = (float(tt[c_]), f1, f2, c_ // 16, c_ % 16)
+                if best and best[0] > -99:
+                    tb, f1, f2, v1, v2 = best
+                    mk = (FO[:, f1] == v1) & ((FO[:, f2] == v2) if f2 != f1 else True)
+                    sO = edge_stats(rO[mk], dix[mO][mk], Dh[other])
+                    mkR = (FTall[mR][:, f1] == v1) & ((FTall[mR][:, f2] == v2) if f2 != f1 else True)
+                    sR = edge_stats(rR[mkR], dix[mR][mkR], Dh[other])
+                    nm_ = lambda fi, v: f"{EDGE_FN[EDGE_F[fi]][0]}: {EDGE_FN[EDGE_F[fi]][1][v] if v < len(EDGE_FN[EDGE_F[fi]][1]) else v}"
+                    PR.append(dict(pick=f"picked on {'1st' if pick == 0 else '2nd'} half", trigger=EDGE_TRIG[tg], entry=EDGE_ENT[ent], group=gname,
+                                   exit=EDGE_X[xj], strike=EDGE_STRIKES[si2], exp=EDGE_EXPS[pi_],
+                                   readings=nm_(f1, v1) + ("" if f2 == f1 else " + " + nm_(f2, v2)), t_pick=tb,
+                                   n=sO["n"] if sO else 0, fpd=sO["fpd"] if sO else 0, win=sO["win"] if sO else np.nan,
+                                   avg=sO["avg"] if sO else np.nan, t=sO["t"] if sO else np.nan,
+                                   rnd_n=sR["n"] if sR else 0, rnd_avg=sR["avg"] if sR else np.nan))
+        # ---- 3. the STACK: every config that cleared +2% / t 2.5 on the pick half (fewest filters that do it), one book on the other half
+        by = {}
+        for z in sorted(cand, key=lambda z: z[0]):
+            by.setdefault(z[1:4], z)
+        for lab_, minavg in (("STACK +2%", 0.02), ("STACK +3%", 0.03)):
+            parts = [z for z in by.values() if z[9] >= minavg]
+            if not parts:
+                continue
+            tr_ = []
+            for kk, tg, ent, gname, xj, si2, pi_, scO, mO, _ in parts:
+                ix = np.nonzero(mO)[0][scO >= kk]
+                r = RET[ix, xj, si2, pi_]
+                okr = np.isfinite(r)
+                ix, r = ix[okr], r[okr]
+                tr_.append(pd.DataFrame(dict(row=ix, sym=SYM[ix], dord=E["dord"][ix], m_e=E["m_e"][ix].astype(int),
+                                             x=XMO[ix, xj, si2, pi_].astype(int), r=r, cfg=f"{EDGE_TRIG[tg]} / {EDGE_ENT[ent]} / {gname}")))
+            T = pd.concat(tr_).sort_values(["sym", "dord", "m_e"])
+            take = np.zeros(len(T), bool)
+            last = {}
+            for q, (s_, d_, me_, x_) in enumerate(zip(T["sym"].to_numpy(), T["dord"].to_numpy(), T["m_e"].to_numpy(), T["x"].to_numpy())):
+                if last.get((s_, d_), -1) < me_:
+                    take[q] = True
+                    last[(s_, d_)] = x_
+            T = T[take]
+            dd_ = np.searchsorted(udays, T["dord"].to_numpy())
+            s_ = edge_stats(T["r"].to_numpy(), dd_, Dh[other])
+            if s_ is None:
+                continue
+            kf = lab_kelly(T["r"].to_numpy())
+            ST.append(dict(pick=f"built on {'1st' if pick == 0 else '2nd'} half", book=lab_, configs=len(parts), **s_, kelly=kf[0], growth=kf[1],
+                           mix="; ".join(f"{c_} ({v_})" for c_, v_ in T["cfg"].value_counts().head(12).items())))
+            T.assign(book=lab_, pick=pick).to_csv(f"{OUT}/edge_stack_trades_{lab_[-3:-1]}_{pick}.csv", index=False, float_format="%.4f")
+    BLD, PRD, STD = pd.DataFrame(BL), pd.DataFrame(PR), pd.DataFrame(ST)
+    BLD.to_csv(f"{OUT}/edge_blind.csv", index=False, float_format="%.4f")
+    PRD.to_csv(f"{OUT}/edge_pairs.csv", index=False, float_format="%.4f")
+    STD.to_csv(f"{OUT}/edge_stack.csv", index=False, float_format="%.4f")
+    print(f"  blind tests done ({time.time() - t0:.0f}s)", flush=True)
+    # ---- report
+    md = [f"# EDGE FINDER - SCORECARD x DIAMONDS x REAL OPTION PRICES - {', '.join(syms)} - {EDGE_START} to now - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Runtime {(time.time() - t0) / 60:.0f} min. {NE:,} entries on {Dall} trading days. Option prices = "
+          f"{'FAKE (test mode)' if test else 'Alpaca OPRA 1-minute bars'}: {n_got:,} of {n_req:,} contract-days found"
+          + (f" (time limit: back to {cut_at})" if cut_at else "") + ". DATA ONLY.",
+          "**Each trade** buys the option at the close of the signal minute (+ cost) and sells at the exit minute's close (- cost). "
+          f"**Cost** = $0.01 or 0.5% of the price per side, whichever is bigger. Entries 9:35-14:45, out by 15:55, max {EDGE_HOLD} min. "
+          "**Return** = % on the premium paid. **Fires/day** = trades per trading day, SPY + QQQ together.",
+          "**Halves** = the older and newer half of the days. **BLIND** = picked or learned on one half, judged on the half it never saw.", "",
+          "**Signals:**"] + [f"- **{k}** - {v}" for k, v in EDGE_TRIG_WHY.items()] + ["", "**Exits:**"] + [f"- **{k}** - {v}" for k, v in EDGE_XWHY.items()] + [""]
+    # how often each fires
+    md += ["## 1. HOW OFTEN EACH SIGNAL FIRES (per trading day, SPY + QQQ together, entries with option prices)",
+           "| Signal | Entry | " + " | ".join(f"{tf}m" for tf in tfs) + " | all charts |", "|---|---|" + "---|" * (len(tfs) + 1)]
+    for tg, ent in cfgs():
+        cells = [f"{((TRIG == tg) & (ENT == ent) & (TF == tf)).sum() / Dall:.1f}" for tf in tfs]
+        md.append(f"| {EDGE_TRIG[tg]} | {EDGE_ENT[ent]} | " + " | ".join(cells) + f" | {((TRIG == tg) & (ENT == ent)).sum() / Dall:.1f} |")
+    TH = "| Signal | Entry | Chart | Exit | Option | Fires/day | Win % | Avg | Avg win / loss | t | 1st / 2nd half | Random same trade | Edge vs random |"
+    TS = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+
+    def trow(z):
+        return (f"| {z.trigger} | {z.entry} | {z.group} | {z.exit} | {sname(z.strike)} {pname(z.exp)} | {z.fpd:.2f} | {100 * z.win:.0f}% | "
+                f"**{100 * z.avg:+.1f}%** | {100 * z.avgw:+.0f}% / {100 * z.avgl:+.0f}% | {z.t:.1f} | {100 * z.avg_h1:+.1f}% / {100 * z.avg_h2:+.1f}% | "
+                f"{100 * z.rnd_avg:+.1f}% | {100 * z.vs_rnd:+.1f}% |")
+    good = R[(R["t"] >= 2.5) & R["both"] & (R["trigger"] != "RANDOM") & (R["avg"] > 0)]
+    rgood = R[(R["t"] >= 2.5) & R["both"] & (R["trigger"] == "RANDOM") & (R["avg"] > 0)]
+    md += ["", f"## 2. EVERY SIGNAL'S BEST OPTION TRADE (whole sample, t 2.5+, positive in both halves) - {len(good):,} of "
+           f"{(R['trigger'] != 'RANDOM').sum():,} pass (RANDOM: {len(rgood):,} of {(R['trigger'] == 'RANDOM').sum():,})",
+           "Best per signal and chart, sorted by average return. Edge vs random = this signal minus random entries on the exact same trade."]
+    md += [TH, TS]
+    tfg = set(tf_groups)
+    bestper = good[good["group"].isin(tfg)].sort_values("avg", ascending=False).drop_duplicates(["trigger", "entry", "group"])
+    for z in bestper.head(40).itertuples():
+        md.append(trow(z))
+    md += ["", "### Most fires with quality (whole sample): best average at each fire rate, t 2.5+, both halves positive, beats random", TH, TS]
+    gq = good[good["group"].isin(tfg) & (good["vs_rnd"] > 0)]
+    BANDS = [(0.25, 0.5), (0.5, 1), (1, 2), (2, 4), (4, 8), (8, 15), (15, 1e9)]
+    bname = lambda lo_, hi_: f"{lo_}+ fires/day" if hi_ > 1e8 else f"{lo_}-{hi_} fires/day"
+    for lo_, hi_ in BANDS:
+        q = gq[(gq["fpd"] >= lo_) & (gq["fpd"] < hi_)].sort_values("avg", ascending=False).drop_duplicates(["trigger", "entry", "group"]).head(4)
+        if len(q):
+            md.append(f"| **{bname(lo_, hi_)}** | | | | | | | | | | | | |")
+            for z in q.itertuples():
+                md.append(trow(z))
+    # option + exit summaries
+    nr_ = R[(R["trigger"] != "RANDOM") & R["group"].isin(tf_groups[:-1])]
+    md += ["", "## 3. WHICH OPTION? (every signal x chart x exit, SPY + QQQ per chart)", "Median average return, and the share of setups that pass (t 2.5+, both halves positive).",
+           "| Option | " + " | ".join(pname(p_) for p_ in EDGE_EXPS) + " |", "|---|" + "---|" * NP]
+    for s2 in EDGE_STRIKES:
+        cells = []
+        for p_ in EDGE_EXPS:
+            q = nr_[(nr_["strike"] == s2) & (nr_["exp"] == p_)]
+            ps = ((q["t"] >= 2.5) & q["both"] & (q["avg"] > 0)).mean() if len(q) else np.nan
+            cells.append(f"{100 * q['avg'].median():+.1f}% ({100 * ps:.0f}% pass)" if len(q) else "-")
+        md.append(f"| {sname(s2)} | " + " | ".join(cells) + " |")
+    md += ["", "## 4. WHICH EXIT? (every signal x chart x option)", "| Exit | Median avg | Pass % | Best signal with it (avg, fires/day) |", "|---|---|---|---|"]
+    for xn in EDGE_X:
+        q = nr_[nr_["exit"] == xn]
+        ps = ((q["t"] >= 2.5) & q["both"] & (q["avg"] > 0)).mean() if len(q) else np.nan
+        b_ = good[(good["exit"] == xn) & good["group"].isin(tfg)].sort_values("avg", ascending=False).head(1)
+        bt = f"{b_['trigger'].iloc[0]} {b_['group'].iloc[0]} {sname(b_['strike'].iloc[0])} {pname(b_['exp'].iloc[0])} ({100 * b_['avg'].iloc[0]:+.1f}%, {b_['fpd'].iloc[0]:.1f}/day)" if len(b_) else "-"
+        md.append(f"| {xn} | {100 * q['avg'].median():+.1f}% | {100 * ps:.0f}% | {bt} |")
+    # blind confluence
+    BH = "| Learned on | Signal | Entry | Chart | Trade (picked blind) | Filter | Fires/day | Win % | Avg | Avg win / loss | t | Kelly | Random + same filter |"
+    BS = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+
+    def brow(z):
+        return (f"| {z.pick.replace('learned on ', '')} | {z.trigger} | {z.entry} | {z.group} | {z.exit} / {sname(z.strike)} {pname(z.exp)} | "
+                f"{'none' if z.k == 0 else f'score {z.k}+'} | {z.fpd:.2f} | {100 * z.win:.0f}% | **{100 * z.avg:+.1f}%** {'✅' if z.avg >= 0.03 and z.t >= 2.5 else ''} | {100 * z.avgw:+.0f}% / {100 * z.avgl:+.0f}% | "
+                f"{z.t:.1f} | {100 * z.kelly:.0f}% | {f'{100 * z.rnd_avg:+.1f}% ({z.rnd_n})' if z.rnd_n else '-'} |")
+    md += ["", "## 5. BLIND CONFLUENCE - the trade AND the readings that help learned on one half, judged on the half it never saw",
+           "For every signal and chart: the best trade is picked on one half (by t). On that same half, every reading that lifts the average "
+           "(t 2+) counts +1 and every one that drags it counts -1. **Score k+** = trades with k or more helping readings (net). Everything below "
+           "is the OTHER half. ✅ in the frontier = avg +3%+ and t 2.5+ on unseen days."]
+    if len(BLD):
+        BLD["ok"] = (BLD["avg"] >= 0.03) & (BLD["t"] >= 2.5)
+        md += ["", "### The frontier: most fires per day that still held up on unseen days", BH, BS]
+        md.insert(len(md) - 2, "Unseen half only, t 2+, positive, and better than random entries with the same trade and filter. Best 4 per fire rate.")
+        for lo_, hi_ in BANDS:
+            q = BLD[(BLD["fpd"] >= lo_) & (BLD["fpd"] < hi_) & (BLD["t"] >= 2.0) & (BLD["avg"] > 0) & (BLD["trigger"] != "RANDOM")
+                    & ~(BLD["avg"] <= BLD["rnd_avg"])].sort_values("avg", ascending=False).head(4)
+            md.append(f"| **{bname(lo_, hi_)}** | | | | | | | | | | | | |")
+            for z in q.itertuples():
+                md.append(brow(z))
+        both_ = BLD[BLD["trigger"] != "RANDOM"].groupby(["trigger", "entry", "group", "k"]).agg(
+            halves=("pick", "nunique"), worst=("avg", "min"), tmin=("t", "min"), fpd=("fpd", "mean")).reset_index()
+        both_ = both_[(both_["halves"] == 2) & (both_["worst"] > 0) & (both_["tmin"] >= 2)].sort_values(["fpd"], ascending=False)
+        md += ["", f"### Held up BOTH ways (learned on either half, positive with t 2+ on the other) - {len(both_)} setups",
+               "| Signal | Entry | Chart | Filter | Fires/day (avg of both) | Worst half avg | Worst t |", "|---|---|---|---|---|---|---|"]
+        for z in both_.head(30).itertuples():
+            md.append(f"| {z.trigger} | {z.entry} | {z.group} | {'none' if z.k == 0 else f'score {z.k}+'} | {z.fpd:.2f} | **{100 * z.worst:+.1f}%** | {z.tmin:.1f} |")
+        md += ["", "### What the filters learned (the readings that helped / hurt, for the setups above)"]
+        seen = set()
+        for z in BLD[BLD["k"] == 1].sort_values("avg", ascending=False).itertuples():
+            key = (z.trigger, z.entry, z.group, z.pick)
+            if key in seen or (z.trigger, z.entry, z.group) not in set(zip(both_["trigger"], both_["entry"], both_["group"])):
+                continue
+            seen.add(key)
+            md.append(f"- **{z.trigger} / {z.entry} / {z.group}** ({z.pick}): HELPS: {z.helps or '-'} | HURTS: {z.hurts or '-'}")
+            if len(seen) >= 16:
+                break
+        md += ["", "### Every signal, no filter vs best filter (unseen half)", BH, BS]
+        for (tg_, en_, g_), q in BLD[BLD["group"].isin(tf_groups[:-1])].groupby(["trigger", "entry", "group"], sort=False):
+            for z in q[q["k"] == 0].itertuples():
+                md.append(brow(z))
+            qq = q[q["k"] > 0].sort_values("avg", ascending=False).head(1)
+            for z in qq.itertuples():
+                md.append(brow(z))
+    if len(PRD):
+        md += ["", "## 6. BEST SINGLE READING OR PAIR - picked on one half (by t), judged on the other",
+               "| Picked on | Signal | Entry | Chart | Trade | Readings | t when picked | Fires/day | Win % | Avg | t | Random + same readings |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for z in PRD.sort_values("avg", ascending=False).itertuples():
+            if not np.isfinite(z.avg):
+                continue
+            ok = z.avg >= 0.03 and z.t >= 2.5
+            md.append(f"| {z.pick.replace('picked on ', '')} | {z.trigger} | {z.entry} | {z.group} | {z.exit} / {sname(z.strike)} {pname(z.exp)} | {z.readings} | "
+                      f"{z.t_pick:.1f} | {z.fpd:.2f} | {100 * z.win:.0f}% | **{100 * z.avg:+.1f}%** {'✅' if ok else ''} | {z.t:.1f} | {f'{100 * z.rnd_avg:+.1f}% ({z.rnd_n})' if z.rnd_n else '-'} |")
+    md += ["", "## 7. THE STACK - one scalp book from every setup that cleared the bar on one half, traded on the half it never saw",
+           "Each setup keeps its own trade and filter (picked on the build half: the fewest helping readings that gave +2% (or +3%) with t 2.5). "
+           "One trade at a time per ticker: a signal is skipped while that ticker's last trade is still open."]
+    if len(STD):
+        md += ["| Built on | Book | Setups | Trades | Trades/day | Win % | Avg | Avg win / loss | t | Kelly | Growth / trade | Biggest parts |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for z in STD.itertuples():
+            md.append(f"| {z.pick.replace('built on ', '')} | {z.book} | {z.configs} | {z.n} | {z.fpd:.2f} | {100 * z.win:.0f}% | **{100 * z.avg:+.1f}%** | "
+                      f"{100 * z.avgw:+.0f}% / {100 * z.avgl:+.0f}% | {z.t:.1f} | {100 * z.kelly:.0f}% | {100 * z.growth:+.2f}% | {z.mix} |")
+    else:
+        md.append("- No setup cleared +2% with t 2.5 on either half, so there is no stack.")
+    md += ["", "**Luck check:** tens of thousands of trades and filters are scored. Sections 2-4 are the whole sample (some will look good by "
+           "chance). Sections 5-7 are BLIND: picked on one half, judged on the other - those are the ones that count. Kelly near 100% "
+           "comes from small average losses and is not a size to use."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/edge_{stamp}.md", f"{OUT}/edge_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as f:
+            f.write(text + "\n")
+
 
 if __name__ == "__main__":
     main()
