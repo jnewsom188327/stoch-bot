@@ -1,5 +1,7 @@
 """
-THE DEFAULT RUN (MODE=dial) = DIAL IN THE DIAMOND: every bar-count setting of your AGREE DOTS diamond (311,040 per chart) + every
+THE DEFAULT RUN (MODE=confirm) = CONFIRM: your AGREE DOTS diamond vs the 1m-tuned diamond (TTM 30 / Vix 30 / same candle) on the
+  YEAR BEFORE (never seen) + the last 12 months, each ticker (type SPY,QQQ,IWM), each quarter, 1/2/3/5m. DATA ONLY.
+MODE=dial = DIAL IN THE DIAMOND: every bar-count setting of your AGREE DOTS diamond (311,040 per chart) + every
   reading at each diamond (inside the diamond, the run into it, colors, trend line, VWAP, the day, real VIX), alone and in every
   2-3 combination, winners vs losers, blind tests. SPY + QQQ, 1/2/3/5m + TODAY. DATA ONLY.
 MODE=diamond = DIAMOND DAYS: your AGREE DOTS diamonds traded like you trade them (options-sized targets,
@@ -157,7 +159,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "dial").strip().lower() or "dial"
+MODE = os.getenv("MODE", "confirm").strip().lower() or "confirm"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -457,6 +459,8 @@ def main():
         return ttmvix_main()
     if MODE == "solo":
         return solo_main()
+    if MODE == "confirm":
+        return cf_main()
     if MODE == "dial":
         return dl_main()
     if MODE == "diamond":
@@ -12781,6 +12785,193 @@ def dl_main():
     print("\n" + text)
     stamp = datetime.now(NY).strftime("%Y-%m-%d")
     for path in (f"{OUT}/dial_{stamp}.md", f"{OUT}/dial_latest.md"):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as f:
+            f.write(text + "\n")
+
+# ================================================================ CONFIRM: YOUR DIAMOND vs THE 1m-TUNED DIAMOND (MODE=confirm)
+# Both AGREE DOTS settings side by side on data the settings test NEVER saw: the YEAR BEFORE (and IWM, a new ticker), plus the
+# last 12 months where the tuned setting was found - each ticker, each quarter. Same trade math as before.
+CF_TFS_DEF = "1,2,3,5"
+CF_SETS = [("YOUR SETTINGS", (20, 14, 5, 1.0, 22, 50, 10, 50, 2)), ("1m TUNED", (30, 14, 3, 1.0, 30, 50, 5, 70, 1))]
+
+
+def cf_marks(df, st):
+    """diamond candles (long, short) for one full setting - exact AGREE DOTS math"""
+    L_, AL, aL, td, lb_, hl_, mL, vd, w = st
+    hS, lS, cS = df["high"], df["low"], df["close"]
+    sh_ = lambda x, k: np.r_[np.full(k, np.nan), x[:-k]]
+    trS = pd.concat([hS - lS, (hS - cS.shift(1)).abs(), (lS - cS.shift(1)).abs()], axis=1).max(axis=1)
+    trS.iloc[0] = hS.iloc[0] - lS.iloc[0]
+    mid_ = ((hS.rolling(L_).max() + lS.rolling(L_).min()) / 2 + cS.rolling(L_).mean()) / 2
+    mom_ = linreg_last((cS - mid_).to_numpy(), L_)
+    atr_ = trS.ewm(alpha=1 / AL, adjust=False).mean().to_numpy()
+    m_ = np.nan_to_num(np.where(atr_ > 0, mom_ / atr_, 0.0))
+    av = pd.Series(m_).ewm(span=aL, adjust=False).mean().to_numpy()
+    av1, av2 = sh_(av, 1), sh_(av, 2)
+    tu = np.nonzero((av > av1) & (av1 <= av2) & (av1 <= -td))[0]
+    tdn = np.nonzero((av < av1) & (av1 >= av2) & (av1 >= td))[0]
+    hc_, lc_ = cS.rolling(lb_).max(), cS.rolling(lb_).min()
+    wvf_, wvs_ = (hc_ - lS) / hc_ * 100, (hS - lc_) / lc_ * 100
+    F_ = np.nan_to_num((wvf_ / wvf_.rolling(hl_).max() * 100).to_numpy())
+    G_ = np.nan_to_num((wvs_ / wvs_.rolling(hl_).max() * 100).to_numpy())
+    gA = pd.Series(G_).ewm(span=mL, adjust=False).mean().to_numpy()
+    fA = pd.Series(F_).ewm(span=mL, adjust=False).mean().to_numpy()
+    gA1, fA1, gA2, fA2 = sh_(gA, 1), sh_(fA, 1), sh_(gA, 2), sh_(fA, 2)
+    fT = np.nonzero((fA < fA1) & (fA1 >= fA2) & (fA1 >= vd))[0]
+    gT = np.nonzero((gA < gA1) & (gA1 >= gA2) & (gA1 >= vd))[0]
+
+    def marks(a_, b_):
+        if len(a_) == 0 or len(b_) == 0:
+            return np.empty(0, dtype=np.int64)
+        p = np.searchsorted(b_, a_, "right") - 1
+        a1 = a_[(p >= 0) & (a_ - b_[np.maximum(p, 0)] < w)]
+        q = np.searchsorted(a_, b_, "right") - 1
+        b1 = b_[(q >= 0) & (b_ - a_[np.maximum(q, 0)] < w)]
+        u = np.union1d(a1, b1)
+        return u[np.r_[True, np.diff(u) > 2]] if len(u) else u
+    return marks(tu, fT), marks(tdn, gT)
+
+
+def cf_main():
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
+    last_start = pd.Timestamp(end.astimezone(NY).date() - timedelta(days=365), tz=NY)     # where the tuned setting was found
+    prior_start = last_start - pd.Timedelta(days=365)                                      # the year before = never seen
+    fetch_from = (prior_start - pd.Timedelta(days=40)).tz_convert("UTC").to_pydatetime()
+    test = os.getenv("TEST", "") == "1"
+    tfs = [int(x) for x in os.getenv("CF_TFS", CF_TFS_DEF).split(",")]
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rows, charts = [], []
+    recent = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, fetch_from, end) if test else fetch_1m(sym, fetch_from, end)
+        df1 = df1[(df1.index.hour * 100 + df1.index.minute >= 400) & (df1.index.hour * 100 + df1.index.minute < 2000)]
+        o1, h1, l1, c1 = (df1[k].to_numpy() for k in ("open", "high", "low", "close"))
+        t1 = df1.index
+        hm1 = (t1.hour * 100 + t1.minute).to_numpy()
+        d1 = pd.factorize(t1.date)[0]
+        last1 = pd.Series(np.where(hm1 < 1559, np.arange(len(t1)), -1)).groupby(d1).transform("max").to_numpy()
+        last1 = np.where(last1 < 0, np.arange(len(t1)), last1)
+        for tf in tfs:
+            ch = f"{sym} {tf}m"
+            charts.append(ch)
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(o)
+            ts = df.index
+            per = np.where(ts < last_start, 0, 1).astype(np.int8)                # 0 = the year before, 1 = last 12 months
+            dord = np.array([d_.toordinal() for d_ in day])
+            e = np.minimum(np.searchsorted(t1.values, (ts + pd.Timedelta(minutes=tf)).values), len(t1) - 1)
+            okw = np.asarray(ts >= prior_start) & (hm >= 930) & (hm < 1545) & np.isfinite(a) & (a > 0)
+            okw &= np.asarray(pd.Index(t1[e].date) == pd.Index(ts.date)) & (hm1[e] < 1550)
+            lo10 = pd.Series(l).rolling(10, min_periods=1).min().to_numpy()
+            hi10 = pd.Series(h).rolling(10, min_periods=1).max().to_numpy()
+            ib = np.nonzero(okw)[0]
+            PO = {}
+            for sd in (1, -1):
+                en = o1[e[ib]]
+                sdist = (en - (lo10[ib] - 0.05)) if sd == 1 else ((hi10[ib] + 0.05) - en)
+                P_, _ = dm_outcomes(o1, h1, l1, c1, last1, e[ib], sd, sdist)
+                full = np.full((n, len(DM_EXITS)), np.nan, dtype=np.float32)
+                full[ib] = P_
+                PO[sd] = full
+            bmean = {(sd, pp): np.nanmean(PO[sd][ib][per[ib] == pp, DM_MAIN]) for sd in (1, -1) for pp in (0, 1)}
+            qlab = pd.PeriodIndex(ts, freq="Q").astype(str)
+            for nm_, st in CF_SETS:
+                bull, bear = cf_marks(df, st)
+                for sd, ii in ((1, bull), (-1, bear)):
+                    ii = ii[okw[ii]]
+                    if not len(ii):
+                        continue
+                    D = pd.DataFrame({f"p{k}": PO[sd][ii, k] for k in range(len(DM_EXITS))})
+                    D["set"], D["sym"], D["tf"], D["ch"], D["side"] = nm_, sym, tf, ch, sd
+                    D["per"], D["day"], D["t"], D["px"], D["q"] = per[ii], dord[ii], ts[ii], c[ii], np.asarray(qlab)[ii]
+                    D["bm"] = [bmean[(sd, pp)] for pp in per[ii]]
+                    rows.append(D)
+            print(f"  {ch} done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    E["dc"] = E[f"p{DM_MAIN}"] - E["bm"]
+    E["win"] = (E[f"p{DM_MAIN}"] > 0).astype(float)
+    PK = [f"p{k}" for k in range(len(DM_EXITS))]
+    xl = DM_EXITS[DM_MAIN][0]
+
+    def stats(g):
+        if len(g) < 5:
+            return None
+        S_ = g.groupby("day")["dc"].sum()
+        C_ = g.groupby("day")["dc"].count()
+        mu = S_.sum() / C_.sum()
+        se = np.sqrt(((S_ - C_ * mu) ** 2).sum()) / C_.sum()
+        r = dict(n=len(g), days=len(S_), win=g["win"].mean(), dc=mu, t=(mu / se if se > 0 and len(S_) >= 10 else np.nan))
+        for p_ in PK:
+            r[p_] = g[p_].mean()
+        return r
+    PER = {0: f"YEAR BEFORE ({prior_start:%b %Y}-{last_start:%b %Y}) - NEVER SEEN", 1: f"LAST 12 MONTHS ({last_start:%b %Y}-now) - where it was found"}
+    HD = "| Setting | Tickers | Diamonds (per day) | Win % | " + " | ".join(x[0] for x in DM_EXITS) + " | vs random | t |"
+    HS = "|" + "---|" * (6 + len(DM_EXITS))
+
+    def row(nm_, tk, r):
+        return (f"| {nm_} | {tk} | {r['n']} ({r['n'] / max(1, r['days']):.1f}) | {100 * r['win']:.0f}% | " + " | ".join(f"{r[p_]:+.3f}" for p_ in PK) +
+                f" | {r['dc']:+.3f} | {r['t']:.1f} |")
+    md = [f"# CONFIRM - YOUR DIAMOND vs THE 1m-TUNED DIAMOND - {', '.join(SYMBOLS)} - 2 YEARS - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Charts {', '.join(charts)} (extended hours feed the indicators). Diamonds 9:30-15:45, entry = next 1-minute open. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**YOUR SETTINGS** = TTM 20 / ATR 14 / avg 5 / depth 1 - Vix 22 / 50 / avg 10 / turn 50 - within 2. **1m TUNED** = TTM 30 / ATR 14 / "
+          "avg 3 / depth 1 - Vix 30 / 50 / avg 5 / turn 70 - same candle (found on SPY+QQQ 1m, last 12 months).",
+          f"**Win %** = {xl} first (30 min max, same minute = stop). $ columns = average $/diamond on the stock. **vs random** = the same exit "
+          "from ANY candle, same side, same period. **t** clustered by day (3+ = solid).",
+          "**THE TEST:** the tuned setting is real only if it ALSO beats random in the YEAR BEFORE (data the settings test never saw) and on "
+          "IWM (a ticker it never saw). ✅ = +$0.03/diamond or better over random with t 2.5+ there.", ""]
+    for tf in tfs:
+        md += ["", f"## {tf}m"]
+        for pp in (0, 1):
+            md += ["", f"### {PER[pp]}", HD, HS]
+            for nm_, _ in CF_SETS:
+                for tk in SYMBOLS + (["ALL " + "+".join(SYMBOLS)] if len(SYMBOLS) > 1 else []):
+                    g = E[(E["set"] == nm_) & (E["tf"] == tf) & (E["per"] == pp) & (E["sym"].isin(SYMBOLS if tk.startswith("ALL") else [tk]))]
+                    r = stats(g)
+                    if r is None:
+                        continue
+                    ok = pp == 0 and nm_ != "YOUR SETTINGS" and r["dc"] >= 0.03 and r["t"] >= 2.5
+                    md.append(row(nm_, tk + (" ✅" if ok else ""), r))
+        # quarter by quarter, all tickers together
+        md += ["", f"### {tf}m quarter by quarter (all tickers) - $/diamond at {xl} vs random (win %, diamonds)",
+               "| Quarter | " + " | ".join(nm_ for nm_, _ in CF_SETS) + " |", "|---|" + "---|" * len(CF_SETS)]
+        for q_ in sorted(E[E["tf"] == tf]["q"].unique()):
+            cells = []
+            for nm_, _ in CF_SETS:
+                g = E[(E["set"] == nm_) & (E["tf"] == tf) & (E["q"] == q_)]
+                cells.append(f"{g['dc'].mean():+.3f} ({100 * g['win'].mean():.0f}%, {len(g)})" if len(g) else "-")
+            md.append(f"| {q_} | " + " | ".join(cells) + " |")
+        # head to head per ticker, never-seen year
+        md += ["", f"### {tf}m - head to head in the year never seen: tuned minus yours ($/diamond vs random)"]
+        for tk in SYMBOLS:
+            a_ = stats(E[(E["set"] == "1m TUNED") & (E["tf"] == tf) & (E["per"] == 0) & (E["sym"] == tk)])
+            b_ = stats(E[(E["set"] == "YOUR SETTINGS") & (E["tf"] == tf) & (E["per"] == 0) & (E["sym"] == tk)])
+            if a_ and b_:
+                md.append(f"- **{tk}**: tuned {a_['dc']:+.3f} (t {a_['t']:.1f}, {a_['n']}) vs yours {b_['dc']:+.3f} (t {b_['t']:.1f}, {b_['n']}) -> "
+                          f"difference **{a_['dc'] - b_['dc']:+.3f}**")
+    # the last 3 days of tuned 1m diamonds - check on the chart with the toggle on "1m tuned"
+    md += ["", "## CHECK ON YOUR CHART - 1m TUNED diamonds, last 3 trading days (toggle AGREE DOTS to '1m tuned')",
+           f"| Chart | Time | Diamond | Price | {xl} | +$1 / -$0.50 | +$1 / stop past swing |", "|---|---|---|---|---|---|---|"]
+    g = E[(E["set"] == "1m TUNED") & (E["tf"] == 1)]
+    if len(g):
+        dd = sorted(g["t"].dt.date.unique())[-3:]
+        for z in g[g["t"].dt.date.isin(dd)].sort_values(["sym", "t"]).itertuples():
+            md.append(f"| {z.ch} | {z.t:%m/%d %H:%M} | {'GREEN (long)' if z.side == 1 else 'RED (short)'} | {z.px:.2f} | "
+                      f"{getattr(z, f'p{DM_MAIN}'):+.2f} | {z.p2:+.2f} | {z.p4:+.2f} |")
+    E.to_csv(f"{OUT}/confirm_every_diamond.csv.gz", index=False, compression="gzip", float_format="%.3f")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/confirm_{stamp}.md", f"{OUT}/confirm_latest.md"):
         with open(path, "w") as f:
             f.write(text + "\n")
     sm_ = os.getenv("GITHUB_STEP_SUMMARY")
