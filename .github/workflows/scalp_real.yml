@@ -1,0 +1,113 @@
+name: 0DTE scalp on real option prices
+
+# DATA ONLY. This workflow downloads historical bars and writes a report.
+# It does not place orders. Trigger it by hand: Actions tab, this workflow, Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Recent completed trading days to request (falls back to however many have OPRA 1-minute bars)"
+        default: "60"
+      symbols:
+        description: "Tickers, comma separated"
+        default: "SPY,QQQ"
+      strikes:
+        description: "0DTE strikes: atm, 2itm, or 2itm,atm"
+        default: "2itm,atm"
+      half_spread_cents:
+        description: "Extra half-spread floor in cents per side (the run uses the larger of this and the percent below)"
+        default: "1"
+      half_spread_pct:
+        description: "Extra half-spread as a percent of premium per side"
+        default: "0.5"
+      commission:
+        description: "Commission in dollars per contract per side"
+        default: "0.65"
+      results_branch:
+        description: "Branch that receives the result files. main and master are refused."
+        default: "scalp-real-results"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scalp-real
+  cancel-in-progress: false
+
+jobs:
+  scalp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: pytest -q tests/test_scalp_real.py
+      - name: Backtest on real OPRA prints (data only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          SCALP_DAYS: ${{ github.event.inputs.days }}
+          SCALP_SYMBOLS: ${{ github.event.inputs.symbols }}
+          SCALP_STRIKES: ${{ github.event.inputs.strikes }}
+          SCALP_HALF_SPREAD_CENTS: ${{ github.event.inputs.half_spread_cents }}
+          SCALP_HALF_SPREAD_PCT: ${{ github.event.inputs.half_spread_pct }}
+          SCALP_COMMISSION: ${{ github.event.inputs.commission }}
+        run: python scalp_real.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scalp-real-results
+          path: |
+            results/SCALP_REAL.md
+            results/scalp_real_results.csv
+            results/scalp_real_trades.csv
+          if-no-files-found: warn
+      - name: Commit results onto the results branch (never main)
+        if: success()
+        env:
+          RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="${RESULTS_BRANCH:-scalp-real-results}"
+          case "$BRANCH" in
+            main|master|origin/main|origin/master)
+              echo "Refusing to push results to ${BRANCH}"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Refusing results branch name"
+            exit 1
+          fi
+          mkdir -p /tmp/scalp-out
+          cp -f results/SCALP_REAL.md results/scalp_real_results.csv results/scalp_real_trades.csv /tmp/scalp-out/
+          git config user.name "scalp-real"
+          git config user.email "scalp-real@users.noreply.github.com"
+          git fetch origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH"
+          fi
+          HEADBR="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p results
+          cp -f /tmp/scalp-out/SCALP_REAL.md /tmp/scalp-out/scalp_real_results.csv /tmp/scalp-out/scalp_real_trades.csv results/
+          git add results/SCALP_REAL.md results/scalp_real_results.csv results/scalp_real_trades.csv
+          if git diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          git commit -m "scalp real OPRA results $(date -u +%F)"
+          git push origin "HEAD:${BRANCH}"
