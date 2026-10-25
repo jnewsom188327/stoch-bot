@@ -1,0 +1,129 @@
+name: Edge hunt (walk-forward, real option prices)
+
+# DATA ONLY. This workflow downloads historical bars and writes a report.
+# It does not place orders. Trigger it by hand: Actions tab, this workflow, Run workflow.
+# A fresh run, not Re-run.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Recent completed trading days to score (quick=true forces 30)"
+        default: "170"
+      symbols:
+        description: "Tickers, comma separated"
+        default: "SPY,QQQ"
+      strikes:
+        description: "0DTE strikes, comma-separated, order kept: atm, 2itm, 1otm, 2otm. Default 1otm,atm."
+        default: "1otm,atm"
+      premium_min:
+        description: "Only take an entry when the option open (dollars per share) is at least this."
+        default: "0.45"
+      premium_max:
+        description: "Only take an entry when the option open (dollars per share) is at most this."
+        default: "0.80"
+      quick:
+        description: "true = 30 sessions and a smaller shuffle, smoke test only. false = the days input."
+        default: "false"
+      half_spread_cents:
+        description: "Extra half-spread floor in cents per side (the run uses the larger of this and the percent below)"
+        default: "1"
+      half_spread_pct:
+        description: "Extra half-spread as a percent of premium per side"
+        default: "0.5"
+      commission:
+        description: "Commission in dollars per contract per side"
+        default: "0.65"
+      results_branch:
+        description: "Branch that receives the result files. main and master are refused."
+        default: "edge-hunt-results"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: edge-hunt
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: python -m pytest -q tests/test_edge_hunt.py
+      - name: Walk-forward search on real OPRA prints (data only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          EDGE_DAYS: ${{ github.event.inputs.days }}
+          EDGE_SYMBOLS: ${{ github.event.inputs.symbols }}
+          EDGE_STRIKES: ${{ github.event.inputs.strikes }}
+          EDGE_PREMIUM_MIN: ${{ github.event.inputs.premium_min }}
+          EDGE_PREMIUM_MAX: ${{ github.event.inputs.premium_max }}
+          EDGE_QUICK: ${{ github.event.inputs.quick }}
+          EDGE_HALF_SPREAD_CENTS: ${{ github.event.inputs.half_spread_cents }}
+          EDGE_HALF_SPREAD_PCT: ${{ github.event.inputs.half_spread_pct }}
+          EDGE_COMMISSION: ${{ github.event.inputs.commission }}
+        run: python edge_hunt.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-hunt-results
+          path: |
+            results/EDGE_HUNT.md
+            results/edge_hunt_rules.csv
+            results/edge_hunt_trades.csv
+          if-no-files-found: warn
+      - name: Commit results onto the results branch (never main)
+        if: success()
+        env:
+          RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="${RESULTS_BRANCH:-edge-hunt-results}"
+          case "$BRANCH" in
+            main|master|origin/main|origin/master)
+              echo "Refusing to push results to ${BRANCH}"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Refusing results branch name"
+            exit 1
+          fi
+          mkdir -p /tmp/edge-out
+          cp -f results/EDGE_HUNT.md results/edge_hunt_rules.csv results/edge_hunt_trades.csv /tmp/edge-out/
+          # Untracked generated files block checkout once the results branch
+          # tracks these paths. Copies in /tmp are restored after the switch.
+          rm -f results/EDGE_HUNT.md results/edge_hunt_rules.csv results/edge_hunt_trades.csv
+          git config user.name "edge-hunt"
+          git config user.email "edge-hunt@users.noreply.github.com"
+          git fetch origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH"
+          fi
+          HEADBR="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p results
+          cp -f /tmp/edge-out/EDGE_HUNT.md /tmp/edge-out/edge_hunt_rules.csv /tmp/edge-out/edge_hunt_trades.csv results/
+          git add results/EDGE_HUNT.md results/edge_hunt_rules.csv results/edge_hunt_trades.csv
+          if git diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          git commit -m "edge hunt results $(date -u +%F)"
+          git push origin "HEAD:${BRANCH}"
