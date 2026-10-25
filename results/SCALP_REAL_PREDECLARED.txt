@@ -48,8 +48,12 @@ FILLS
 SPLIT AND TESTS
 - VIX day filter (SCALP_VIX_MIN, SCALP_VIX_MAX). Empty means that side is open. Both empty turns the filter off.
   The level is the prior trading day's VIX close: FRED series VIXCLS
-  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS). If that file cannot be read, the Yahoo chart
-  API for ^VIX is used, with a browser User-Agent. The session's own close is not used.
+  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS), then the Yahoo chart
+  API for ^VIX, then the Cboe VIX history file. Each download is retried.
+  data/vix_daily.csv fills any gap and is the last fallback. The session's own close is not used.
+  The report states the VIX data span. A missing prior close older than 5 days stops the run.
+  The most recent close, if it is the only one missing and it is within 5 days, uses the latest
+  available prior close and the report says so.
   A day is kept only when min <= prior close < max, on the sides that are set.
   The same kept days are used for signal trades, paired random controls, and the reference random book.
   The report prints how many days were kept and how many were dropped.

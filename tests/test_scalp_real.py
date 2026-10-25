@@ -740,12 +740,26 @@ def test_vix_parsers_and_a_failed_fetch_stops():
     assert yahoo[date(2026, 9, 25)] == pytest.approx(14.87)
     assert stamp == 1790319600
     assert len(yahoo) == 1
+    cboe = (
+        "VIX History\nDATE,OPEN,HIGH,LOW,CLOSE\n"
+        "10/22/2026,18,20,16,19.03\n"
+        "10/21/2026,16,17,15,\n"
+        "2026-10-20,15,16,14,16.68\n"
+    )
+    cboe_parsed = sc.parse_cboe_vix_csv(cboe)
+    assert cboe_parsed[date(2026, 10, 22)] == pytest.approx(19.03)
+    assert date(2026, 10, 21) not in cboe_parsed
+    assert cboe_parsed[date(2026, 10, 20)] == pytest.approx(16.68)
+    snap = sc.parse_vix_snapshot_csv("date,vix_close\n2026-10-22,19.03\n2026-10-23,\n2026-10-24,.\n")
+    assert list(snap) == [date(2026, 10, 22)]
 
     # More than 100 closes, so a short error page cannot pass the source check.
+    # One overlap with the snapshot: FRED wins that date, the snapshot fills the rest.
     extra = []
     for month in range(1, 6):
         for d in range(1, 29):
             extra.append(f"2021-{month:02d}-{d:02d},{16 + d / 100:.2f}")
+    extra.append("2026-10-22,99.00")
     fred_body = "observation_date,VIXCLS\n" + "\n".join(extra)
     seen = []
 
@@ -753,17 +767,21 @@ def test_vix_parsers_and_a_failed_fetch_stops():
         seen.append((url, headers.get("User-Agent", "")))
         if "fredgraph" in url:
             return fred_body
-        raise AssertionError("Yahoo should not be called when FRED parses")
+        raise OSError("later source down")
 
     closes, source = sc.fetch_vix_closes(transport=transport)
-    assert source == "FRED VIXCLS"
+    assert seen[0][0].find("fredgraph") >= 0
+    assert "FRED VIXCLS" in source
+    assert "data/vix_daily.csv" in source
+    assert "VIX data span" in source
     assert len(closes) >= 100
-    assert len(seen) == 1
+    assert closes[date(2026, 10, 22)] == pytest.approx(99.00)
+    assert closes[date(2026, 10, 21)] == pytest.approx(16.68)
 
     def fallback(url, headers):
         seen.append((url, headers.get("User-Agent", "")))
-        if "fredgraph" in url:
-            raise OSError("fred down")
+        if "fredgraph" in url or "cboe.com" in url:
+            raise OSError("source down")
         body = {
             "chart": {
                 "result": [{
@@ -777,17 +795,109 @@ def test_vix_parsers_and_a_failed_fetch_stops():
 
     seen.clear()
     closes, source = sc.fetch_vix_closes(transport=fallback)
-    assert source == "Yahoo ^VIX"
+    assert "Yahoo ^VIX" in source
+    assert "data/vix_daily.csv" in source
     assert "Mozilla" in seen[1][1]
     assert "chart" in seen[1][0]
 
     def boom(url, headers):
         raise OSError("no network")
 
+    closes, source = sc.fetch_vix_closes(transport=boom)
+    assert source.startswith("data/vix_daily.csv")
+    assert "Last date 2026-10-22." in source
+    assert closes[date(2026, 10, 22)] == pytest.approx(19.03)
+    assert date(2026, 10, 23) not in closes
+
+
+def test_vix_download_retries_then_uses_the_snapshot(monkeypatch):
+    calls = []
+
+    def boom(req, timeout=None):
+        calls.append((req.full_url, timeout, req.get_header("User-agent")))
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(sc.time, "sleep", lambda *_a, **_k: None)
+    closes, source = sc.fetch_vix_closes()
+    assert closes[date(2026, 10, 22)] == pytest.approx(19.03)
+    assert "data/vix_daily.csv" in source
+    assert "VIX data span 2025-01-02 through 2026-10-22" in source
+    by_host = {"fred": 0, "yahoo": 0, "cboe": 0}
+    for url, timeout, ua in calls:
+        assert timeout == 60
+        assert ua and "Mozilla" in ua
+        if "fredgraph" in url:
+            by_host["fred"] += 1
+        elif "finance.yahoo.com" in url and "chart" in url:
+            by_host["yahoo"] += 1
+        elif "cdn.cboe.com" in url:
+            by_host["cboe"] += 1
+    assert by_host == {"fred": 3, "yahoo": 3, "cboe": 3}
+
+
+def test_recent_missing_vix_close_uses_the_latest_prior():
+    closes = sc.load_vix_snapshot()
+    out, source = sc.apply_vix_coverage(
+        closes,
+        [date(2026, 10, 22), date(2026, 10, 23)],
+        "data/vix_daily.csv",
+        today=date(2026, 10, 25),
+    )
+    assert date(2026, 10, 23) not in out
+    assert "2026-10-23" in source
+    assert "19.03" in source
+    assert "using latest available prior close 2026-10-22" in source
+    assert sc.prior_vix_close(date(2026, 10, 26), out) == pytest.approx(19.03)
+    assert sc.prior_vix_close(date(2026, 10, 23), out) == pytest.approx(19.03)
+
+
+def test_old_vix_gap_lists_the_missing_dates():
+    closes = sc.load_vix_snapshot()
+    with pytest.raises(SystemExit) as ei:
+        sc.apply_vix_coverage(
+            closes,
+            [date(2024, 6, 3), date(2024, 6, 4)],
+            "data/vix_daily.csv",
+            today=date(2026, 10, 25),
+        )
+    text = str(ei.value)
+    assert "Refusing" in text
+    assert "2024-05-31" in text
+    assert "2024-06-03" in text
+
+
+def test_two_recent_vix_holes_are_not_carried():
+    closes = sc.load_vix_snapshot()
+    del closes[date(2026, 10, 21)]
+    del closes[date(2026, 10, 22)]
+    with pytest.raises(SystemExit) as ei:
+        sc.apply_vix_coverage(
+            closes,
+            [date(2026, 10, 22), date(2026, 10, 23)],
+            "data/vix_daily.csv",
+            today=date(2026, 10, 25),
+        )
+    text = str(ei.value)
+    assert "Refusing" in text
+    assert "2026-10-21" in text
+    assert "2026-10-22" in text
+
+
+def test_vix_refuses_when_every_source_including_the_snapshot_fails(monkeypatch):
+    def boom(url, headers):
+        raise OSError("no network")
+
+    def no_file(path=None):
+        raise OSError("missing snapshot")
+
+    monkeypatch.setattr(sc, "load_vix_snapshot", no_file)
     with pytest.raises(SystemExit) as ei:
         sc.fetch_vix_closes(transport=boom)
-    assert "VIX" in str(ei.value)
-    assert "Refusing" in str(ei.value)
+    text = str(ei.value)
+    assert "Refusing" in text
+    assert "FRED" in text and "Yahoo" in text and "Cboe" in text
+    assert "vix_daily.csv" in text
 
 
 def test_vix_filter_keeps_the_same_days_for_the_random_book():

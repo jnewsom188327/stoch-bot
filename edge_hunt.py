@@ -2239,7 +2239,7 @@ def _limits_text():
         "The candidate flag is the stricter test: better minutes than that random book. "
         "Shuffling daily labels does not break an intraday event, so the luck benchmark is a floor under the best intraday result "
         "and a null for the daily-context rules. "
-        "VIX is the prior daily close (FRED VIXCLS, Yahoo ^VIX if FRED fails), not an intraday VIX. "
+        "VIX is the prior daily close (FRED VIXCLS, then the Yahoo chart, then Cboe, then data/vix_daily.csv), not an intraday VIX. "
         "Relative volume needs 20 prior sessions; early days stay blank. "
         "This is a search of a predeclared family. It is not a promise that a candidate will keep working."
     )
@@ -2294,27 +2294,23 @@ def _yahoo_vix_url():
     )
 
 
-def load_vix_closes(synthetic_days=None):
-    """Prior-day VIX closes. FRED first, Yahoo CSV if FRED fails. Synthetic mode skips the network."""
+def load_vix_closes(synthetic_days=None, sessions=None, today=None):
+    """Prior-day VIX closes. Synthetic mode skips the network.
+
+    A real run uses scalp_real.fetch_vix_closes: FRED, Yahoo chart, Cboe, then
+    data/vix_daily.csv. Pass `sessions` to fail when a prior trading day older
+    than 5 days is missing. The source string states the span and the last date.
+    """
     if synthetic_days is not None:
         start = synthetic_days[0] - timedelta(days=40)
         out = {}
         for i, ts in enumerate(pd.bdate_range(start, synthetic_days[-1])):
             out[ts.date()] = 14.0 + (i % 9) * 0.7
         return out, "synthetic"
-    try:
-        parsed = _parse_fred_vix(_http_text(FRED_VIX_URL))
-        if len(parsed) >= 10:
-            return parsed, "FRED VIXCLS"
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        sc._print_scrubbed(f"  VIX FRED failed: {type(exc).__name__}")
-    try:
-        parsed = _parse_yahoo_csv(_http_text(_yahoo_vix_url()))
-        if len(parsed) >= 10:
-            return parsed, "Yahoo ^VIX"
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        sc._print_scrubbed(f"  VIX Yahoo failed: {type(exc).__name__}")
-    raise SystemExit("Could not download VIX closes from FRED or Yahoo. Nothing was scored.")
+    closes, source = sc.fetch_vix_closes()
+    if sessions:
+        closes, source = sc.apply_vix_coverage(closes, sessions, source, today=today)
+    return closes, source
 
 
 class _Limiter:
@@ -2609,7 +2605,10 @@ def main():
         _empty_report(os.path.join(out_dir, "EDGE_HUNT.md"), "Not enough completed sessions to score.")
         raise SystemExit("Not enough completed sessions.")
     score_days = all_days[-days_n:]
-    vix, vix_source = load_vix_closes(score_days if synthetic else None)
+    if synthetic:
+        vix, vix_source = load_vix_closes(score_days)
+    else:
+        vix, vix_source = load_vix_closes(sessions=score_days)
     sc._print_scrubbed(f"  VIX source {vix_source} points {len(vix)}")
     panel = compute_features(frames, vix, score_days, symbols)
     needed = contracts_for_minutes(score_days, symbols, und, strikes)

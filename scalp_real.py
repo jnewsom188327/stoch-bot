@@ -56,9 +56,15 @@ ENTRY_HOURS = (9, 10, 11, 12, 13, 14, 15)
 # [5, 356) is 9:35 through 15:25 inclusive, matching the frozen baseline window.
 RANDOM_MINUTE_LO = 5
 RANDOM_MINUTE_HI = 356
-# Prior-day VIX close. FRED first; Yahoo chart API is the fallback.
+# Prior-day VIX close. FRED, then Yahoo, then Cboe, then data/vix_daily.csv.
 FRED_VIX_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"
 YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=10y"
+CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+VIX_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vix_daily.csv")
+VIX_TIMEOUT = 60
+VIX_ATTEMPTS = 3
+VIX_STALE_DAYS = 5
+VIX_MIN_DOWNLOAD = 100
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -247,8 +253,12 @@ def render_predeclared():
         "SPLIT AND TESTS",
         "- VIX day filter (SCALP_VIX_MIN, SCALP_VIX_MAX). Empty means that side is open. Both empty turns the filter off.",
         "  The level is the prior trading day's VIX close: FRED series VIXCLS",
-        "  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS). If that file cannot be read, the Yahoo chart",
-        "  API for ^VIX is used, with a browser User-Agent. The session's own close is not used.",
+        "  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS), then the Yahoo chart",
+        "  API for ^VIX, then the Cboe VIX history file. Each download is retried.",
+        "  data/vix_daily.csv fills any gap and is the last fallback. The session's own close is not used.",
+        "  The report states the VIX data span. A missing prior close older than 5 days stops the run.",
+        "  The most recent close, if it is the only one missing and it is within 5 days, uses the latest",
+        "  available prior close and the report says so.",
         "  A day is kept only when min <= prior close < max, on the sides that are set.",
         "  The same kept days are used for signal trades, paired random controls, and the reference random book.",
         "  The report prints how many days were kept and how many were dropped.",
@@ -820,7 +830,93 @@ def parse_yahoo_vix_chart(text):
     return out
 
 
-def _default_vix_transport(url, headers, timeout=20, attempts=2):
+def _parse_vix_day(raw):
+    raw = str(raw).strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _keep_vix_close(raw):
+    raw = str(raw).strip()
+    if raw in ("", "."):
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(val) or val <= 0:
+        return None
+    return val
+
+
+def parse_cboe_vix_csv(text):
+    """Map session date -> close from Cboe VIX_History.csv.
+
+    The file is DATE,OPEN,HIGH,LOW,CLOSE. Dates are MM/DD/YYYY or YYYY-MM-DD.
+    A leading title row and an empty close are skipped.
+    """
+    rows = []
+    for line in str(text).splitlines():
+        line = line.strip().lstrip("\ufeff")
+        if not line:
+            continue
+        rows.append([part.strip().strip('"') for part in line.split(",")])
+    date_i = 0
+    close_i = None
+    start = 0
+    for i, parts in enumerate(rows[:8]):
+        upper = [part.upper() for part in parts]
+        if "DATE" in upper and "CLOSE" in upper:
+            date_i = upper.index("DATE")
+            close_i = upper.index("CLOSE")
+            start = i + 1
+            break
+    out = {}
+    for parts in rows[start:]:
+        ci = close_i
+        if ci is None:
+            if len(parts) < 2:
+                continue
+            ci = 4 if len(parts) > 4 else len(parts) - 1
+        if date_i >= len(parts) or ci >= len(parts):
+            continue
+        day = _parse_vix_day(parts[date_i])
+        val = _keep_vix_close(parts[ci])
+        if day is None or val is None:
+            continue
+        out[day] = val
+    return out
+
+
+def parse_vix_snapshot_csv(text):
+    """Map session date -> close from data/vix_daily.csv. Header date,vix_close. Empty values are skipped."""
+    out = {}
+    for line in str(text).splitlines():
+        line = line.strip().lstrip("\ufeff")
+        if not line or line.lower().startswith("date"):
+            continue
+        parts = [part.strip().strip('"') for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        day = _parse_vix_day(parts[0])
+        val = _keep_vix_close(parts[1])
+        if day is None or val is None:
+            continue
+        out[day] = val
+    return out
+
+
+def load_vix_snapshot(path=None):
+    path = path or VIX_SNAPSHOT_PATH
+    with open(path, encoding="utf-8") as f:
+        return parse_vix_snapshot_csv(f.read())
+
+
+def _default_vix_transport(url, headers, timeout=VIX_TIMEOUT, attempts=VIX_ATTEMPTS):
     last = None
     for i in range(attempts):
         try:
@@ -829,35 +925,177 @@ def _default_vix_transport(url, headers, timeout=20, attempts=2):
                 return resp.read().decode("utf-8", errors="replace")
         except Exception as e:  # noqa: BLE001
             last = e
-            time.sleep(1.0 * (i + 1))
+            if i + 1 < attempts:
+                time.sleep(1.0 * (i + 1))
     raise last
 
 
-def fetch_vix_closes(transport=None):
-    """Return (date -> close, source name). FRED first, then Yahoo.
+def _vix_span_source(owner, closes):
+    order = ("FRED VIXCLS", "Yahoo ^VIX", "Cboe VIX", "data/vix_daily.csv")
+    used = [name for name in order if name in set(owner.values())]
+    dates = sorted(closes)
+    first = dates[0].isoformat()
+    last = dates[-1].isoformat()
+    label = " + ".join(used)
+    return (
+        f"{label}. VIX data span {first} through {last} ({len(dates)} closes). "
+        f"Last date {last}."
+    )
 
-    Raises SystemExit when both sources fail. A caller must not continue
+
+def fetch_vix_closes(transport=None):
+    """Return (date -> close, source). FRED, then Yahoo chart, then Cboe, then the snapshot.
+
+    Each download is tried through the transport. The default transport retries
+    three times with a 60s timeout. Sources are merged: an earlier source wins
+    a date that appears twice, and data/vix_daily.csv fills any gap. The
+    snapshot is also the last fallback when every download fails.
+
+    Raises SystemExit when every source fails. A caller must not continue
     with an empty series: that would silently drop the day filter.
     """
     transport = transport or _default_vix_transport
     errors = []
+    downloaded = {}
     sources = (
         ("FRED VIXCLS", FRED_VIX_URL, parse_fred_vix_csv, {"User-Agent": BROWSER_UA, "Accept": "text/csv,*/*"}),
         ("Yahoo ^VIX", YAHOO_VIX_URL, parse_yahoo_vix_chart, {"User-Agent": BROWSER_UA, "Accept": "application/json"}),
+        ("Cboe VIX", CBOE_VIX_URL, parse_cboe_vix_csv, {"User-Agent": BROWSER_UA, "Accept": "text/csv,*/*"}),
     )
     for name, url, parse, headers in sources:
         try:
             body = transport(url, headers)
             parsed = parse(body)
-            if len(parsed) < 100:
+            if len(parsed) < VIX_MIN_DOWNLOAD:
                 raise RuntimeError(f"only {len(parsed)} closes")
-            return parsed, name
+            downloaded[name] = parsed
         except Exception as e:  # noqa: BLE001
-            errors.append(f"{name}: {type(e).__name__}: {e}")
+            errors.append(f"{name}: {type(e).__name__}")
+            _print_scrubbed(f"  VIX {name} failed: {type(e).__name__}")
+
+    snapshot = {}
+    try:
+        snapshot = load_vix_snapshot()
+        if not snapshot:
+            raise RuntimeError("empty snapshot")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"data/vix_daily.csv: {type(e).__name__}")
+        _print_scrubbed(f"  VIX data/vix_daily.csv failed: {type(e).__name__}")
+
+    if not downloaded and not snapshot:
+        sys.exit(
+            "Could not download VIX closes from FRED, Yahoo, or Cboe, and data/vix_daily.csv "
+            "could not be read. Refusing to run. "
+            + "; ".join(errors)
+        )
+
+    merged = {}
+    owner = {}
+    for name, layer in (
+        ("data/vix_daily.csv", snapshot),
+        ("Cboe VIX", downloaded.get("Cboe VIX") or {}),
+        ("Yahoo ^VIX", downloaded.get("Yahoo ^VIX") or {}),
+        ("FRED VIXCLS", downloaded.get("FRED VIXCLS") or {}),
+    ):
+        for day, val in layer.items():
+            merged[day] = float(val)
+            owner[day] = name
+    source = _vix_span_source(owner, merged)
+    last = max(merged)
+    _print_scrubbed(f"VIX source {source}")
+    _print_scrubbed(f"VIX last date available {last.isoformat()}")
+    return merged, source
+
+
+def previous_weekday(day):
+    d = day - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def latest_weekday(day):
+    d = day
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def apply_vix_coverage(closes, sessions, source, today=None):
+    """Stop if a session's prior trading day is missing and the hole is not the one recent tail.
+
+    The first session's previous weekday may be a holiday. When that gap is
+    older than 5 days and a close exists within 5 calendar days before the
+    session, it is covered. A recent hole is not covered that way. Later
+    sessions require the previous session date itself. The latest weekday as
+    of `today` is also required, because that is the most recent close.
+
+    One missing date is tolerated only when it is that most recent close, it
+    is within 5 days, and nothing later is already in the series. The close is
+    not invented: prior_vix_close already walks back. The substitution is
+    logged and appended to the source string. Any other hole raises SystemExit
+    and names the missing dates.
+    """
+    if not sessions:
+        return closes, source
+    today = today or datetime.now(NY).date()
+    if isinstance(today, datetime):
+        today = today.date()
+    ordered = []
+    for day in sessions:
+        if isinstance(day, datetime):
+            day = day.date()
+        ordered.append(day)
+    ordered = sorted(set(ordered))
+    needed = []
+    first = ordered[0]
+    prev0 = previous_weekday(first)
+    if prev0 not in closes:
+        near = any(0 < (first - d).days <= VIX_STALE_DAYS for d in closes)
+        # A holiday at the start of a long sample is fine. A hole in the last
+        # 5 days is still a missing prior and is listed with the others.
+        stale_gap = (today - prev0).days > VIX_STALE_DAYS
+        if not (near and stale_gap):
+            needed.append(prev0)
+    for prev in ordered[:-1]:
+        if prev not in closes:
+            needed.append(prev)
+    tail = latest_weekday(today)
+    if tail not in closes:
+        needed.append(tail)
+    missing = sorted(set(d for d in needed if d not in closes))
+    if not missing:
+        return closes, source
+    hole = missing[-1]
+    only_recent_tail = (
+        len(missing) == 1
+        and 0 <= (today - hole).days <= VIX_STALE_DAYS
+        and not any(d > hole for d in closes)
+    )
+    if only_recent_tail:
+        dates = sorted(closes)
+        i = bisect.bisect_left(dates, hole)
+        if i <= 0:
+            sys.exit(
+                f"VIX history is missing {hole.isoformat()} and has no earlier close. Refusing to run."
+            )
+        carry_day = dates[i - 1]
+        carry = float(closes[carry_day])
+        _print_scrubbed(
+            f"  VIX close {hole.isoformat()} is missing; "
+            f"using latest available prior close {carry_day.isoformat()} {carry:.2f}."
+        )
+        note = (
+            f" Missing {hole.isoformat()} (most recent close only); "
+            f"using latest available prior close {carry_day.isoformat()} {carry:.2f}."
+        )
+        return closes, source + note
+    listed = ", ".join(d.isoformat() for d in missing)
     sys.exit(
-        "VIX history could not be fetched from FRED or Yahoo. "
-        "Refusing to run, because a missing series would silently drop the day filter. "
-        + " | ".join(str(item)[:300] for item in errors)
+        "VIX history does not cover every session's prior trading day. "
+        f"Missing dates: {listed}. "
+        "A gap older than 5 days, or more than the single most recent close, stops the run. "
+        "Refusing to run."
     )
 
 
@@ -2428,9 +2666,8 @@ def main():
         _env_optional_float("SCALP_VIX_MIN"),
         _env_optional_float("SCALP_VIX_MAX"),
     )
-    _print_scrubbed("fetching prior-day VIX closes (FRED VIXCLS, Yahoo ^VIX fallback)")
+    _print_scrubbed("fetching prior-day VIX closes (FRED VIXCLS, Yahoo ^VIX, Cboe, data/vix_daily.csv)")
     vix_closes, vix_source = fetch_vix_closes()
-    _print_scrubbed(f"VIX source {vix_source} closes {len(vix_closes)}")
     cent_floor = _env_float("SCALP_HALF_SPREAD_CENTS", 1.0) / 100.0
     pct = _env_float("SCALP_HALF_SPREAD_PCT", 0.5) / 100.0
     commission = _env_float("SCALP_COMMISSION", 0.65)
@@ -2450,6 +2687,8 @@ def main():
         sys.exit("No completed sessions in the underlying data.")
     candidate = all_days[-days_n:]
     _print_scrubbed(f"completed sessions {len(all_days)}, using {len(candidate)} ({candidate[0]} .. {candidate[-1]})")
+    vix_closes, vix_source = apply_vix_coverage(vix_closes, candidate, vix_source)
+    _print_scrubbed(f"VIX source {vix_source} closes {len(vix_closes)}")
 
     bt = _bt()
     charts = {}

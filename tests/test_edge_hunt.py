@@ -220,6 +220,23 @@ def test_prior_vix_ignores_the_session_and_the_future():
     assert prior2[3] == 7.0
 
 
+def test_edge_hunt_vix_loader_uses_the_snapshot_and_states_the_span(monkeypatch):
+    def boom(req, timeout=None):
+        raise TimeoutError("nope")
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(sc.time, "sleep", lambda *_a, **_k: None)
+    sessions = [date(2026, 10, 21), date(2026, 10, 22), date(2026, 10, 23)]
+    vix, source = eh.load_vix_closes(sessions=sessions, today=date(2026, 10, 25))
+    assert "data/vix_daily.csv" in source
+    assert "VIX data span 2025-01-02 through 2026-10-22" in source
+    assert "2026-10-23" in source
+    assert "19.03" in source
+    prior, _chg = eh.prior_vix_features(sessions, vix)
+    assert prior[-1] == pytest.approx(19.03)
+    assert sc.prior_vix_close(date(2026, 10, 26), vix) == pytest.approx(19.03)
+
+
 def test_synthetic_vix_loader_does_not_leak_the_same_day():
     days = list(pd.bdate_range("2024-03-01", periods=8).date)
     vix, source = eh.load_vix_closes(days)
