@@ -1,4 +1,4 @@
-# 0DTE scalp on real option prints (2026-10-25 10:48 ET)
+# 0DTE scalp on real option prints (2026-10-25 11:03 ET)
 
 **Research tool, not trading advice.** Data only: historical Alpaca bars, no orders.
 
