@@ -25,12 +25,15 @@ this file before any bar is downloaded. A mismatch stops the run.
 
 from __future__ import annotations
 
+import bisect
 import builtins
 import hashlib
+import json
 import math
 import os
 import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -49,6 +52,21 @@ HOLD_FRAC = 0.25
 TOP_K = 3
 MIN_TRADES = 5
 ENTRY_HOURS = (9, 10, 11, 12, 13, 14, 15)
+# Reference and paired random minutes. Session minute 0 is 9:30.
+# [5, 356) is 9:35 through 15:25 inclusive, matching the frozen baseline window.
+RANDOM_MINUTE_LO = 5
+RANDOM_MINUTE_HI = 356
+# Prior-day VIX close. FRED first; Yahoo chart API is the fallback.
+FRED_VIX_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"
+YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=10y"
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+)
+# Descriptive buckets on the prior trading day's close. 20 belongs to >=20.
+REGIME_BUCKETS = ("<16", "16-20", ">=20")
+REGIME_TP = 0.15
+REGIME_TIME_STOPS = (10, 30)
 
 # Snapshot of diamondbot.BOOKS["TUNED"] and its entry window. The signal
 # function reads the live constants; tests fail if the bot drifts.
@@ -227,8 +245,19 @@ def render_predeclared():
         "  The same window applies to paired random controls and to the reference random book.",
         "",
         "SPLIT AND TESTS",
-        "- After dead OPRA days are dropped, the last round(25%) of remaining days, at least 1, are held out.",
+        "- VIX day filter (SCALP_VIX_MIN, SCALP_VIX_MAX). Empty means that side is open. Both empty turns the filter off.",
+        "  The level is the prior trading day's VIX close: FRED series VIXCLS",
+        "  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS). If that file cannot be read, the Yahoo chart",
+        "  API for ^VIX is used, with a browser User-Agent. The session's own close is not used.",
+        "  A day is kept only when min <= prior close < max, on the sides that are set.",
+        "  The same kept days are used for signal trades, paired random controls, and the reference random book.",
+        "  The report prints how many days were kept and how many were dropped.",
+        "  If the VIX history cannot be fetched, the run stops. It does not score an unfiltered book.",
+        "- After dead OPRA days are dropped, and after the VIX day filter, the last round(25%) of remaining days, at least 1, are held out.",
+        "  The report states the in-sample and held-out day counts for that split.",
         "- Held-out days are scored once, and only for the top 3 in-sample configs of each search signal.",
+        "- The report section 'By VIX regime' does not use the VIX day filter. Buckets are post-hoc and descriptive.",
+        "  They are not a selected result and they are not part of N.",
         "- Rank key (in-sample only): day-clustered t of (signal net % - paired-random net %) on trades where both filled,",
         "  then mean net %, then trade count. A config needs at least 5 signal fills and 5 paired fills to be ranked.",
         "- Primary t-stat is day-clustered on the per-trade net percent (sum of within-day deviations, divided by n).",
@@ -245,11 +274,16 @@ def render_predeclared():
         "",
         "RANDOM",
         "- Paired control (the comparison column): one control per one-position entry attempt, same symbol, day, and direction,",
-        "  minute drawn from the same 30-minute clock bucket inside 9:35-15:25, excluding the signal minute.",
-        "  If that bucket is empty, the draw uses the whole 9:35-15:25 window. Controls are not put through a second one-position rule,",
-        "  so the attempt count stays matched. Seed = SHA256('paired', signal, strike, day, symbol, entry minute, side).",
+        "  minute drawn uniformly from the same 30-minute clock bucket inside the allowed entry window, excluding the signal minute.",
+        "  The allowed window is 9:35-15:25, intersected with SCALP_FIRST_ENTRY / SCALP_LAST_ENTRY when those are set.",
+        "  If that bucket has no other allowed minute, the draw uses the whole allowed window. A minute outside the clock is not drawn.",
+        "  Controls are not put through a second one-position rule, so the attempt count stays matched.",
+        "  The control is priced with the same simulate_trade fill and exit as the signal.",
+        "  Seed = SHA256('paired', signal, strike, day, symbol, entry minute, side).",
         "- Reference book (signal id random): per day and symbol, N = round-half-up median of the other signals' raw fire counts that day.",
-        "  N distinct minutes from 9:35-15:25, fair coin direction, then the same one-position rule and the same exits.",
+        "  N distinct minutes drawn uniformly from the real minutes in 9:35-15:25 that also fall inside the entry clock",
+        "  (empty clock means the whole 9:35-15:25 list). Fair coin direction, then the same one-position rule and the same",
+        "  run_book fills and exits as a signal trade.",
         "  Seed = SHA256('ref', day, symbol). This book is a portfolio baseline, so its trade count can fall below N after the one-position rule.",
         "",
         "SIGNALS (chart, window, rule). Extended hours feed the indicators. The window is when a closed bar may fire.",
@@ -514,6 +548,9 @@ def simulate_trade(opt, entry_min, cfg, costs, allow_slip=True, premium=None):
         credit = max(0.0, fill - half_spread(fill, cent_floor, pct))
         dollar = (credit - debit) * 100.0 - 2.0 * commission
         net_pct = dollar / (debit * 100.0) * 100.0
+        hs_in = half_spread(raw, cent_floor, pct)
+        hs_out = half_spread(fill, cent_floor, pct)
+        spread_cost_pct = (hs_in + hs_out) / raw * 100.0 if raw > 0 else float("nan")
         return {
             "status": "fill",
             "entry_min": ent,
@@ -525,6 +562,7 @@ def simulate_trade(opt, entry_min, cfg, costs, allow_slip=True, premium=None):
             "net_pct": net_pct,
             "dollar": dollar,
             "hit": reason == "tp",
+            "spread_cost_pct": spread_cost_pct,
         }
     return {"status": "skip_stale", "entry_min": ent}
 
@@ -640,6 +678,383 @@ def entry_hour_breakdown(trades):
             "net_pct": float(np.mean(vals)) if vals else float("nan"),
         }
     return out
+
+
+def minute_hour(entry_min):
+    """Clock hour in America/New_York for a session minute (9:30 = 0)."""
+    return ((9 * 60 + 30) + int(entry_min)) // 60
+
+
+def random_eligible_minutes(sess, entry_window=None):
+    """Real underlying minutes inside 9:35-15:25 and inside the entry clock.
+
+    The baseline is session minutes [5, 356): 9:35 through 15:25 inclusive.
+    `entry_window` None keeps that list. A set clock intersects it.
+    The 15:55 bar is never included.
+    """
+    if sess is None:
+        return []
+    real = sess["real"]
+    out = []
+    last = min(RANDOM_MINUTE_HI, FLAT_MIN, len(real))
+    for m in range(RANDOM_MINUTE_LO, last):
+        if not real[m]:
+            continue
+        if not minute_allowed(m, entry_window):
+            continue
+        out.append(m)
+    return out
+
+
+def draw_random_minutes(eligible, n, rng):
+    """Uniform distinct draws. `n` is capped at the size of `eligible`."""
+    n = min(int(n), len(eligible))
+    if n <= 0:
+        return np.asarray([], dtype=int)
+    pick = rng.choice(np.asarray(eligible, dtype=int), size=n, replace=False)
+    return np.asarray(pick, dtype=int)
+
+
+def flat_round_trip_pct(raw, costs):
+    """Net % of a round trip that sells at the same raw price. Spread plus commission only."""
+    if raw is None or not math.isfinite(raw) or raw <= 0:
+        return float("nan")
+    cent_floor, pct, commission = costs
+    debit = raw + half_spread(raw, cent_floor, pct)
+    credit = max(0.0, raw - half_spread(raw, cent_floor, pct))
+    dollar = (credit - debit) * 100.0 - 2.0 * commission
+    if debit <= 0:
+        return float("nan")
+    return dollar / (debit * 100.0) * 100.0
+
+
+def assign_vix_bucket(prior):
+    """Bucket a prior-day VIX close. None when the close is missing.
+
+    <16, then 16 up to but not including 20, then >=20.
+    """
+    if prior is None or not isinstance(prior, (int, float)) or not math.isfinite(prior):
+        return None
+    if prior < 16.0:
+        return "<16"
+    if prior < 20.0:
+        return "16-20"
+    return ">=20"
+
+
+def _prior_in_band(prior, vix_min, vix_max):
+    """True when a prior close passes the day filter. Both bounds None keeps every day."""
+    if vix_min is None and vix_max is None:
+        return True
+    if prior is None or not isinstance(prior, (int, float)) or not math.isfinite(prior):
+        return False
+    if vix_min is not None and prior < vix_min:
+        return False
+    if vix_max is not None and prior >= vix_max:
+        return False
+    return True
+
+
+def parse_vix_band(vix_min, vix_max):
+    """Validate SCALP_VIX_MIN / SCALP_VIX_MAX. Empty bounds arrive as None."""
+    if vix_min is not None and vix_min < 0:
+        sys.exit("SCALP_VIX_MIN cannot be negative")
+    if vix_max is not None and vix_max < 0:
+        sys.exit("SCALP_VIX_MAX cannot be negative")
+    if vix_min is not None and vix_max is not None and not vix_min < vix_max:
+        sys.exit("SCALP_VIX_MIN must be below SCALP_VIX_MAX; a day is kept when min <= prior close < max")
+    return vix_min, vix_max
+
+
+def parse_fred_vix_csv(text):
+    """Map session date -> VIX close from a FRED VIXCLS graph CSV. '.' is a missing day."""
+    out = {}
+    for line in str(text).splitlines():
+        line = line.strip().lstrip("\ufeff")
+        if not line or line.lower().startswith("observation") or line.lower().startswith("date"):
+            continue
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        raw_date, raw_val = parts[0].strip(), parts[1].strip()
+        if raw_val in ("", "."):
+            continue
+        try:
+            day = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            val = float(raw_val)
+        except ValueError:
+            continue
+        if math.isfinite(val) and val > 0:
+            out[day] = val
+    return out
+
+
+def parse_yahoo_vix_chart(text):
+    """Map session date -> close from a Yahoo v8 chart payload for ^VIX.
+
+    Daily stamps are converted to the America/New_York calendar date.
+    A null close is skipped.
+    """
+    data = json.loads(text)
+    chart = data.get("chart") or {}
+    if chart.get("error"):
+        raise RuntimeError(str(chart.get("error"))[:200])
+    result = (chart.get("result") or [None])[0]
+    if not result:
+        raise RuntimeError("Yahoo chart payload had no result")
+    stamps = result.get("timestamp") or []
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote.get("close") or []
+    out = {}
+    for stamp, close in zip(stamps, closes):
+        if stamp is None or close is None:
+            continue
+        try:
+            val = float(close)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(val) or val <= 0:
+            continue
+        day = datetime.fromtimestamp(int(stamp), timezone.utc).astimezone(NY).date()
+        out[day] = val
+    return out
+
+
+def _default_vix_transport(url, headers, timeout=20, attempts=2):
+    last = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(1.0 * (i + 1))
+    raise last
+
+
+def fetch_vix_closes(transport=None):
+    """Return (date -> close, source name). FRED first, then Yahoo.
+
+    Raises SystemExit when both sources fail. A caller must not continue
+    with an empty series: that would silently drop the day filter.
+    """
+    transport = transport or _default_vix_transport
+    errors = []
+    sources = (
+        ("FRED VIXCLS", FRED_VIX_URL, parse_fred_vix_csv, {"User-Agent": BROWSER_UA, "Accept": "text/csv,*/*"}),
+        ("Yahoo ^VIX", YAHOO_VIX_URL, parse_yahoo_vix_chart, {"User-Agent": BROWSER_UA, "Accept": "application/json"}),
+    )
+    for name, url, parse, headers in sources:
+        try:
+            body = transport(url, headers)
+            parsed = parse(body)
+            if len(parsed) < 100:
+                raise RuntimeError(f"only {len(parsed)} closes")
+            return parsed, name
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+    sys.exit(
+        "VIX history could not be fetched from FRED or Yahoo. "
+        "Refusing to run, because a missing series would silently drop the day filter. "
+        + " | ".join(str(item)[:300] for item in errors)
+    )
+
+
+def prior_vix_close(day, closes, dates=None):
+    """Last VIX close strictly before `day`. The session day's own close is ignored."""
+    if not closes:
+        return None
+    dates = dates if dates is not None else sorted(closes)
+    i = bisect.bisect_left(dates, day)
+    if i <= 0:
+        return None
+    return float(closes[dates[i - 1]])
+
+
+def prior_vix_by_day(days, closes):
+    dates = sorted(closes)
+    return {day: prior_vix_close(day, closes, dates) for day in days}
+
+
+def filter_days_by_vix(days, closes, vix_min, vix_max):
+    """Return (kept, dropped) in the original order.
+
+    Both bounds None: every day is kept and dropped is empty.
+    An active filter drops a day whose prior close is missing or outside the band.
+    `dropped` items are (day, prior or None).
+    """
+    if vix_min is None and vix_max is None:
+        return list(days), []
+    dates = sorted(closes)
+    kept, dropped = [], []
+    for day in days:
+        prior = prior_vix_close(day, closes, dates)
+        if _prior_in_band(prior, vix_min, vix_max):
+            kept.append(day)
+        else:
+            dropped.append((day, prior))
+    return kept, dropped
+
+
+def describe_vix_filter(vix_min, vix_max, kept, dropped, source, n_is, n_oos):
+    """One report paragraph: the band, the source, and the day counts after the filter."""
+    n_kept = len(kept)
+    if vix_min is None and vix_max is None:
+        return (
+            f"VIX day filter: off (SCALP_VIX_MIN and SCALP_VIX_MAX empty). "
+            f"Prior-day VIX closes were still loaded from {source} for the regime table. "
+            f"Days kept: {n_kept}. Days dropped: 0. "
+            f"The 25% holdout is computed on these days: {n_is} in-sample, {n_oos} held-out."
+        )
+    if vix_min is not None and vix_max is not None:
+        band = f"{vix_min:g} <= close < {vix_max:g}"
+    elif vix_min is not None:
+        band = f"close >= {vix_min:g}"
+    else:
+        band = f"close < {vix_max:g}"
+    missing = sum(1 for _day, prior in dropped if prior is None)
+    out_of_band = len(dropped) - missing
+    listed = []
+    for day, prior in dropped:
+        if prior is None:
+            listed.append(f"{day.isoformat()} (no prior close)")
+        else:
+            listed.append(f"{day.isoformat()} ({prior:.2f})")
+    detail = ", ".join(listed) if listed else "none"
+    return (
+        f"VIX day filter: prior trading day's VIX close from {source} must satisfy {band}. "
+        "No lookahead: the session day's own close is not used. "
+        f"Days kept: {n_kept}. Days dropped: {len(dropped)} "
+        f"({out_of_band} outside the band, {missing} with no prior close). "
+        f"Dropped: {detail}. "
+        "The same kept days are used for signal trades, paired random controls, and the reference random book. "
+        f"The 25% holdout is computed after this filter: {n_is} in-sample, {n_oos} held-out."
+    )
+
+
+def regime_rows(books, split_days, prior_of, signals, strikes):
+    """Descriptive 15% target rows by prior-day VIX bucket.
+
+    `books` is keyed by (signal, strike, tp, sl, time_stop). This does not
+    apply SCALP_VIX_MIN / SCALP_VIX_MAX. `split_days` is [(name, [days]), ...].
+    """
+    rows = []
+    for sid in signals:
+        for strike in strikes:
+            for sl in SLS:
+                for ts in REGIME_TIME_STOPS:
+                    trades = books.get((sid, strike, REGIME_TP, sl, ts)) or []
+                    for split_name, days in split_days:
+                        for bucket in REGIME_BUCKETS:
+                            bucket_days = [d for d in days if assign_vix_bucket(prior_of.get(d)) == bucket]
+                            want = set(bucket_days)
+                            subset = [t for t in trades if t["day"] in want]
+                            stats = summarize(subset, bucket_days, 0, 0)
+                            rows.append({
+                                "signal": sid,
+                                "strike": strike,
+                                "tp": REGIME_TP,
+                                "sl": sl,
+                                "time_stop": ts,
+                                "split": split_name,
+                                "bucket": bucket,
+                                "n": stats["n"],
+                                "hit_rate": stats["hit_rate"],
+                                "mean_net_pct": stats["mean_net_pct"],
+                                "t": stats["t"],
+                            })
+    return rows
+
+
+def regime_intro(n_live, reg_is, reg_oos, n_missing, n_kept, n_dropped, n_is, n_oos, n_family, filter_on):
+    """State both splits. The regime split is before the VIX day filter."""
+    def _span(days):
+        if not days:
+            return "none"
+        return f"{days[0].isoformat()} to {days[-1].isoformat()}"
+
+    def _days(n):
+        return f"{n} day" if n == 1 else f"{n} days"
+
+    if not filter_on:
+        same = " The selection split is the same days, because the VIX day filter is off."
+    elif n_dropped == 0:
+        same = " The VIX day filter dropped no days, so the selection split is these same days."
+    else:
+        same = (
+            " The selection holdout is a different split: it is computed after the VIX day filter, "
+            f"{n_is} in-sample and {n_oos} held-out, on the {n_kept} kept days ({n_dropped} dropped)."
+        )
+    return (
+        "Descriptive only. These are post-hoc buckets, not selected, and they were not used to rank configs. "
+        f"They are not part of the search family. Search family N = {n_family}. "
+        f"Fixed target 15%. Each stop in the grid. Time stop 10m and 30m. "
+        "Search signals and the reference random book, at each strike in this run "
+        "(atm and 2itm on a default run; 1otm and 2otm when the strike input includes them). "
+        "Net % is the per-trade mean. t is the day-clustered t on the trades in that bucket and split. "
+        f"This section does not use the VIX day filter. It uses all {n_live} OPRA days. "
+        f"In-sample: {_days(len(reg_is))} ({_span(reg_is)}). "
+        f"Held-out: {_days(len(reg_oos))} ({_span(reg_oos)}). "
+        "That 25% holdout is computed on the OPRA days before the VIX day filter. "
+        f"Days with no prior VIX close are left out of the buckets: {n_missing}."
+        + same
+    )
+
+
+def audit_fill_stats(trades, costs):
+    """Premium, spread, flat-cost, and exit-reason shares for one random book."""
+    premiums = [float(t["raw_entry"]) for t in trades if math.isfinite(float(t.get("raw_entry", float("nan"))))]
+    empty = {
+        "p10": float("nan"), "p50": float("nan"), "p90": float("nan"),
+        "spread_pct": float("nan"), "flat_pct": float("nan"),
+        "stop_share": float("nan"), "tp_share": float("nan"),
+        "time_share": float("nan"), "flat_share": float("nan"),
+    }
+    if not premiums:
+        return empty
+    p10, p50, p90 = (float(x) for x in np.quantile(np.asarray(premiums, dtype=float), [0.10, 0.50, 0.90]))
+    spreads = [float(t["spread_cost_pct"]) for t in trades if math.isfinite(float(t.get("spread_cost_pct", float("nan"))))]
+    flats = [flat_round_trip_pct(float(t["raw_entry"]), costs) for t in trades]
+    flats = [x for x in flats if math.isfinite(x)]
+    n = len(trades)
+    counts = {"stop": 0, "tp": 0, "time": 0, "flat": 0}
+    for t in trades:
+        reason = t.get("reason")
+        if reason in counts:
+            counts[reason] += 1
+
+    def _share(key):
+        return counts[key] / n if n else float("nan")
+
+    return {
+        "p10": p10, "p50": p50, "p90": p90,
+        "spread_pct": float(np.median(spreads)) if spreads else float("nan"),
+        "flat_pct": float(np.median(flats)) if flats else float("nan"),
+        "stop_share": _share("stop"), "tp_share": _share("tp"),
+        "time_share": _share("time"), "flat_share": _share("flat"),
+    }
+
+
+def hour_draw_table(events, und, symbols, days, entry_window):
+    """Drawn random minutes by hour, and the eligible-minute pool those draws came from."""
+    drawn = {h: 0 for h in ENTRY_HOURS}
+    pool = {h: 0 for h in ENTRY_HOURS}
+    dayset = set(days)
+    for day in days:
+        for sym in symbols:
+            sess = und.get(sym, {}).get(day)
+            for m in random_eligible_minutes(sess, entry_window):
+                hh = minute_hour(m)
+                if hh in pool:
+                    pool[hh] += 1
+    for ev in events:
+        if ev["day"] not in dayset:
+            continue
+        hh = minute_hour(ev["entry_min"])
+        if hh in drawn:
+            drawn[hh] += 1
+    return drawn, pool
 
 
 def spot_at(und, minute):
@@ -973,8 +1388,12 @@ def build_signal_events(charts, und, dayset):
     return out
 
 
-def reference_random_events(signal_events, und, symbols, days):
-    """Standalone baseline book. N per day/symbol = median raw fire count of the search signals."""
+def reference_random_events(signal_events, und, symbols, days, entry_window=None):
+    """Standalone baseline book. N per day/symbol = median raw fire count of the search signals.
+
+    Minutes are drawn uniformly from the real 9:35-15:25 minutes that also pass
+    `entry_window`. The fill path is run_book, the same path as a signal.
+    """
     counts = {}
     for sid, evs in signal_events.items():
         per = {}
@@ -994,13 +1413,13 @@ def reference_random_events(signal_events, und, symbols, days):
             sess = und[sym].get(day)
             if sess is None or n <= 0:
                 continue
-            eligible = [m for m in range(5, 356) if sess["real"][m]]
+            eligible = random_eligible_minutes(sess, entry_window)
             if not eligible:
                 continue
             n = min(n, len(eligible))
             rng = np.random.default_rng(stream_seed("ref", day.isoformat(), sym))
-            pick = rng.choice(np.asarray(eligible), size=n, replace=False)
-            dirs = rng.choice(np.asarray([-1, 1]), size=n)
+            pick = draw_random_minutes(eligible, n, rng)
+            dirs = rng.choice(np.asarray([-1, 1]), size=len(pick))
             for minute, side in zip(pick, dirs):
                 events.append({
                     "day": day, "symbol": sym, "side": int(side), "entry_min": int(minute),
@@ -1010,13 +1429,18 @@ def reference_random_events(signal_events, und, symbols, days):
     return events
 
 
-def paired_entry(attempt, und):
-    """One matched control minute for an entry attempt. Returns an event dict or None."""
+def paired_entry(attempt, und, entry_window=None):
+    """One matched control minute for an entry attempt. Returns an event dict or None.
+
+    The pool is the same 30-minute bucket inside the allowed entry window
+    (9:35-15:25 intersected with the entry clock). If that bucket is empty,
+    the draw uses the whole allowed window. Minutes outside the clock are not drawn.
+    """
     day, sym, minute, side = attempt["day"], attempt["symbol"], attempt["entry_min"], attempt["side"]
     sess = und[sym].get(day)
     if sess is None:
         return None
-    eligible = [m for m in range(5, 356) if sess["real"][m] and m != minute]
+    eligible = [m for m in random_eligible_minutes(sess, entry_window) if m != minute]
     bucket = [m for m in eligible if m // 30 == minute // 30]
     pool = bucket or eligible
     if not pool:
@@ -1257,6 +1681,7 @@ def run_book(events, opt, und, strike, cfg, costs, signal, premium=None, entry_w
             "entry_min": filled["entry_min"],
             "exit_min": filled["exit_min"],
             "raw_entry": filled["raw_entry"],
+            "spread_cost_pct": filled.get("spread_cost_pct", float("nan")),
             "signal": signal,
             "strike": strike,
         })
@@ -1483,6 +1908,93 @@ def _row_out(**kwargs):
     return row
 
 
+def _pct_cell(share):
+    if share is None or not isinstance(share, float) or not math.isfinite(share):
+        return ""
+    return f"{share * 100:.1f}%"
+
+
+def _append_random_audit(lines, audit):
+    """Diagnostics for the reference random book. Not a rank key."""
+    if not audit:
+        return
+    lines.append("## Random baseline audit")
+    lines.append("")
+    lines.append(audit.get("note") or "")
+    lines.append("")
+    lines.append(
+        "Drawn entry minutes by hour, in sample, before the one-position rule. "
+        "Eligible is the count of real minutes in the allowed window (9:35-15:25, and the entry clock when set) "
+        "across the same days and symbols. A uniform draw tracks that pool. "
+        "Fills are not uniform: the one-position rule keeps the earlier entry and drops a later overlap, "
+        "and a missing print or a premium-band skip drops a draw. Those filters are the same ones a signal book uses."
+    )
+    lines.append("")
+    drawn = audit.get("drawn") or {}
+    pool = audit.get("pool") or {}
+    head = " | ".join(f"{h} ET" for h in ENTRY_HOURS)
+    lines.append(f"| | {head} |")
+    lines.append("|" + "|".join(["---"] * (1 + len(ENTRY_HOURS))) + "|")
+    lines.append("| Drawn | " + " | ".join(str(int(drawn.get(h, 0))) for h in ENTRY_HOURS) + " |")
+    lines.append("| Eligible minutes | " + " | ".join(str(int(pool.get(h, 0))) for h in ENTRY_HOURS) + " |")
+    lines.append("")
+    lines.append(
+        "Filled reference book, in sample, 15% target, each stop, time stop 10m and 30m. "
+        "Premium is the raw option open at entry. "
+        "Spread % is the median round-trip half-spread (entry side plus exit side) as a percent of that premium. "
+        "Flat cost % is the median net % of a round trip that sells at the same raw price, after the half-spread and the commission. "
+        "Compare Net % with Flat cost %. A random mean near the flat cost is the cost model, not a second exit engine. "
+        "Signal net % is the median of the in-sample search-signal means at the same strike and exit. "
+        "Signal premium is the median raw entry across those signal fills. "
+        "Exit shares are the fraction of random fills that left by stop, target, time, or the 15:55 flat. "
+        "Fills by hour are counts from 9 ET through 15 ET."
+    )
+    lines.append("")
+    rows = audit.get("rows") or []
+    if not rows:
+        lines.append("The reference book had no in-sample configs to audit.")
+        lines.append("")
+        return
+    lines.append(
+        "| Strike | SL | Time | Trades | Net % | Hit | Signal net % | Prem p10 | Prem med | Prem p90 | Signal prem | Spread % | Flat cost % | Stop | Target | Time | Flat | Fills by hour 9-15 |"
+    )
+    lines.append("|" + "|".join(["---"] * 18) + "|")
+    for rec in rows:
+        hours = rec.get("fill_hours") or {}
+        hour_cell = "/".join(str(int((hours.get(h) or {}).get("n", 0))) for h in ENTRY_HOURS)
+        lines.append(
+            f"| {rec['strike']} | {_fmt_sl(rec['sl'])} | {rec['time_stop']}m | {rec['n']} | "
+            f"{_fmt(rec['mean_net_pct'])} | {_hit(rec['hit_rate'])} | {_fmt(rec.get('signal_net'))} | "
+            f"{_fmt(rec.get('p10'))} | {_fmt(rec.get('p50'))} | {_fmt(rec.get('p90'))} | {_fmt(rec.get('signal_prem'))} | "
+            f"{_fmt(rec.get('spread_pct'))} | {_fmt(rec.get('flat_pct'))} | "
+            f"{_pct_cell(rec.get('stop_share'))} | {_pct_cell(rec.get('tp_share'))} | "
+            f"{_pct_cell(rec.get('time_share'))} | {_pct_cell(rec.get('flat_share'))} | {hour_cell} |"
+        )
+    lines.append("")
+
+
+def _append_vix_regime(lines, regime):
+    """Post-hoc prior-day VIX buckets. Not used for selection and not part of N."""
+    if not regime:
+        return
+    lines.append("## By VIX regime")
+    lines.append("")
+    lines.append(regime.get("intro") or "")
+    lines.append("")
+    lines.append("| Signal | Strike | SL | Time | Split | Prior VIX | Trades | Hit | Net % | t |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    rows = regime.get("rows") or []
+    if not rows:
+        lines.append("| — | | | | | | | | | |")
+    for rec in rows:
+        split = "in-sample" if rec["split"] == "in_sample" else "held-out"
+        lines.append(
+            f"| {rec['signal']} | {rec['strike']} | {_fmt_sl(rec['sl'])} | {rec['time_stop']}m | {split} | "
+            f"{rec['bucket']} | {rec['n']} | {_hit(rec['hit_rate'])} | {_fmt(rec['mean_net_pct'])} | {_fmt(rec['t'])} |"
+        )
+    lines.append("")
+
+
 def render_report(meta, rows, tops):
     lines = []
     lines.append(f"# 0DTE scalp on real option prints ({meta['stamp']})")
@@ -1507,10 +2019,14 @@ def render_report(meta, rows, tops):
     lines.append("")
     lines.append(meta["window_line"])
     lines.append("")
+    if meta.get("vix_line"):
+        lines.append(meta["vix_line"])
+        lines.append("")
     lines.append(
         f"Split: {meta['n_is']} in-sample day{'s' if meta['n_is'] != 1 else ''} ({meta['is_first']} to {meta['is_last']}), "
         f"{meta['n_oos']} held-out day{'s' if meta['n_oos'] != 1 else ''} ({meta['oos_first']} to {meta['oos_last']}). "
-        f"The holdout section is the only place those days are scored, and only for the top {TOP_K} in-sample configs of each signal."
+        "This 25% holdout is computed after the VIX day filter (after dead OPRA days are dropped). "
+        f"The holdout section is the only place those days are scored for selection, and only for the top {TOP_K} in-sample configs of each signal."
     )
     lines.append("")
     lines.append(
@@ -1518,7 +2034,8 @@ def render_report(meta, rows, tops):
         f"Two-sided Bonferroni bar is p < {0.05 / meta['n_family']:.6g} "
         f"(|t| > {meta['t_crit']:.2f} under a normal reference). "
         f"FDR is Benjamini-Hochberg on the finite in-sample paired-difference p-values from this run. "
-        f"The random book is the control and is not part of N."
+        f"The random book is the control and is not part of N. "
+        "The VIX regime buckets are descriptive and are not part of N."
     )
     lines.append("")
     lines.append("## Break-even hit rate")
@@ -1599,6 +2116,7 @@ def render_report(meta, rows, tops):
                 f"{_fmt(r['mean_net_pct'])} | {_fmt(r['usd_per_day'])} | {_fmt(r['max_drawdown_usd'])} | {_fmt(r['t'])} | {ci} |"
             )
     lines.append("")
+    _append_random_audit(lines, meta.get("random_audit"))
     lines.append("## Holdout, one look")
     lines.append("")
     lines.append(
@@ -1653,11 +2171,13 @@ def render_report(meta, rows, tops):
                 f"{_fmt_sl(rec['sl'])} | {rec['time_stop']}m | " + " | ".join(cells) + " |"
             )
     lines.append("")
+    _append_vix_regime(lines, meta.get("vix_regime"))
     lines.append("## How to read a pass")
     lines.append("")
     lines.append(
         "A config is interesting only if the in-sample paired difference beats the Bonferroni or FDR bar **and** the holdout "
         "mean is still positive against its own random book. Anything short of that is a description of this sample, not an edge. "
+        "The By VIX regime table is one of those descriptions: post-hoc buckets, not a selected result. "
         "0DTE spreads are often wider than the half-spread assumed here; when they are, the break-even hit rate moves up."
     )
     lines.append("")
@@ -1904,6 +2424,13 @@ def main():
     first_label, first_min = parse_clock_et(os.getenv("SCALP_FIRST_ENTRY", ""), "SCALP_FIRST_ENTRY")
     last_label, last_min = parse_clock_et(os.getenv("SCALP_LAST_ENTRY", ""), "SCALP_LAST_ENTRY")
     entry_window = None if first_min is None and last_min is None else (first_min, last_min)
+    vix_min, vix_max = parse_vix_band(
+        _env_optional_float("SCALP_VIX_MIN"),
+        _env_optional_float("SCALP_VIX_MAX"),
+    )
+    _print_scrubbed("fetching prior-day VIX closes (FRED VIXCLS, Yahoo ^VIX fallback)")
+    vix_closes, vix_source = fetch_vix_closes()
+    _print_scrubbed(f"VIX source {vix_source} closes {len(vix_closes)}")
     cent_floor = _env_float("SCALP_HALF_SPREAD_CENTS", 1.0) / 100.0
     pct = _env_float("SCALP_HALF_SPREAD_PCT", 0.5) / 100.0
     commission = _env_float("SCALP_COMMISSION", 0.65)
@@ -1937,7 +2464,7 @@ def main():
     signal_events = build_signal_events(charts, und, dayset)
     for sid in SEARCH_IDS:
         _print_scrubbed(f"  fires {sid} {len(signal_events[sid])}")
-    ref_events = reference_random_events(signal_events, und, symbols, candidate)
+    ref_events = reference_random_events(signal_events, und, symbols, candidate, entry_window)
 
     needed = contracts_for_events([e for evs in signal_events.values() for e in evs] + ref_events, und, strikes)
     oc = None
@@ -1961,10 +2488,28 @@ def main():
         sys.exit("No OPRA 1-minute bars for the requested days.")
 
     live_set = set(live)
-    signal_events = {sid: _filter_days(evs, live_set) for sid, evs in signal_events.items()}
-    ref_events = reference_random_events(signal_events, und, symbols, live)
-    is_days, oos_days = _split(live)
+    signal_live = {sid: _filter_days(evs, live_set) for sid, evs in signal_events.items()}
+    # Unfiltered by VIX. The regime table and the contract set use this book.
+    ref_live = reference_random_events(signal_live, und, symbols, live, entry_window)
+    kept, vix_dropped = filter_days_by_vix(live, vix_closes, vix_min, vix_max)
+    _print_scrubbed(f"VIX day filter kept {len(kept)} dropped {len(vix_dropped)} of {len(live)} OPRA days")
+    if not kept:
+        text = (
+            "# 0DTE scalp on real option prints\n\n"
+            f"VIX day filter kept 0 of {len(live)} OPRA days ({vix_source}). Nothing was scored.\n"
+            "Data only. Research tool, not trading advice.\n"
+        )
+        _write_text(os.path.join(out_dir, "SCALP_REAL.md"), text)
+        sys.exit("VIX day filter left no sessions.")
+    kept_set = set(kept)
+    # Same days for signals, paired controls (they follow the attempts), and the reference book.
+    signal_events = {sid: _filter_days(evs, kept_set) for sid, evs in signal_live.items()}
+    ref_events = _filter_days(ref_live, kept_set)
+    # 25% holdout AFTER the day filter. The regime section splits the unfiltered OPRA days on its own.
+    is_days, oos_days = _split(kept)
+    reg_is, reg_oos = _split(live)
     is_set, oos_set = set(is_days), set(oos_days)
+    priors = prior_vix_by_day(live, vix_closes)
 
     # Pass 1 already fetched signal + reference contracts on the original candidate set.
     # Reference events on live days use the same per-day seed, so those contracts are present.
@@ -1982,6 +2527,25 @@ def main():
                 books[key] = trades
                 attempts_by[key] = attempts
 
+    # Regime rows do not use the VIX day filter. When the filter is off, the study
+    # books are already the full OPRA set. When it is on, reprice the 15% slice
+    # on the unfiltered days. Premium band and entry clock still apply.
+    regime_signals = list(SEARCH_IDS) + ["random"]
+    if vix_min is None and vix_max is None:
+        regime_books = books
+    else:
+        regime_books = {}
+        for sid in regime_signals:
+            evs = ref_live if sid == "random" else signal_live[sid]
+            for strike in strikes:
+                for sl in SLS:
+                    for ts in REGIME_TIME_STOPS:
+                        trades, _attempts, _skips = run_book(
+                            evs, opt, und, strike, (REGIME_TP, sl, ts), costs, sid,
+                            premium=premium, entry_window=entry_window,
+                        )
+                        regime_books[(sid, strike, REGIME_TP, sl, ts)] = trades
+
     # Paired controls, then a second fetch for any contract the first pass did not load.
     controls = {}
     extra = {}
@@ -1991,7 +2555,7 @@ def main():
             continue
         drawn = []
         for att in attempts:
-            ev = paired_entry(att, und)
+            ev = paired_entry(att, und, entry_window)
             drawn.append(ev)
         controls[key] = drawn
         for ev in drawn:
@@ -2193,6 +2757,64 @@ def main():
         "On a search row, skips_premium counts that signal's premium skips plus paired controls outside the band."
     )
     t_crit = norm_ppf(1 - (0.05 / n_family) / 2)
+    vix_line = describe_vix_filter(vix_min, vix_max, kept, vix_dropped, vix_source, len(is_days), len(oos_days))
+    n_missing_prior = sum(1 for day in live if priors.get(day) is None)
+    regime_payload = {
+        "intro": regime_intro(
+            len(live), reg_is, reg_oos, n_missing_prior, len(kept), len(vix_dropped),
+            len(is_days), len(oos_days), n_family, vix_min is not None or vix_max is not None,
+        ),
+        "rows": regime_rows(
+            regime_books,
+            [("in_sample", reg_is), ("holdout", reg_oos)],
+            priors,
+            regime_signals,
+            strikes,
+        ),
+    }
+    audit_rows = []
+    for strike in strikes:
+        for sl in SLS:
+            for ts in REGIME_TIME_STOPS:
+                rnd_trades = split_trades(books.get(("random", strike, REGIME_TP, sl, ts), []), is_days)
+                stats = summarize(rnd_trades, is_days, 0, 0)
+                fill = audit_fill_stats(rnd_trades, costs)
+                sig_nets = []
+                sig_prems = []
+                for sid in SEARCH_IDS:
+                    sig_trades = split_trades(books.get((sid, strike, REGIME_TP, sl, ts), []), is_days)
+                    if not sig_trades:
+                        continue
+                    sig_nets.append(float(np.mean([t["net_pct"] for t in sig_trades])))
+                    sig_prems.extend(float(t["raw_entry"]) for t in sig_trades if math.isfinite(float(t["raw_entry"])))
+                audit_rows.append({
+                    "strike": strike,
+                    "sl": sl,
+                    "time_stop": ts,
+                    "n": stats["n"],
+                    "mean_net_pct": stats["mean_net_pct"],
+                    "hit_rate": stats["hit_rate"],
+                    "signal_net": float(np.median(sig_nets)) if sig_nets else float("nan"),
+                    "signal_prem": float(np.median(sig_prems)) if sig_prems else float("nan"),
+                    "fill_hours": entry_hour_breakdown(rnd_trades),
+                    **fill,
+                })
+    drawn_hours, pool_hours = hour_draw_table(ref_events, und, symbols, is_days, entry_window)
+    random_audit = {
+        "note": (
+            "The reference random book is the baseline, not a search signal. "
+            "Bug fixed in this version: minutes used to be drawn from all of 9:35-15:25, and a minute outside "
+            "SCALP_FIRST_ENTRY / SCALP_LAST_ENTRY was dropped afterward. With a late window that threw away most draws, "
+            "the book was a thinned leftover rather than N uniform entries inside the window the signals may trade. "
+            "Draws are now uniform on the intersection of 9:35-15:25 and that clock. "
+            "Fills and exits go through run_book and simulate_trade, the same functions a signal trade uses. "
+            "No separate fill bug was found. "
+            "This audit is descriptive. It is not used to rank configs and it is not part of N."
+        ),
+        "drawn": drawn_hours,
+        "pool": pool_hours,
+        "rows": audit_rows,
+    }
     coverage = (
         f"Symbols {', '.join(symbols)}. Requested {days_n} sessions, underlying had {len(all_days)} completed, "
         f"this run kept {len(live)} with at least one OPRA print ({live[0]} to {live[-1]})."
@@ -2218,6 +2840,9 @@ def main():
         "family_note": family_note(strikes),
         "premium_line": describe_premium(premium),
         "window_line": describe_window(first_label, last_label),
+        "vix_line": vix_line,
+        "vix_regime": regime_payload,
+        "random_audit": random_audit,
         "hour_table": hour_table,
     }
     report = render_report(meta, rows, tops)

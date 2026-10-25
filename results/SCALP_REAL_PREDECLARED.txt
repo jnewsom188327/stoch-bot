@@ -46,8 +46,19 @@ FILLS
   The same window applies to paired random controls and to the reference random book.
 
 SPLIT AND TESTS
-- After dead OPRA days are dropped, the last round(25%) of remaining days, at least 1, are held out.
+- VIX day filter (SCALP_VIX_MIN, SCALP_VIX_MAX). Empty means that side is open. Both empty turns the filter off.
+  The level is the prior trading day's VIX close: FRED series VIXCLS
+  (https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS). If that file cannot be read, the Yahoo chart
+  API for ^VIX is used, with a browser User-Agent. The session's own close is not used.
+  A day is kept only when min <= prior close < max, on the sides that are set.
+  The same kept days are used for signal trades, paired random controls, and the reference random book.
+  The report prints how many days were kept and how many were dropped.
+  If the VIX history cannot be fetched, the run stops. It does not score an unfiltered book.
+- After dead OPRA days are dropped, and after the VIX day filter, the last round(25%) of remaining days, at least 1, are held out.
+  The report states the in-sample and held-out day counts for that split.
 - Held-out days are scored once, and only for the top 3 in-sample configs of each search signal.
+- The report section 'By VIX regime' does not use the VIX day filter. Buckets are post-hoc and descriptive.
+  They are not a selected result and they are not part of N.
 - Rank key (in-sample only): day-clustered t of (signal net % - paired-random net %) on trades where both filled,
   then mean net %, then trade count. A config needs at least 5 signal fills and 5 paired fills to be ranked.
 - Primary t-stat is day-clustered on the per-trade net percent (sum of within-day deviations, divided by n).
@@ -61,11 +72,16 @@ SPLIT AND TESTS
 
 RANDOM
 - Paired control (the comparison column): one control per one-position entry attempt, same symbol, day, and direction,
-  minute drawn from the same 30-minute clock bucket inside 9:35-15:25, excluding the signal minute.
-  If that bucket is empty, the draw uses the whole 9:35-15:25 window. Controls are not put through a second one-position rule,
-  so the attempt count stays matched. Seed = SHA256('paired', signal, strike, day, symbol, entry minute, side).
+  minute drawn uniformly from the same 30-minute clock bucket inside the allowed entry window, excluding the signal minute.
+  The allowed window is 9:35-15:25, intersected with SCALP_FIRST_ENTRY / SCALP_LAST_ENTRY when those are set.
+  If that bucket has no other allowed minute, the draw uses the whole allowed window. A minute outside the clock is not drawn.
+  Controls are not put through a second one-position rule, so the attempt count stays matched.
+  The control is priced with the same simulate_trade fill and exit as the signal.
+  Seed = SHA256('paired', signal, strike, day, symbol, entry minute, side).
 - Reference book (signal id random): per day and symbol, N = round-half-up median of the other signals' raw fire counts that day.
-  N distinct minutes from 9:35-15:25, fair coin direction, then the same one-position rule and the same exits.
+  N distinct minutes drawn uniformly from the real minutes in 9:35-15:25 that also fall inside the entry clock
+  (empty clock means the whole 9:35-15:25 list). Fair coin direction, then the same one-position rule and the same
+  run_book fills and exits as a signal trade.
   Seed = SHA256('ref', day, symbol). This book is a portfolio baseline, so its trade count can fall below N after the one-position rule.
 
 SIGNALS (chart, window, rule). Extended hours feed the indicators. The window is when a closed bar may fire.

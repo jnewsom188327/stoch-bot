@@ -26,6 +26,12 @@ on:
       last_entry:
         description: "No signal or control entry at or after this HH:MM ET. Empty = existing behavior (no new entry at or after 15:55). Example: 14:00. For the late-day 1otm run, use 15:00."
         default: ""
+      vix_min:
+        description: "Trade a day only if the prior trading day's VIX close is at least this. Empty = off. No lookahead. Same days for signals, paired controls, and the random book. If VIX cannot be fetched, the run stops."
+        default: ""
+      vix_max:
+        description: "Trade a day only if that prior VIX close is below this (min <= close < max). Empty = no maximum. Example: vix_min 16 keeps high-VIX days."
+        default: ""
       half_spread_cents:
         description: "Extra half-spread floor in cents per side (the run uses the larger of this and the percent below)"
         default: "1"
@@ -72,6 +78,8 @@ jobs:
           SCALP_PREMIUM_MAX: ${{ github.event.inputs.premium_max }}
           SCALP_FIRST_ENTRY: ${{ github.event.inputs.first_entry }}
           SCALP_LAST_ENTRY: ${{ github.event.inputs.last_entry }}
+          SCALP_VIX_MIN: ${{ github.event.inputs.vix_min }}
+          SCALP_VIX_MAX: ${{ github.event.inputs.vix_max }}
           SCALP_HALF_SPREAD_CENTS: ${{ github.event.inputs.half_spread_cents }}
           SCALP_HALF_SPREAD_PCT: ${{ github.event.inputs.half_spread_pct }}
           SCALP_COMMISSION: ${{ github.event.inputs.commission }}
