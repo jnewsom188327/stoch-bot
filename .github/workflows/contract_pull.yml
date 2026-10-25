@@ -1,0 +1,107 @@
+name: contract_pull
+
+# DATA ONLY. This workflow downloads historical option and stock bars and writes
+# a report. It does not place orders.
+# Phone: merge the PR, then Actions tab -> contract_pull -> Run workflow.
+# Defaults pull MSFT261012C00545000 and QQQ261012P00744000 for 2026-10-12.
+# Results are committed to the results branch. main and master are refused.
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated OCC:underlying pairs"
+        default: "MSFT261012C00545000:MSFT,QQQ261012P00744000:QQQ"
+      date:
+        description: "Session date (YYYY-MM-DD)"
+        default: "2026-10-12"
+      alert_time:
+        description: "Alert time ET (HH:MM). The report leads with the peak after this minute."
+        default: "10:14"
+      results_branch:
+        description: "Branch that receives the result files. main and master are refused."
+        default: "contract-pull-results"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: contract-pull-${{ github.event.inputs.results_branch }}
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: python -m pytest -q
+      - name: Pull contract data (data only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          SYMBOLS: ${{ github.event.inputs.symbols }}
+          PULL_DATE: ${{ github.event.inputs.date }}
+          ALERT_TIME: ${{ github.event.inputs.alert_time }}
+        run: python contract_pull.py --symbols "$SYMBOLS" --date "$PULL_DATE" --alert-time "$ALERT_TIME"
+      - name: Commit results onto the results branch (never main)
+        if: success()
+        env:
+          RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
+          PULL_DATE: ${{ github.event.inputs.date }}
+        run: |
+          set -euo pipefail
+          BRANCH="${RESULTS_BRANCH:-contract-pull-results}"
+          case "$BRANCH" in
+            main|master|origin/main|origin/master|refs/heads/main|refs/heads/master)
+              echo "Refusing to push results to ${BRANCH}"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Refusing results branch name"
+            exit 1
+          fi
+          mkdir -p /tmp/contract-pull-out
+          rm -rf /tmp/contract-pull-out
+          mkdir -p /tmp/contract-pull-out
+          if [ ! -d results/contract_pull ]; then
+            echo "No results/contract_pull directory"
+            exit 1
+          fi
+          cp -a results/contract_pull/. /tmp/contract-pull-out/
+          if ! find /tmp/contract-pull-out -type f | grep -q .; then
+            echo "No result files to commit"
+            exit 1
+          fi
+          git config user.name "contract-pull"
+          git config user.email "contract-pull@users.noreply.github.com"
+          git fetch origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH"
+          fi
+          HEADBR="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p results/contract_pull
+          cp -a /tmp/contract-pull-out/. results/contract_pull/
+          git add results/contract_pull
+          if git diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          SAFE_DATE="$(printf '%s' "${PULL_DATE:-}" | tr -cd '0-9-')"
+          git commit -m "contract pull ${SAFE_DATE:-results}"
+          git push origin "HEAD:${BRANCH}"
