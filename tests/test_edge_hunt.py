@@ -778,3 +778,348 @@ def test_workflow_is_manual_data_only_and_cannot_push_main():
     src = open("edge_hunt.py").read()
     for banned in ("submit_order", "TradingClient", "MarketOrderRequest"):
         assert banned not in src
+    assert 'default: "true"' in text
+    assert "EDGE_CCI:" in text
+    assert "EDGE_ONLY_CCI:" in text
+    assert "only_cci:" in text
+    assert "cci" in readme and "only_cci" in readme
+
+
+def _hand_cci(high, low, close, length=27, const=0.015):
+    """Independent loop. Not a call into cci_lambert."""
+    tp = (np.asarray(high, dtype=float) + np.asarray(low, dtype=float) + np.asarray(close, dtype=float)) / 3.0
+    out = np.full(tp.shape, np.nan)
+    for i in range(length - 1, len(tp)):
+        window = tp[i - length + 1:i + 1]
+        if not np.isfinite(window).all():
+            continue
+        sma = float(window.mean())
+        mad = float(np.abs(window - sma).mean())
+        out[i] = 0.0 if mad == 0.0 else (float(window[-1]) - sma) / (const * mad)
+    return out
+
+
+def test_cci_matches_a_hand_computed_value_and_ignores_the_future():
+    n = 40
+    high = np.full(n, 10.0)
+    low = np.full(n, 10.0)
+    close = np.full(n, 10.0)
+    # Bar 27 (0-based) is the first bar after a flat 27-bar window.
+    # Window is 26 tens plus this 13. CCI is exactly 900. The flat window is 0.
+    high[27] = low[27] = close[27] = 13.0
+    got = eh.cci_lambert(high, low, close)
+    assert np.allclose(got, _hand_cci(high, low, close), equal_nan=True)
+    assert np.isnan(got[:26]).all()
+    assert got[26] == 0.0
+    assert got[27] == pytest.approx(900.0)
+    # A later bar does not move earlier CCI, washout, or turn events.
+    high2 = high.copy()
+    low2 = low.copy()
+    close2 = close.copy()
+    high2[-1] = low2[-1] = close2[-1] = 99.0
+    assert np.array_equal(got[:-1], eh.cci_lambert(high2, low2, close2)[:-1], equal_nan=True)
+    cci = got.copy()
+    cci2 = eh.cci_lambert(high2, low2, close2)
+    assert not np.array_equal(cci[-1:], cci2[-1:], equal_nan=True)
+    low_w, high_w = eh.washout_flags(cci, 18, 100)
+    cross, up = eh.cci_turn_events(cci, close, 18, 100)
+    low_b, high_b = eh.washout_flags(cci2, 18, 100)
+    cross_b, up_b = eh.cci_turn_events(cci2, close2, 18, 100)
+    assert np.array_equal(low_w[:-1], low_b[:-1], equal_nan=True)
+    assert np.array_equal(high_w[:-1], high_b[:-1], equal_nan=True)
+    assert np.array_equal(cross[:-1], cross_b[:-1])
+    assert np.array_equal(up[:-1], up_b[:-1])
+    # Touching bar 30 changes bar 30 and the windows that still contain it, not bars before it.
+    high3 = high.copy()
+    high3[30] = 40.0
+    moved = eh.cci_lambert(high3, low, close)
+    assert np.array_equal(got[:30], moved[:30], equal_nan=True)
+    assert not np.array_equal(got[30:], moved[30:], equal_nan=True)
+
+
+def test_washout_window_is_n_bars_and_the_threshold_is_strict():
+    cci = np.zeros(60)
+    cci[20] = -120.0
+    low, high = eh.washout_flags(cci, 18, 100)
+    assert np.isnan(low[:17]).all()
+    assert low[17] == 0.0 and low[19] == 0.0
+    assert low[20] == 1.0 and low[37] == 1.0
+    assert low[38] == 0.0
+    assert np.nanmax(high) == 0.0
+    low9, _high9 = eh.washout_flags(cci, 9, 100)
+    assert low9[20] == 1.0 and low9[28] == 1.0 and low9[29] == 0.0
+    low150, _ = eh.washout_flags(cci, 18, 150)
+    assert np.nanmax(low150) == 0.0
+    exact = np.zeros(40)
+    exact[20] = -100.0
+    low_eq, _ = eh.washout_flags(exact, 18, 100)
+    assert low_eq[20] == 0.0
+    spike = np.zeros(60)
+    spike[20] = 120.0
+    _low, high = eh.washout_flags(spike, 18, 100)
+    assert high[19] == 0.0 and high[20] == 1.0 and high[37] == 1.0 and high[38] == 0.0
+
+
+def test_cci_cross_and_up_close_fire_once_inside_the_window():
+    cci = np.zeros(40)
+    cci[20] = -150.0
+    cci[30] = -100.0
+    cci[31] = -90.0
+    close = np.zeros(40)
+    cross18, _up = eh.cci_turn_events(cci, close, 18, 100)
+    cross9, _up9 = eh.cci_turn_events(cci, close, 9, 100)
+    # N=18 still holds the -150. N=9 has rolled it off, and -100 exactly is not a washout.
+    assert cross18[31] == 1
+    assert cross9[31] == 0
+    assert cross18[30] == 0
+    # Immediate cross from a real low, once the 18-bar window exists.
+    deep = np.zeros(30)
+    deep[20] = -150.0
+    deep[21] = -80.0
+    cross, _ = eh.cci_turn_events(deep, np.zeros(30), 18, 100)
+    assert cross[21] == 1 and cross[20] == 0
+    # First up-close of the episode, then silence until the washout ends and returns.
+    cci = np.zeros(50)
+    cci[20] = -150.0
+    cci[40] = -180.0
+    close = np.zeros(50)
+    close[22] = 1.0
+    close[23] = 2.0
+    close[30] = 3.0
+    close[42] = 4.0
+    _cross, up = eh.cci_turn_events(cci, close, 18, 100)
+    assert up[22] == 1
+    assert up[23] == 0 and up[30] == 0
+    assert up[42] == 1
+    # High side: first down-close only.
+    cci = np.zeros(25)
+    cci[8] = 160.0
+    close = np.full(25, 5.0)
+    close[10] = 4.0
+    close[11] = 3.0
+    _cross, up = eh.cci_turn_events(cci, close, 9, 100)
+    assert up[10] == -1 and up[11] == 0
+    assert eh._sides_to_direction([True], [True])[0] == 0
+    assert eh._sides_to_direction([True], [False])[0] == 1
+    assert eh._sides_to_direction([False], [True])[0] == -1
+
+
+def test_cci_on_the_panel_is_known_only_after_the_bar_closes():
+    day = date(2024, 5, 1)
+    df = _rth_frame([day], seed=1)
+    px = np.full(len(df), 10.0)
+    px[81:84] = 13.0
+    for col in ("open", "high", "low", "close"):
+        df[col] = px
+    vix = {day: 18.0, day - timedelta(days=1): 18.0}
+    panel = eh.compute_features({"SPY": df}, vix, [day], ["SPY"])
+    cci1 = panel.f["cci27_1m"][0, 0]
+    assert np.isnan(cci1[:26]).all()
+    assert cci1[26] == 0.0
+    assert cci1[80] == 0.0
+    assert cci1[81] == pytest.approx(900.0)
+    cci3 = panel.f["cci27_3m"][0, 0]
+    assert np.isnan(cci3[:80]).all()
+    assert cci3[80] == 0.0
+    assert cci3[82] == 0.0
+    assert cci3[83] == pytest.approx(900.0)
+    # The next minute belongs to the next 3-minute bar. It must not move the 900.
+    later = df.copy()
+    later.iloc[84:, later.columns.get_indexer(["open", "high", "low", "close"])] = 40.0
+    panel2 = eh.compute_features({"SPY": later}, vix, [day], ["SPY"])
+    assert panel2.f["cci27_3m"][0, 0, 83] == pytest.approx(900.0)
+    assert panel2.f["cci27_1m"][0, 0, 81] == pytest.approx(900.0)
+    assert np.array_equal(panel.f["cci27_1m"][0, 0, :84], panel2.f["cci27_1m"][0, 0, :84], equal_nan=True)
+
+
+def test_cci_family_counts_every_declared_cell():
+    counts = eh.cci_family_counts()
+    specs = eh.cci_family()
+    assert len(specs) == counts["specs"]
+    n_events = len(eh.FIXED_EVENTS) + len(eh.GRID_EVENTS)
+    assert counts["standalone"] == 2 * 3 * 2 * 2 * 2
+    assert counts["gates"] == 2 * 3 * 2 * 2
+    assert counts["pairs"] == counts["gates"] * n_events * 2
+    assert counts["specs"] == counts["standalone"] * 2 + counts["pairs"] * 2
+    names = [s.name for s in specs]
+    assert len(names) == len(set(names))
+    base = eh.build_family(include_cci=False)
+    full = eh.build_family()
+    assert len(full) == len(base) + len(specs)
+    assert not any("cci_" in s.name for s in base)
+    for tf in eh.CCI_TFS:
+        for n in eh.CCI_NS:
+            for thr in eh.CCI_THRS:
+                for trigger in eh.CCI_TRIGGERS:
+                    feat = f"cci_{trigger}_{tf}_n{int(n)}_t{int(thr)}"
+                    for mode in ("follow", "fade"):
+                        assert f"single {feat} {mode}" in names
+                        assert f"pair {feat} {mode} vix>=16" in names
+                        leg = next(s.leg for s in specs if s.name == f"single {feat} {mode}")
+                        assert eh.param_grid(leg) == (None,)
+                        assert "roll" not in leg.feature
+                for align in eh.CCI_ALIGNS:
+                    gname = f"cci_washout_{tf}_n{int(n)}_t{int(thr)} {align}"
+                    assert any(s.name.endswith("+ " + gname) for s in specs)
+                    assert any(s.name.endswith("+ " + gname + " vix>=16") for s in specs)
+    assert "pair macd_zero_1m follow + cci_washout_1m_n18_t100 with" in names
+    assert "pair macd_zero_1m fade + cci_washout_3m_n36_t150 against vix>=16" in names
+    vix_n = sum("vix>=16" in s.name for s in specs)
+    assert vix_n == counts["standalone_vix"] + counts["pairs_vix"]
+    for spec in specs:
+        if "vix>=16" in spec.name:
+            assert eh.is_shuffle_sensitive(spec)
+        else:
+            assert not eh.is_shuffle_sensitive(spec)
+        if spec.minute_gate is not None:
+            assert not (eh._sources(spec.minute_gate) & eh._sources(spec.leg))
+            assert eh.param_grid(spec.minute_gate) == (None,)
+        if spec.day_gate is not None:
+            assert not (eh._sources(spec.day_gate) & eh._sources(spec.leg))
+    assert eh.param_grid(eh._vix_washout_gate()) == (None,)
+    assert "Follow trades" in eh.reversal_blurb()
+    assert "18" in eh.cci_blurb() and "vix" in eh.cci_blurb().lower()
+
+
+def test_wash_gate_is_side_specific_and_vix_filters_the_day():
+    days = [date(2024, 6, 3) + timedelta(days=i) for i in range(18)]
+    panel = eh.Panel(days, ["SPY"])
+    panel.add_ev("macd_zero_1m")
+    panel.add_f("cci_washout_low_1m_n18_t100")
+    panel.add_f("cci_washout_high_1m_n18_t100")
+    panel.add_daily("vix_prior")
+    panel.ev["macd_zero_1m"][:, 0, 20] = 1
+    panel.f["cci_washout_low_1m_n18_t100"][:, 0, 20] = 1.0
+    panel.f["cci_washout_high_1m_n18_t100"][:, 0, 20] = 0.0
+    panel.daily["vix_prior"][:, 0] = 20.0
+    panel.daily["vix_prior"][-3:, 0] = 10.0
+    gate = eh._wash_gate_cond("1m", 18, 100, "with")
+    against = eh._wash_gate_cond("1m", 18, 100, "against")
+    leg = eh._cond("event", "macd_zero_1m", "event", "follow", -1, "event")
+    fade = eh._cond("event", "macd_zero_1m", "event", "fade", -1, "event")
+    train = np.arange(18)
+    call, put = eh._masks_from_code(
+        panel, eh.Spec("with", "pair", None, gate, leg), train, 0, 1,
+    )
+    assert call[0, 0, 21] and not put[0, 0, 21]
+    call_a, put_a = eh._masks_from_code(
+        panel, eh.Spec("against", "pair", None, against, leg), train, 0, 1,
+    )
+    # Bullish follow wants a call. The against gate offers the low washout to puts only.
+    assert not call_a[0, 0, 21] and not put_a[0, 0, 21]
+    # Fade of the bullish event wants a put, so the with-gate needs the high washout too.
+    panel.f["cci_washout_high_1m_n18_t100"][:, 0, 20] = 1.0
+    call_f, put_f = eh._masks_from_code(
+        panel, eh.Spec("fade-with", "pair", None, gate, fade), train, 0, 1,
+    )
+    assert put_f[0, 0, 21] and not call_f[0, 0, 21]
+    panel.f["cci_washout_high_1m_n18_t100"][:, 0, 20] = 0.0
+    # An ordinary minute gate is still one mask, not a sided tuple.
+    panel.add_f("squeeze_on")
+    panel.f["squeeze_on"][:, 0, 20] = 1.0
+    flag = eh._cond("flag", "squeeze_on", "on", "", -1, "gate")
+    mask = eh._masks_resolved(panel, flag, train, None, 1, "minute")
+    assert isinstance(mask, np.ndarray)
+    sided = eh._masks_resolved(panel, gate, train, None, 1, "minute")
+    assert isinstance(sided, tuple)
+    # High washout alone must not open the call on a "with" gate.
+    panel.f["cci_washout_low_1m_n18_t100"][:, 0, 20] = 0.0
+    panel.f["cci_washout_high_1m_n18_t100"][:, 0, 20] = 1.0
+    call_h, put_h = eh._masks_from_code(
+        panel, eh.Spec("with-high", "pair", None, gate, leg), train, 0, 1,
+    )
+    assert not call_h[0, 0, 21] and not put_h[0, 0, 21]
+    panel.f["cci_washout_low_1m_n18_t100"][:, 0, 20] = 1.0
+    panel.f["cci_washout_high_1m_n18_t100"][:, 0, 20] = 0.0
+    vix = eh._vix_washout_gate()
+    both = eh.Spec("both", "pair", vix, gate, leg)
+    call_v, _put_v = eh._masks_from_code(panel, both, train, 0, 1)
+    assert call_v[0, 0, 21] and not call_v[-1, 0, 21]
+    exits = (eh.PRIMARY_EXIT,)
+    net = np.full((18, 1, eh.N_MIN, 2, 1, 1), -5.0, dtype=np.float32)
+    net[:, 0, 21, 0, 0, 0] = 10.0
+    hit = np.zeros_like(net)
+    family = [
+        eh.Spec("single macd_zero_1m follow", "single", None, None, leg),
+        eh.Spec("pair macd_zero_1m follow + cci_washout_1m_n18_t100 with", "pair", None, gate, leg),
+        eh.Spec("pair macd_zero_1m follow vix>=16", "pair", vix, None, leg),
+    ]
+    result = eh.run_search(
+        panel, net, hit, ("atm",), exits,
+        n_shuf=0, seed=1, min_train=1, min_quantile_n=1, boot=5,
+        family=family, progress=False,
+    )
+    assert result["family_size"] == 3
+    by = {r["name"]: r for r in result["rows"]}
+    assert by["single macd_zero_1m follow"]["n"] == 15
+    assert by["pair macd_zero_1m follow + cci_washout_1m_n18_t100 with"]["n"] == 15
+    assert by["pair macd_zero_1m follow vix>=16"]["n"] == 12
+    assert by["pair macd_zero_1m follow vix>=16"]["mean_net_pct"] == pytest.approx(10.0)
+    assert by["single macd_zero_1m follow"]["sensitive"] == 0
+    assert by["pair macd_zero_1m follow vix>=16"]["sensitive"] == 1
+    # A shuffled prior-VIX gate must match a full restitch when the intraday packs are reused.
+    both = eh.Spec(
+        "pair macd_zero_1m follow + cci_washout_1m_n18_t100 with vix>=16",
+        "pair", vix, gate, leg,
+    )
+    folds = eh.walk_forward_folds(18, eh.K_FOLDS)
+    oos = eh._oos_index(folds, 18)
+    packs = []
+    for fi, (train, _test) in enumerate(folds):
+        got, _codes = eh._leg_rows_for(panel, both, train, fi, {}, None, 1, net, hit)
+        packs.append(got)
+    perm = np.arange(18)[::-1]
+    shuf = panel.shuffled(perm)
+    full = eh._stitch_spec_adapt(shuf, both, folds, {}, None, None, net, hit, 1, 1, oos, 0)
+    cached = eh._stitch_from_legs(shuf, both, folds, packs, 1, 1, oos, net, 0)
+    assert np.array_equal(full[0], cached[0])
+    assert np.array_equal(full[1], cached[1])
+    plain = eh._stitch_spec_adapt(panel, both, folds, {}, None, None, net, hit, 1, 1, oos, 0)
+    assert not np.array_equal(plain[0], full[0])
+
+
+def test_cci_section_reports_the_paired_gate_and_the_best_book():
+    def row(name, n, net, folds):
+        return {
+            "name": name, "strike": "1otm", "tp": 0.15, "sl": 0.20, "time_stop": 10,
+            "n": n, "mean_net_pct": net, "fold_means": folds,
+            "hit_rate": 0.5, "t": 1.0, "p": 0.2, "boot_lo": 0.0, "boot_hi": 1.0,
+            "folds_positive": 4, "random_mean_net_pct": 0.0, "candidate": 0,
+        }
+    rows = [
+        row("single macd_zero_1m follow", 40, 1.0, [1.0, 1.0, 1.0, 1.0, 1.0]),
+        row("pair macd_zero_1m follow + cci_washout_1m_n18_t100 with", 32, 4.0, [2.0, 3.0, 4.0, 5.0, 6.0]),
+        row("pair macd_zero_1m fade + cci_washout_1m_n18_t100 against", 20, -2.0, [-1.0, -1.0, -1.0, -1.0, -1.0]),
+        row("single macd_zero_1m fade", 40, 1.0, [1.0, 1.0, 1.0, 1.0, 1.0]),
+        row("single cci_cross_1m_n18_t100 follow", 35, 6.5, [6.0, 7.0, 6.0, 7.0, 6.0]),
+        row("single cci_cross_1m_n9_t100 follow", 10, 99.0, [99.0]),
+    ]
+    meta = {
+        "stamp": "2026-10-25 09:00 ET",
+        "span": "SPY",
+        "family_size": 6,
+        "n_specs": 6,
+        "n_strikes": 1,
+        "n_exits": 1,
+        "luck": {"n_shuf": 4, "best_oos_net": 6.5, "median_best_oos_net": 3.0, "expected_rules_as_good": 1.5},
+        "method": "method",
+        "limits": "limits",
+        "cci": {"included": True, "only": False, "n_specs": 1824, "n_rules": 65664},
+    }
+    text = eh.render_report(meta, rows)
+    assert "## CCI washout" in text
+    assert "New CCI setups: 1824" in text
+    assert "65664" in text
+    assert "cci_cross_1m_n18_t100" in text
+    assert "+6.5%" in text
+    assert "n=35" in text
+    assert "higher in 1" in text
+    assert "lower in 1" in text
+    assert "Base n" in text and "Gated n" in text
+    assert "32" in text and "40" in text
+    assert "Luck benchmark" in text
+    assert "does not move them" in text
+    off = dict(meta)
+    off["cci"] = {"included": False, "only": False, "n_specs": 0, "n_rules": 0}
+    quiet = eh.render_report(off, rows)
+    assert "left the CCI washout family out" in quiet

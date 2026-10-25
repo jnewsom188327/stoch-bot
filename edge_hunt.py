@@ -61,6 +61,17 @@ MAG_QS = (0.60, 0.75, 0.90)
 STRETCHES = (1.0, 1.5, 2.0)
 WVF_LEVELS = (60.0, 75.0, 90.0)
 
+# CCI washout. Lambert CCI(27) on typical price, constant 0.015.
+# N=18 is the posted window. The grid around it is predeclared and counted.
+CCI_LEN = 27
+CCI_CONST = 0.015
+CCI_NS = (9, 18, 36)
+CCI_THRS = (100.0, 150.0)
+CCI_TFS = ("1m", "3m")
+CCI_TRIGGERS = ("cross", "up")
+CCI_ALIGNS = ("with", "against")
+VIX_WASHOUT_MIN = 16.0
+
 EXITS = tuple(
     (tp, sl, ts)
     for tp in (0.10, 0.15, 0.20)
@@ -485,6 +496,237 @@ def vwap_rvol_direction(vwap_atr, rvol, stretch, rvol_min=RVOL_MIN):
     return out
 
 
+def _cci_tag(tf, n, thr):
+    return f"{tf}_n{int(n)}_t{int(thr)}"
+
+
+def _cci_names(tf, n, thr):
+    """Washout state columns and the two turn events for one grid cell."""
+    tag = _cci_tag(tf, n, thr)
+    return (
+        f"cci_washout_low_{tag}",
+        f"cci_washout_high_{tag}",
+        f"cci_cross_{tag}",
+        f"cci_up_{tag}",
+    )
+
+
+def cci_level_names():
+    names = [f"cci27_{tf}" for tf in CCI_TFS]
+    for tf in CCI_TFS:
+        for n in CCI_NS:
+            for thr in CCI_THRS:
+                low, high, _cross, _up = _cci_names(tf, n, thr)
+                names.extend((low, high))
+    return names
+
+
+def cci_event_names():
+    names = []
+    for tf in CCI_TFS:
+        for n in CCI_NS:
+            for thr in CCI_THRS:
+                _low, _high, cross, up = _cci_names(tf, n, thr)
+                names.extend((cross, up))
+    return names
+
+
+def cci_lambert(high, low, close, length=CCI_LEN, const=CCI_CONST):
+    """Lambert CCI. Bar i uses high, low, and close through i only.
+
+    Typical price is (H+L+C)/3. SMA and mean absolute deviation use the last
+    `length` typicals. CCI is (typical - SMA) / (const * MAD). The first
+    length-1 bars are NaN. A window whose MAD is 0 (a flat typical price)
+    is 0, not a divide-by-zero. A window with any missing bar is NaN.
+    """
+    h = np.asarray(high, dtype=float).reshape(-1)
+    lo = np.asarray(low, dtype=float).reshape(-1)
+    c = np.asarray(close, dtype=float).reshape(-1)
+    if not (h.size == lo.size == c.size):
+        raise ValueError("high, low, and close must be the same length")
+    tp = (h + lo + c) / 3.0
+    out = np.full(tp.size, np.nan, dtype=float)
+    length = int(length)
+    const = float(const)
+    if length < 1 or tp.size < length or const == 0.0:
+        return out
+    windows = np.lib.stride_tricks.sliding_window_view(tp, length)
+    finite = np.isfinite(windows).all(axis=1)
+    means = np.zeros(windows.shape[0], dtype=float)
+    mad = np.zeros(windows.shape[0], dtype=float)
+    if finite.any():
+        means[finite] = windows[finite].mean(axis=1)
+        mad[finite] = np.abs(windows[finite] - means[finite, None]).mean(axis=1)
+    tail = np.full(windows.shape[0], np.nan, dtype=float)
+    good = finite & (mad > 0.0)
+    flat = finite & (mad == 0.0)
+    tail[good] = (windows[good, -1] - means[good]) / (const * mad[good])
+    tail[flat] = 0.0
+    out[length - 1:] = tail
+    return out
+
+
+def rolling_extreme(values, n, how):
+    """Min or max of the last n bars, NaN until n finite values exist. No future bar."""
+    x = np.asarray(values, dtype=float).reshape(-1)
+    n = int(n)
+    out = np.full(x.size, np.nan, dtype=float)
+    if n < 1 or x.size < n:
+        return out
+    windows = np.lib.stride_tricks.sliding_window_view(x, n)
+    finite = np.isfinite(windows).all(axis=1)
+    if how == "min":
+        got = np.min(windows, axis=1)
+    elif how == "max":
+        got = np.max(windows, axis=1)
+    else:
+        raise ValueError(how)
+    out[n - 1:] = np.where(finite, got, np.nan)
+    return out
+
+
+def washout_flags(cci, n, thr):
+    """1 when the washout is on, 0 when it is off, NaN until the window is finite.
+
+    Low: min CCI over the last n bars (this bar included) is strictly below -thr.
+    High: max CCI over that window is strictly above +thr.
+    On a 3-minute series, n is 3-minute bars, not one-minute bars.
+    """
+    lo = rolling_extreme(cci, n, "min")
+    hi = rolling_extreme(cci, n, "max")
+    thr = float(thr)
+    low = np.full(lo.shape, np.nan, dtype=float)
+    high = np.full(hi.shape, np.nan, dtype=float)
+    ok_l = np.isfinite(lo)
+    ok_h = np.isfinite(hi)
+    low[ok_l] = (lo[ok_l] < -thr).astype(float)
+    high[ok_h] = (hi[ok_h] > thr).astype(float)
+    return low, high
+
+
+def first_pulse_in_episode(flag, pulse):
+    """First True pulse in each run of flag. A later pulse in that run does not fire."""
+    flag = np.asarray(flag, dtype=bool).reshape(-1)
+    pulse = np.asarray(pulse, dtype=bool).reshape(-1)
+    if flag.size != pulse.size:
+        raise ValueError("flag and pulse length mismatch")
+    out = np.zeros(flag.size, dtype=bool)
+    seen = False
+    for i in range(flag.size):
+        if not flag[i]:
+            seen = False
+            continue
+        if seen or not pulse[i]:
+            continue
+        out[i] = True
+        seen = True
+    return out
+
+
+def _sides_to_direction(low_fire, high_fire):
+    """+1 low side, -1 high side, 0 when both fire or neither does."""
+    low_fire = np.asarray(low_fire, dtype=bool).reshape(-1)
+    high_fire = np.asarray(high_fire, dtype=bool).reshape(-1)
+    out = np.zeros(low_fire.size, dtype=np.int8)
+    out[low_fire & ~high_fire] = 1
+    out[high_fire & ~low_fire] = -1
+    return out
+
+
+def cci_turn_events(cci, close, n, thr):
+    """Two causal turn directions from a CCI series and its closes.
+
+    cross: CCI crosses back through -thr from below while the n-bar low is
+    still below -thr (+1), or back through +thr from above while the n-bar
+    high is still above +thr (-1).
+    up: the first up-close of a low-washout episode (+1), or the first
+    down-close of a high-washout episode (-1). One pulse per episode.
+    Same-bar conflicts are 0. Returns (cross, up) int8 arrays.
+    """
+    cci = np.asarray(cci, dtype=float).reshape(-1)
+    close = np.asarray(close, dtype=float).reshape(-1)
+    if cci.size != close.size:
+        raise ValueError("cci and close length mismatch")
+    thr = float(thr)
+    low, high = washout_flags(cci, n, thr)
+    low_on = low >= 0.5
+    high_on = high >= 0.5
+    prev = np.empty_like(cci)
+    prev[0] = np.nan
+    if cci.size > 1:
+        prev[1:] = cci[:-1]
+    finite_c = np.isfinite(cci) & np.isfinite(prev)
+    cross_low = low_on & finite_c & (prev <= -thr) & (cci > -thr)
+    cross_high = high_on & finite_c & (prev >= thr) & (cci < thr)
+    up = np.zeros(close.size, dtype=bool)
+    down = np.zeros(close.size, dtype=bool)
+    for i in range(1, close.size):
+        a, b = close[i - 1], close[i]
+        if not (math.isfinite(a) and math.isfinite(b)):
+            continue
+        if b > a:
+            up[i] = True
+        elif b < a:
+            down[i] = True
+    pulse_low = first_pulse_in_episode(low_on, up)
+    pulse_high = first_pulse_in_episode(high_on, down)
+    return _sides_to_direction(cross_low, cross_high), _sides_to_direction(pulse_low, pulse_high)
+
+
+def _rth_slots(lookup, pos_of):
+    days_m, mins, src = [], [], []
+    for key, (di, minute) in lookup.items():
+        i = pos_of.get(key)
+        if i is None:
+            continue
+        days_m.append(di)
+        mins.append(minute)
+        src.append(i)
+    if not src:
+        empty = np.zeros(0, dtype=int)
+        return empty, empty, empty
+    return np.asarray(days_m, dtype=int), np.asarray(mins, dtype=int), np.asarray(src, dtype=int)
+
+
+def _paint(dest, values, days_m, mins, src):
+    if len(src) == 0:
+        return
+    dest[days_m, mins] = np.asarray(values)[src]
+
+
+def _attach_cci_1m(panel, si, high, low, close, slots):
+    """CCI and washout on the continuous 1-minute feed, copied onto RTH score minutes."""
+    cci = cci_lambert(high, low, close)
+    _paint(panel.f["cci27_1m"][:, si, :], cci, *slots)
+    for n in CCI_NS:
+        for thr in CCI_THRS:
+            low_f, high_f = washout_flags(cci, n, thr)
+            cross, up = cci_turn_events(cci, close, n, thr)
+            low_name, high_name, cross_name, up_name = _cci_names("1m", n, thr)
+            _paint(panel.f[low_name][:, si, :], low_f, *slots)
+            _paint(panel.f[high_name][:, si, :], high_f, *slots)
+            _paint(panel.ev[cross_name][:, si, :], cross, *slots)
+            _paint(panel.ev[up_name][:, si, :], up, *slots)
+
+
+def _attach_cci_3m(panel, si, htf, slots, bar_end, known, lookup):
+    """3-minute CCI. Levels carry forward after the bar closes. Events stamp once."""
+    high = htf["high"].to_numpy(dtype=float)
+    low = htf["low"].to_numpy(dtype=float)
+    close = htf["close"].to_numpy(dtype=float)
+    cci = cci_lambert(high, low, close)
+    _paint(panel.f["cci27_3m"][:, si, :], asof_known(bar_end, known, cci), *slots)
+    for n in CCI_NS:
+        for thr in CCI_THRS:
+            low_f, high_f = washout_flags(cci, n, thr)
+            cross, up = cci_turn_events(cci, close, n, thr)
+            low_name, high_name, cross_name, up_name = _cci_names("3m", n, thr)
+            _paint(panel.f[low_name][:, si, :], asof_known(bar_end, known, low_f), *slots)
+            _paint(panel.f[high_name][:, si, :], asof_known(bar_end, known, high_f), *slots)
+            _stamp_direction(panel.ev[cross_name][:, si, :], lookup, known, cross)
+            _stamp_direction(panel.ev[up_name][:, si, :], lookup, known, up)
+
+
 def asof_known(bar_end_ns, known_ns, values):
     """Last value whose known time is <= each bar end. No value from the future.
 
@@ -885,6 +1127,8 @@ def _fill_symbol(panel, si, df, score_pos):
             if i is None:
                 continue
             dest[di, minute] = arr[i]
+    slots = _rth_slots(lookup, pos_of)
+    _attach_cci_1m(panel, si, ind["high"], ind["low"], ind["close"], slots)
     # Higher timeframes. Levels are carried forward with asof. Events stamp once.
     bar_end = np.array([int(ts.value) + 60_000_000_000 for ts in index], dtype=np.int64)
     for minutes, tag in ((3, "3m"), (5, "5m")):
@@ -926,6 +1170,7 @@ def _fill_symbol(panel, si, df, score_pos):
                 ("swing_3m", sw), ("sq_release_3m", rel3),
             ):
                 _stamp_direction(panel.ev[name][:, si, :], lookup, known, arr)
+            _attach_cci_3m(panel, si, htf, slots, bar_end, known, lookup)
         dv = divergence_direction(
             htf["high"].to_numpy(dtype=float),
             htf["low"].to_numpy(dtype=float),
@@ -970,6 +1215,10 @@ def compute_features(frames, vix_closes, score_days, symbols):
     for name in DAILY_FEATURES:
         panel.add_daily(name)
     for name in FIXED_EVENTS:
+        panel.add_ev(name)
+    for name in cci_level_names():
+        panel.add_f(name)
+    for name in cci_event_names():
         panel.add_ev(name)
     score_pos = {d: i for i, d in enumerate(score_days)}
     prior, chg = prior_vix_features(score_days, vix_closes)
@@ -1060,7 +1309,25 @@ def _cond(kind, feature, bucket, mode, level, group):
         ident = f"always|{mode}"
     elif kind == "flag":
         ident = f"{feature}|{bucket}|{mode}" if mode else f"{feature}|{bucket}"
+    elif kind == "daily_fixed":
+        ident = f"{feature}|fixed|{_level_token(level)}|{bucket}"
+    elif kind == "wash_gate":
+        ident = f"{feature}|{bucket}"
     return Cond(ident, kind, feature, bucket, mode, level, group)
+
+
+def _level_token(level):
+    x = float(level)
+    if math.isfinite(x) and x == int(x):
+        return str(int(x))
+    return str(x)
+
+
+def _parse_wash_feature(feature):
+    """cci_washout_1m_n18_t100 -> ('1m', 18, 100.0)."""
+    head, n_tok, t_tok = feature.rsplit("_", 2)
+    tf = head.split("_")[-1]
+    return tf, int(n_tok[1:]), float(t_tok[1:])
 
 
 def is_daily_signed(cond):
@@ -1076,6 +1343,8 @@ def is_shuffle_sensitive(spec):
 
 def param_grid(cond):
     if cond is None:
+        return (None,)
+    if cond.kind in ("daily_fixed", "wash_gate"):
         return (None,)
     if cond.kind in ("daily_level", "intra_level"):
         return HIGH_QS if cond.bucket == "high" else LOW_QS
@@ -1218,6 +1487,16 @@ def entry_masks(panel, cond, thr):
         if cond.mode == "fade":
             pos, neg = neg, pos
         return shift_signal(pos), shift_signal(neg)
+    if cond.kind == "wash_gate":
+        # Side-specific. "with": low washout gates calls, high washout gates puts.
+        # "against" swaps the sides. OR-ing them would let a low washout pass a put.
+        tf, n, thr_w = _parse_wash_feature(cond.feature)
+        low_name, high_name, _cross, _up = _cci_names(tf, n, thr_w)
+        low_on = shift_signal(panel.f[low_name] >= 0.5)
+        high_on = shift_signal(panel.f[high_name] >= 0.5)
+        if cond.bucket == "against":
+            return high_on, low_on
+        return low_on, high_on
     raise ValueError(cond.kind)
 
 
@@ -1242,10 +1521,12 @@ def day_gate_mask(panel, cond, thr):
     if cond.kind == "dow":
         return panel.daily["dow"] == float(cond.level)
     x = panel.daily[cond.feature]
+    # daily_fixed uses the declared level (vix >= 16). Quantile gates use thr.
+    level = float(cond.level) if cond.kind == "daily_fixed" else thr
     if cond.bucket == "high":
-        good = x >= thr
+        good = x >= level
     else:
-        good = x <= thr
+        good = x <= level
     return good & np.isfinite(x)
 
 
@@ -1254,6 +1535,10 @@ def _sources(cond):
         return frozenset()
     if cond.kind == "event":
         return EVENT_SOURCES.get(cond.feature, frozenset({cond.feature}))
+    if cond.kind == "wash_gate":
+        tf, n, thr = _parse_wash_feature(cond.feature)
+        low_name, high_name, _cross, _up = _cci_names(tf, n, thr)
+        return frozenset({low_name, high_name})
     if cond.kind in ("always", "tod"):
         return frozenset({cond.id})
     if cond.kind == "dow":
@@ -1261,8 +1546,11 @@ def _sources(cond):
     return frozenset({cond.feature}) if cond.feature else frozenset()
 
 
-def build_family():
-    """Predeclared singles and pairs. Built from the lists above, not from results."""
+def build_family(include_cci=True):
+    """Predeclared singles and pairs. Built from the lists above, not from results.
+
+    include_cci adds the CCI washout family. The workflow default is to include it.
+    """
     specs = []
     always_call = _cond("always", "", "all", "call", -1, "base")
     always_put = _cond("always", "", "all", "put", -1, "base")
@@ -1335,7 +1623,95 @@ def build_family():
             if _sources(gate) & _sources(leg):
                 continue
             add(f"pair {gate.id} + {leg.id}", "pair", None, gate, leg)
+    if include_cci:
+        specs.extend(cci_family())
     return specs
+
+
+def _vix_washout_gate():
+    return _cond("daily_fixed", "vix_prior", "high", "", VIX_WASHOUT_MIN, "cci")
+
+
+def _wash_gate_cond(tf, n, thr, align):
+    feature = f"cci_washout_{_cci_tag(tf, n, thr)}"
+    return _cond("wash_gate", feature, align, "", thr, "cci")
+
+
+def cci_family():
+    """Stand-alone CCI turns, event+washout pairs, and the vix>=16 copy of each.
+
+    Counted cells: timeframes 1m and 3m, N in {9, 18, 36}, thresholds 100 and 150,
+    triggers cross and first up/down close, follow and fade, washout alignment
+    with the event and against it, and the same list with prior VIX at least 16.
+    Reversal events are the existing MACD, divergence, swing, VWAP+RVOL,
+    VIX-fix rollover, and squeeze-release legs.
+    """
+    specs = []
+    vix = _vix_washout_gate()
+    for trigger in CCI_TRIGGERS:
+        for tf in CCI_TFS:
+            for n in CCI_NS:
+                for thr in CCI_THRS:
+                    feat = f"cci_{trigger}_{_cci_tag(tf, n, thr)}"
+                    for mode in ("follow", "fade"):
+                        leg = _cond("event", feat, "event", mode, -1, "cci")
+                        specs.append(Spec(f"single {feat} {mode}", "single", None, None, leg))
+                        specs.append(Spec(f"pair {feat} {mode} vix>=16", "pair", vix, None, leg))
+    gates = []
+    for tf in CCI_TFS:
+        for n in CCI_NS:
+            for thr in CCI_THRS:
+                for align in CCI_ALIGNS:
+                    gname = f"cci_washout_{_cci_tag(tf, n, thr)} {align}"
+                    gates.append((gname, _wash_gate_cond(tf, n, thr, align)))
+    event_legs = []
+    for feat in FIXED_EVENTS + GRID_EVENTS:
+        for mode in ("follow", "fade"):
+            event_legs.append((feat, mode, _cond("event", feat, "event", mode, -1, "event")))
+    for gname, gate in gates:
+        for feat, mode, leg in event_legs:
+            if _sources(gate) & _sources(leg):
+                continue
+            specs.append(Spec(f"pair {feat} {mode} + {gname}", "pair", None, gate, leg))
+            specs.append(Spec(
+                f"pair {feat} {mode} + {gname} vix>=16",
+                "pair", vix, gate, leg,
+            ))
+    return specs
+
+
+def cci_family_counts():
+    """Declared grid size. Kept next to cci_family so a dropped cell fails the test."""
+    n_event = len(FIXED_EVENTS) + len(GRID_EVENTS)
+    stand = len(CCI_TFS) * len(CCI_NS) * len(CCI_THRS) * len(CCI_TRIGGERS) * 2
+    gates = len(CCI_TFS) * len(CCI_NS) * len(CCI_THRS) * len(CCI_ALIGNS)
+    pairs = gates * n_event * 2
+    specs = stand * 2 + pairs * 2
+    return {
+        "standalone": stand,
+        "standalone_vix": stand,
+        "gates": gates,
+        "pairs": pairs,
+        "pairs_vix": pairs,
+        "specs": specs,
+    }
+
+
+def cci_blurb():
+    return (
+        "CCI washout uses Lambert CCI(27) on typical price (high+low+close)/3 "
+        "with the 0.015 constant. A low washout is the lowest CCI over the last N bars "
+        "strictly below -threshold. A high washout is the highest CCI strictly above +threshold. "
+        "N is 9, 18, and 36 bars of that timeframe (18 is the posted window). "
+        "Thresholds are 100 and 150. On 3-minute bars, N counts 3-minute bars. "
+        "Stand-alone follow buys the call after a low-side turn and the put after a high-side turn. "
+        "A turn is either CCI crossing back through the threshold, or the first up-close "
+        "(low side) or down-close (high side) of that washout episode. Fade takes the other side. "
+        "The gate is the washout state, not the turn. Direction-consistent ('with') lets a low washout "
+        "through to calls and a high washout through to puts. 'against' swaps those. "
+        "The same setups are scored again on sessions whose prior VIX close is at least 16. "
+        "Every one of those cells is in the family and in the Benjamini-Hochberg N."
+    )
 
 
 def family_blurb():
@@ -1490,8 +1866,18 @@ def _masks_resolved(panel, cond, train, param, min_n, role):
         return day_gate_mask(panel, cond, thr)
     call, put = entry_masks(panel, cond, thr)
     if role == "minute":
+        # A washout gate is side-specific. Other minute gates still apply to both sides.
+        if cond.kind == "wash_gate":
+            return call, put
         return call | put
     return call, put
+
+
+def _and_minute(call, put, gmask):
+    """AND a minute gate onto a leg. A tuple gate keeps call and put apart."""
+    if isinstance(gmask, tuple):
+        return call & gmask[0], put & gmask[1]
+    return call & gmask, put & gmask
 
 
 def _leg_pack(panel, cond, train, param, min_n, net, hit):
@@ -1599,9 +1985,7 @@ def _leg_rows_for(panel, spec, train, fold_i, catalog, always, min_n, net, hit):
                 if gmask is None or resolved is None:
                     packs.append(_zero_pack((panel.shape[0], panel.shape[1], net.shape[4], net.shape[5])))
                 else:
-                    call, put = resolved
-                    call = call & gmask
-                    put = put & gmask
+                    call, put = _and_minute(*resolved, gmask)
                     packs.append(accumulate_entries(*cooldown_indices(call, put), net, hit))
                 codes.append((gi, pi))
         return packs, codes
@@ -1753,9 +2137,22 @@ def materialize_entries(panel, spec, folds, codes, strike_i, min_n, net, hit):
 
 def _masks_from_code(panel, spec, train, code, min_n):
     """Rebuild the pre-cooldown masks for a winning code. None if the code is empty."""
+    code = int(code)
+    day = None
+    if spec.minute_gate is not None and spec.day_gate is not None:
+        # code = day_index * (minute params * leg params) + minute pack.
+        # A one-level vix gate leaves the minute pack index unchanged.
+        n_pack = len(param_grid(spec.minute_gate)) * len(param_grid(spec.leg))
+        day_i, code = divmod(code, n_pack)
+        gparams = param_grid(spec.day_gate)
+        if day_i >= len(gparams):
+            return None
+        day = _masks_resolved(panel, spec.day_gate, train, gparams[day_i], min_n, "day")
+        if day is None:
+            return None
     if spec.minute_gate is not None:
         n_p = len(param_grid(spec.leg))
-        gi, pi = divmod(int(code), n_p)
+        gi, pi = divmod(code, n_p)
         gparams = param_grid(spec.minute_gate)
         lparams = param_grid(spec.leg)
         if gi >= len(gparams) or pi >= len(lparams):
@@ -1764,8 +2161,11 @@ def _masks_from_code(panel, spec, train, code, min_n):
         resolved = _masks_resolved(panel, spec.leg, train, lparams[pi], min_n, "leg")
         if gmask is None or resolved is None:
             return None
-        call, put = resolved
-        return call & gmask, put & gmask
+        call, put = _and_minute(*resolved, gmask)
+        if day is not None:
+            call = call & day[:, :, None]
+            put = put & day[:, :, None]
+        return call, put
     n_p = len(param_grid(spec.leg))
     if spec.day_gate is None:
         gi, pi = 0, int(code)
@@ -1923,8 +2323,47 @@ def run_search(
     }
 
 
+def _stitch_from_legs(panel, spec, folds, leg_packs, min_n, min_train, oos_index, net, primary_i=PRIMARY_I):
+    """Mix already-built minute packs with this panel's day gate.
+
+    `leg_packs[fold]` is the cooldown result of the intraday leg and minute gate.
+    A day-label shuffle does not change those packs. Only the day gate is reread.
+    """
+    n_oos = int((oos_index >= 0).sum())
+    n_k = net.shape[4]
+    n_e = net.shape[5]
+    oos_s = np.zeros((n_oos, n_k, n_e), dtype=np.float64)
+    oos_c = np.zeros((n_oos, n_k, n_e), dtype=np.float64)
+    oos_h = np.zeros((n_oos, n_k, n_e), dtype=np.float64)
+    codes = np.full((len(folds), n_k), -1, dtype=int)
+    for fi, (train, test) in enumerate(folds):
+        legs = leg_packs[fi]
+        if spec.day_gate is not None:
+            gates = _gate_rows_for(panel, spec, train, min_n)
+        else:
+            gates = [np.ones(panel.shape[:2], dtype=bool)]
+        code, n_p = _select_codes(gates, legs, train, min_train, primary_i)
+        codes[fi] = code
+        mixed_s, mixed_c, mixed_h = _mix_packs(gates, legs, code, n_p)
+        block = oos_index[test]
+        oos_s[block] += mixed_s[test].sum(axis=1)
+        oos_c[block] += mixed_c[test].sum(axis=1)
+        oos_h[block] += mixed_h[test].sum(axis=1)
+    return oos_s, oos_c, oos_h, codes
+
+
 def _stitch_spec_adapt(panel, spec, folds, catalog, always_call, always_put, net, hit, min_n, min_train, oos_index, primary_i=PRIMARY_I):
     """Like _stitch_spec, but daily-signed packs are built from that fold's always catalog."""
+    if spec.minute_gate is not None:
+        leg_packs = []
+        for fi, (train, _test) in enumerate(folds):
+            packs, _codes = _leg_rows_for(
+                panel, spec, train, fi, catalog, None, min_n, net, hit,
+            )
+            leg_packs.append(packs)
+        return _stitch_from_legs(
+            panel, spec, folds, leg_packs, min_n, min_train, oos_index, net, primary_i,
+        )
     n_oos = int((oos_index >= 0).sum())
     n_k = net.shape[4]
     n_e = net.shape[5]
@@ -1947,11 +2386,6 @@ def _stitch_spec_adapt(panel, spec, folds, catalog, always_call, always_put, net
             # Daily signed specs in this family have day_gate None. A pair would pass a gate.
             if spec.day_gate is None:
                 gates = [np.ones(panel.shape[:2], dtype=bool)]
-        elif spec.minute_gate is not None:
-            legs, _ = _leg_rows_for(
-                panel, spec, train, fi, catalog, None, min_n, net, hit,
-            )
-            gates = [np.ones(panel.shape[:2], dtype=bool)]
         else:
             legs = catalog[spec.leg.id][fi]
             gates = _gate_rows_for(panel, spec, train, min_n)
@@ -1989,34 +2423,45 @@ def _luck(
     if math.isfinite(bar):
         ins_count = sum(1 for v in insensitive if v >= bar - eps)
     perms = day_label_permutations(panel.shape[0], n_shuf, seed)
-    per_best = np.empty(n_shuf, dtype=float)
-    per_count = np.empty(n_shuf, dtype=float)
+    shufs = [panel.shuffled(perm) for perm in perms]
+    per_best = np.full(n_shuf, ins_best, dtype=float)
+    per_count = np.full(n_shuf, float(ins_count), dtype=float)
     sensitive_idx = [i for i, st in enumerate(stored) if st["sensitive"]]
-    for s_i, perm in enumerate(perms):
-        shuf = panel.shuffled(perm)
-        best = ins_best
-        count = ins_count
-        for si in sensitive_idx:
-            spec = stored[si]["spec"]
-            oos_s, oos_c, _h, _c = _stitch_spec_adapt(
-                shuf, spec, folds, catalog, always_call, always_put, net, hit,
-                min_n, min_train, oos_index, primary_i,
-            )
+    for n_done, si in enumerate(sensitive_idx):
+        spec = stored[si]["spec"]
+        # Intraday packs ignore the daily-label shuffle. Build them once.
+        leg_packs = None
+        if spec.minute_gate is not None:
+            leg_packs = []
+            for fi, (train, _test) in enumerate(folds):
+                packs, _codes = _leg_rows_for(
+                    panel, spec, train, fi, catalog, None, min_n, net, hit,
+                )
+                leg_packs.append(packs)
+        for s_i, shuf in enumerate(shufs):
+            if leg_packs is not None:
+                oos_s, oos_c, _h, _c = _stitch_from_legs(
+                    shuf, spec, folds, leg_packs, min_n, min_train, oos_index, net, primary_i,
+                )
+            else:
+                oos_s, oos_c, _h, _c = _stitch_spec_adapt(
+                    shuf, spec, folds, catalog, always_call, always_put, net, hit,
+                    min_n, min_train, oos_index, primary_i,
+                )
             totals_c = oos_c.sum(axis=0)
             totals_s = oos_s.sum(axis=0)
             with np.errstate(invalid="ignore", divide="ignore"):
                 means = np.where(totals_c > 0, totals_s / totals_c, np.nan)
             finite = means[np.isfinite(means)]
-            if len(finite):
-                local = float(finite.max())
-                if not math.isfinite(best) or local > best:
-                    best = local
-                if math.isfinite(bar):
-                    count += int(np.sum(finite >= bar - eps))
-        per_best[s_i] = best
-        per_count[s_i] = count
-        if progress and (s_i + 1) % 20 == 0:
-            sc._print_scrubbed(f"  luck shuffle {s_i + 1}/{n_shuf}")
+            if len(finite) == 0:
+                continue
+            local = float(finite.max())
+            if not math.isfinite(per_best[s_i]) or local > per_best[s_i]:
+                per_best[s_i] = local
+            if math.isfinite(bar):
+                per_count[s_i] += int(np.sum(finite >= bar - eps))
+        if progress and (n_done + 1) % 50 == 0:
+            sc._print_scrubbed(f"  luck setups {n_done + 1}/{len(sensitive_idx)}")
     return luck_shuffle_benchmark(per_best, per_count)
 
 
@@ -2104,6 +2549,224 @@ def _table(rows, limit=None):
     return "\n".join(lines)
 
 
+def _is_primary_exit(row):
+    sl = row.get("sl")
+    if sl is None:
+        return False
+    try:
+        return (
+            float(row["tp"]) == float(PRIMARY_EXIT[0])
+            and float(sl) == float(PRIMARY_EXIT[1])
+            and int(row["time_stop"]) == int(PRIMARY_EXIT[2])
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _fold_txt(vals):
+    if not vals:
+        return ""
+    return " ".join(_fmt_pct(v) or "na" for v in vals)
+
+
+def _cci_rule(row):
+    return "cci_" in str(row.get("name", ""))
+
+
+def _best_cci_row(rows, min_n=30):
+    pool = []
+    for row in rows:
+        if not _cci_rule(row):
+            continue
+        if int(row.get("n") or 0) < int(min_n):
+            continue
+        if not math.isfinite(float(row.get("mean_net_pct", float("nan")))):
+            continue
+        pool.append(row)
+    if not pool:
+        return None
+    return max(pool, key=lambda r: r["mean_net_pct"])
+
+
+def _parse_cci_gate_pair(name, events):
+    """pair {event} {mode} + cci_washout_...  (the vix slice is a different comparison)."""
+    if not name.startswith("pair ") or name.endswith(" vix>=16"):
+        return None
+    if " + cci_washout_" not in name:
+        return None
+    left, gate = name[len("pair "):].split(" + ", 1)
+    feat, _, mode = left.rpartition(" ")
+    if mode not in ("follow", "fade") or feat not in events:
+        return None
+    return feat, mode, gate
+
+
+def cci_gate_pairs(rows):
+    """Primary-exit rows: base event vs the same event with a washout gate.
+
+    The vix>=16 copies are not in this pair. They are a separate slice.
+    """
+    events = set(FIXED_EVENTS + GRID_EVENTS)
+    base = {}
+    gated = []
+    for row in rows:
+        if not _is_primary_exit(row):
+            continue
+        name = row["name"]
+        if name.startswith("single "):
+            feat, _, mode = name[len("single "):].rpartition(" ")
+            if mode in ("follow", "fade") and feat in events:
+                base[(feat, mode, row["strike"])] = row
+            continue
+        parsed = _parse_cci_gate_pair(name, events)
+        if parsed is None:
+            continue
+        feat, mode, gate = parsed
+        gated.append((feat, mode, gate, row))
+    out = []
+    for feat, mode, gate, grow in gated:
+        brow = base.get((feat, mode, grow["strike"]))
+        if brow is None:
+            continue
+        bnet = float(brow.get("mean_net_pct", float("nan")))
+        gnet = float(grow.get("mean_net_pct", float("nan")))
+        delta = gnet - bnet if math.isfinite(bnet) and math.isfinite(gnet) else float("nan")
+        out.append({
+            "feat": feat,
+            "mode": mode,
+            "gate": gate,
+            "strike": grow["strike"],
+            "base_n": int(brow.get("n") or 0),
+            "base_net": bnet,
+            "base_folds": brow.get("fold_means") or [],
+            "gated_n": int(grow.get("n") or 0),
+            "gated_net": gnet,
+            "gated_folds": grow.get("fold_means") or [],
+            "delta": delta,
+        })
+    return out
+
+
+def _pair_table(comps, limit):
+    lines = [
+        "| Event | Gate | Strike | Base n | Base net | Base folds | Gated n | Gated net | Gated folds |",
+        "|---|---|---|---:|---:|---|---:|---:|---|",
+    ]
+    for c in comps[:limit]:
+        lines.append(
+            "| {feat} {mode} | {gate} | {strike} | {bn} | {bnet} | {bf} | {gn} | {gnet} | {gf} |".format(
+                feat=c["feat"],
+                mode=c["mode"],
+                gate=c["gate"],
+                strike=c["strike"],
+                bn=c["base_n"],
+                bnet=_fmt_pct(c["base_net"]),
+                bf=_fold_txt(c["base_folds"]),
+                gn=c["gated_n"],
+                gnet=_fmt_pct(c["gated_net"]),
+                gf=_fold_txt(c["gated_folds"]),
+            )
+        )
+    if len(comps) <= limit:
+        return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def cci_washout_section(meta, rows):
+    """Phone section. Empty when this run did not ask for it (older callers)."""
+    info = meta.get("cci")
+    if not info:
+        return ""
+    n_specs = int(info.get("n_specs") or 0)
+    n_rules = int(info.get("n_rules") or 0)
+    lines = ["## CCI washout", ""]
+    lines.append(cci_blurb())
+    lines.append("")
+    if info.get("only"):
+        lines.append(
+            f"This run scored only the CCI family: {n_specs} setups, {n_rules} rules "
+            f"(setups × strikes × exits). That is the family size in the verdict, and it is N for Benjamini-Hochberg."
+        )
+    elif not info.get("included", True):
+        lines.append(
+            "This run left the CCI washout family out (`cci` false). "
+            "Nothing in the tables above is a CCI rule. Turn `cci` back on, or set `only_cci` true, for this section to have numbers."
+        )
+        lines.append("")
+        return "\n".join(lines)
+    else:
+        lines.append(
+            f"New CCI setups: {n_specs}. New rules (setups × strikes × exits): {n_rules}. "
+            f"They sit inside the family size in the verdict, so Benjamini-Hochberg N includes them."
+        )
+    lines.append("")
+    best = _best_cci_row(rows, 30)
+    if best is None:
+        lines.append("Best real out-of-sample net with at least 30 trades: none. No CCI rule had 30 or more out-of-sample trades.")
+    else:
+        lines.append(
+            f"Best real out-of-sample net with at least 30 trades: {_fmt_pct(best['mean_net_pct'])} "
+            f"on {best['name']} ({best['strike']}, {_exit_label(best)}), n={best['n']}, "
+            f"folds {_fold_txt(best.get('fold_means'))}."
+        )
+    lines.append("")
+    comps = cci_gate_pairs(rows)
+    both = [c for c in comps if math.isfinite(c["delta"])]
+    higher = [c for c in both if c["delta"] > 1e-9]
+    lower = [c for c in both if c["delta"] < -1e-9]
+    ties = [c for c in both if abs(c["delta"]) <= 1e-9]
+    quiet = [c for c in comps if not math.isfinite(c["delta"])]
+    if not comps:
+        lines.append(
+            "Washout gate versus the same event: no paired rows on the 15% target / 20% stop / 10-minute exit."
+        )
+    else:
+        med = float(np.median([c["delta"] for c in both])) if both else float("nan")
+        if len(higher) > len(lower):
+            verdict = "On this sample the washout gate improved the matched base event more often than it hurt it."
+        elif len(higher) < len(lower):
+            verdict = "On this sample the washout gate did not improve the matched base event. It was lower more often than it was higher."
+        else:
+            verdict = "On this sample the washout gate came out even with the matched base event. Higher and lower splits were the same size."
+        lines.append(
+            f"{verdict} Compared {len(comps)} event-plus-gate pairs with the same event, same strike, "
+            f"and the 15%/20%/10-minute exit. Both books traded in {len(both)}. "
+            f"The gated book was higher in {len(higher)}, lower in {len(lower)}, tied in {len(ties)}. "
+            f"{len(quiet)} pairs had no finite net on one side. "
+            f"Median change in out-of-sample net (gated minus base, where both traded): {_fmt_pct(med) or 'n/a'}. "
+            f"This count is not a second false-discovery test."
+        )
+        lines.append("")
+        helped = sorted(higher, key=lambda c: c["delta"], reverse=True)[:5]
+        hurt = sorted(lower, key=lambda c: c["delta"])[:5]
+        if helped:
+            lines.append("Largest improvements (gated net minus base net):")
+            lines.append("")
+            lines.append(_pair_table(helped, 5))
+            lines.append("")
+        if hurt:
+            lines.append("Largest declines:")
+            lines.append("")
+            lines.append(_pair_table(hurt, 5))
+            lines.append("")
+        lines.append(
+            "Each row is the same reversal event with and without the washout gate. "
+            "Folds are the held-out block means, in order. 'with' keeps low washouts on calls and high washouts on puts. 'against' swaps them."
+        )
+    lines.append("")
+    luck = meta.get("luck") or {}
+    lines.append(
+        f"Luck benchmark (same {luck.get('n_shuf', 0)} shuffles of the daily labels as the verdict): "
+        f"best out-of-sample net {_fmt_pct(luck.get('best_oos_net')) or 'n/a'}, "
+        f"median of those per-shuffle bests {_fmt_pct(luck.get('median_best_oos_net')) or 'n/a'}, "
+        f"rules expected to look at least this good by luck {_fmt_num(luck.get('expected_rules_as_good'), 2) or 'n/a'}. "
+        f"Washout rules without the vix>=16 gate are intraday, so the shuffle does not move them. "
+        f"The vix>=16 slice is daily-sensitive and is refit inside that benchmark."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_report(meta, rows):
     ranked = sorted(
         [r for r in rows if math.isfinite(r["mean_net_pct"])],
@@ -2173,6 +2836,10 @@ def render_report(meta, rows):
     lines.append("")
     lines.append(meta["method"])
     lines.append("")
+    cci_text = cci_washout_section(meta, rows)
+    if cci_text:
+        lines.append(cci_text.rstrip())
+        lines.append("")
     lines.append("## Limits")
     lines.append("")
     lines.append(meta["limits"])
@@ -2454,6 +3121,13 @@ def _env_flag(name):
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _env_flag_default(name, default):
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _env_int(name, default):
     raw = os.getenv(name, "").strip()
     return int(raw) if raw else default
@@ -2574,6 +3248,8 @@ def main():
     out_dir = os.getenv("EDGE_OUT", "results").strip() or "results"
     os.makedirs(out_dir, exist_ok=True)
     quick = _env_flag("EDGE_QUICK")
+    only_cci = _env_flag("EDGE_ONLY_CCI")
+    cci_on = True if only_cci else _env_flag_default("EDGE_CCI", True)
     days_n = 30 if quick else _env_int("EDGE_DAYS", 170)
     if days_n < K_FOLDS + 1:
         raise SystemExit(f"days must be at least {K_FOLDS + 1}")
@@ -2596,7 +3272,8 @@ def main():
     end = datetime.now(timezone.utc) - timedelta(minutes=20)
     start = (pd.Timestamp(now.date(), tz=NY) - pd.Timedelta(days=int(days_n * 3 + 90))).tz_convert("UTC").to_pydatetime()
     sc._print_scrubbed(
-        f"edge hunt symbols {', '.join(symbols)} days {days_n} quick {int(quick)} synthetic {int(synthetic)}"
+        f"edge hunt symbols {', '.join(symbols)} days {days_n} quick {int(quick)} "
+        f"cci {int(cci_on)} only_cci {int(only_cci)} synthetic {int(synthetic)}"
     )
     frames = sc._load_underlying(symbols, start, end, synthetic)
     und = {sym: sc.rth_session(df) for sym, df in frames.items()}
@@ -2631,9 +3308,17 @@ def main():
         score_days = live
     sc._print_scrubbed(f"  sessions {score_days[0]} .. {score_days[-1]} n {len(score_days)}")
     net, hit = build_outcome_cube(score_days, symbols, und, opt, strikes, EXITS, costs, premium)
+    if only_cci:
+        family = cci_family()
+    elif cci_on:
+        family = build_family(include_cci=True)
+    else:
+        family = build_family(include_cci=False)
+    n_cci = len(cci_family()) if cci_on else 0
     result = run_search(
         panel, net, hit, strikes, EXITS,
         n_shuf=n_shuf, boot=boot, min_train=min_train, min_quantile_n=min_q,
+        family=family,
     )
     span = (
         f"{', '.join(symbols)}, {len(score_days)} completed sessions with option prints, "
@@ -2654,6 +3339,12 @@ def main():
         "luck": result["luck"],
         "method": _method_text(costs, premium, strikes),
         "limits": _limits_text(),
+        "cci": {
+            "included": cci_on,
+            "only": only_cci,
+            "n_specs": n_cci,
+            "n_rules": n_cci * len(strikes) * len(EXITS),
+        },
     }
     text = render_report(meta, result["rows"])
     md_path = os.path.join(out_dir, "EDGE_HUNT.md")
