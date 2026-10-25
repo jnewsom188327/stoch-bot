@@ -105,6 +105,9 @@ jobs:
           fi
           mkdir -p /tmp/scalp-out
           cp -f results/SCALP_REAL.md results/scalp_real_results.csv results/scalp_real_trades.csv /tmp/scalp-out/
+          # Untracked generated files block checkout once the results branch
+          # tracks these paths. Copies in /tmp are restored after the switch.
+          rm -f results/SCALP_REAL.md results/scalp_real_results.csv results/scalp_real_trades.csv
           git config user.name "scalp-real"
           git config user.email "scalp-real@users.noreply.github.com"
           git fetch origin "$BRANCH" || true
