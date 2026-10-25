@@ -82,6 +82,9 @@ jobs:
             echo "No result files to commit"
             exit 1
           fi
+          # Untracked generated files block checkout once the results branch
+          # tracks results/contract_pull/. Copies in /tmp are restored after.
+          rm -rf results/contract_pull
           git config user.name "contract-pull"
           git config user.email "contract-pull@users.noreply.github.com"
           git fetch origin "$BRANCH" || true
