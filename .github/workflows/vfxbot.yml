@@ -1,0 +1,51 @@
+name: VFX forward test bot
+
+on:
+  schedule:
+    - cron: "27 13 * * 1-5"
+    - cron: "27 14 * * 1-5"
+    - cron: "27 17 * * 1-5"
+    - cron: "27 18 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = test keys + show recent fires only, run = paper trade now"
+        default: "check"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vfxbot
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get latest log + open trades
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run VFX forward test bot (PAPER)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          MODE: ${{ github.event.inputs.mode || 'run' }}
+        run: python vfxbot.py
+      - name: Save log
+        if: always()
+        run: |
+          git config user.name "vfxbot"
+          git config user.email "vfxbot@users.noreply.github.com"
+          for f in results/vfx_forward_log.csv results/vfx_state.json; do if [ -f "$f" ]; then git add "$f"; fi; done
+          if ! git diff --cached --quiet; then
+            git commit -m "vfxbot log $(date -u +%F)"
+            git pull --rebase origin main || true
+            git push || true
+          fi
