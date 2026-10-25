@@ -22,3 +22,11 @@ On your phone: open the repo on GitHub, tap **Actions**, tap **Edge hunt (walk-f
 Results land on the branch `edge-hunt-results` (never main): `results/EDGE_HUNT.md`, `results/edge_hunt_rules.csv`, `results/edge_hunt_trades.csv`.
 
 The `quick` input (30 sessions) is only a smoke test. The real run uses the `days` input (default 170). Data only. No orders.
+
+## Clean Scan replay (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Clean Scan replay (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run. Leave the inputs at their defaults unless you mean to change the cost model. This does not start the Clean Scan bot and it does not change `cleanbot.py`.
+
+Results land on the branch `cleanbot-replay-results` (never main): `results/CLEANBOT_REPLAY.md`, `results/cleanbot_replay_trades.csv`.
+
+Inputs: `trades` (default `clean_trades.csv`), `half_spread_cents` (default 1), `half_spread_pct` (default 0.5), `commission` (default 0.65), `results_branch` (default `cleanbot-replay-results`). Data only. No orders.
