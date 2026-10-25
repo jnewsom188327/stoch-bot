@@ -24,6 +24,12 @@ on:
       quick:
         description: "true = 30 sessions and a smaller shuffle, smoke test only. false = the days input."
         default: "false"
+      cci:
+        description: "true = include the CCI washout family (default). false = the original family only."
+        default: "true"
+      only_cci:
+        description: "true = score only the CCI washout family (faster), even if cci is false. false = follow cci."
+        default: "false"
       half_spread_cents:
         description: "Extra half-spread floor in cents per side (the run uses the larger of this and the percent below)"
         default: "1"
@@ -69,6 +75,8 @@ jobs:
           EDGE_PREMIUM_MIN: ${{ github.event.inputs.premium_min }}
           EDGE_PREMIUM_MAX: ${{ github.event.inputs.premium_max }}
           EDGE_QUICK: ${{ github.event.inputs.quick }}
+          EDGE_CCI: ${{ github.event.inputs.cci }}
+          EDGE_ONLY_CCI: ${{ github.event.inputs.only_cci }}
           EDGE_HALF_SPREAD_CENTS: ${{ github.event.inputs.half_spread_cents }}
           EDGE_HALF_SPREAD_PCT: ${{ github.event.inputs.half_spread_pct }}
           EDGE_COMMISSION: ${{ github.event.inputs.commission }}
