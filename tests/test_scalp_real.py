@@ -1,7 +1,8 @@
 """Offline tests for scalp exit fills and entry timing. No network and no orders."""
 
+import json
 import math
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -633,6 +634,7 @@ def test_entry_hour_breakdown_and_report_state_the_new_rules():
     assert "2otm put = round(spot) - 2" in pre
     assert "SCALP_PREMIUM_MIN" in pre and "skips_premium" in pre
     assert "SCALP_FIRST_ENTRY" in pre and "SCALP_LAST_ENTRY" in pre
+    assert "SCALP_VIX_MIN" in pre and "prior trading day" in pre
     assert "N = 2240" in pre
 
 
@@ -652,5 +654,388 @@ def test_workflow_is_manual_data_only_and_cannot_push_main():
     assert "SCALP_PREMIUM_MAX:" in text
     assert "SCALP_FIRST_ENTRY:" in text
     assert "SCALP_LAST_ENTRY:" in text
+    assert "SCALP_VIX_MIN:" in text
+    assert "SCALP_VIX_MAX:" in text
+    assert "vix_min:" in text
+    assert "vix_max:" in text
     assert "14:00" in text
     assert 'default: "2itm,atm"' in text
+
+
+def test_prior_vix_uses_the_previous_close_and_not_the_same_day():
+    # Friday 2026-10-02, Monday 2026-10-05. Monday must use Friday, not Monday's own close.
+    closes = {
+        date(2026, 10, 2): 18.0,
+        date(2026, 10, 5): 30.0,
+        date(2026, 10, 6): 40.0,
+    }
+    assert sc.prior_vix_close(date(2026, 10, 5), closes) == 18.0
+    assert sc.prior_vix_close(date(2026, 10, 6), closes) == 30.0
+    past = {k: v for k, v in closes.items() if k < date(2026, 10, 5)}
+    assert sc.prior_vix_close(date(2026, 10, 5), past) == sc.prior_vix_close(date(2026, 10, 5), closes)
+    assert sc.prior_vix_close(date(2026, 10, 2), closes) is None
+    # A future print must not leak backward.
+    assert sc.prior_vix_close(date(2026, 10, 5), {date(2026, 10, 6): 99.0, date(2026, 10, 2): 18.0}) == 18.0
+
+
+def test_vix_band_is_half_open_and_the_holdout_split_is_after_the_filter():
+    days = [date(2026, 10, d) for d in (1, 2, 5, 6, 7, 8)]
+    closes = {
+        date(2026, 9, 30): 18.0,  # prior for Oct 1
+        date(2026, 10, 1): 12.0,  # prior for Oct 2; Oct 1's own close must not drop Oct 1
+        date(2026, 10, 2): 17.0,
+        date(2026, 10, 5): 19.0,
+        date(2026, 10, 6): 15.5,  # prior for Oct 7, below 16
+        date(2026, 10, 7): 20.0,  # prior for Oct 8; 20 is not < 20
+        date(2026, 10, 8): 21.0,
+    }
+    assert sc.assign_vix_bucket(15.99) == "<16"
+    assert sc.assign_vix_bucket(16.0) == "16-20"
+    assert sc.assign_vix_bucket(19.99) == "16-20"
+    assert sc.assign_vix_bucket(20.0) == ">=20"
+    assert sc.assign_vix_bucket(None) is None
+    assert sc._prior_in_band(16.0, 16.0, None)
+    assert not sc._prior_in_band(15.99, 16.0, None)
+    assert not sc._prior_in_band(20.0, 16.0, 20.0)
+    assert sc._prior_in_band(19.99, 16.0, 20.0)
+    assert sc._prior_in_band(12.0, None, None)
+    kept, dropped = sc.filter_days_by_vix(days, closes, 16.0, 20.0)
+    # Oct 1 prior 18 keep. Oct 2 prior 12 drop. Oct 5 prior 17 keep.
+    # Oct 6 prior 19 keep. Oct 7 prior 15.5 drop. Oct 8 prior 20 drop (max is exclusive).
+    assert kept == [date(2026, 10, 1), date(2026, 10, 5), date(2026, 10, 6)]
+    assert [d for d, _p in dropped] == [date(2026, 10, 2), date(2026, 10, 7), date(2026, 10, 8)]
+    # Same-day close of Oct 1 is 12. Looking ahead would have dropped it.
+    assert date(2026, 10, 1) in kept
+    is_days, oos_days = sc._split(kept)
+    assert is_days + oos_days == kept
+    assert not (set(is_days) | set(oos_days)) & {d for d, _p in dropped}
+    n_oos = max(1, int(round(len(kept) * sc.HOLD_FRAC)))
+    assert oos_days == kept[-n_oos:]
+    assert len(is_days) == len(kept) - len(oos_days)
+    # Filter off keeps every day and drops none, including a day with no prior close.
+    all_kept, none_dropped = sc.filter_days_by_vix(days, closes, None, None)
+    assert all_kept == days and none_dropped == []
+    with pytest.raises(SystemExit):
+        sc.parse_vix_band(16.0, 16.0)
+    line = sc.describe_vix_filter(16.0, None, kept, dropped, "FRED VIXCLS", len(is_days), len(oos_days))
+    assert "Days kept: 3" in line and "Days dropped: 3" in line
+    assert f"{len(is_days)} in-sample" in line and f"{len(oos_days)} held-out" in line
+    assert "No lookahead" in line
+
+
+def test_vix_parsers_and_a_failed_fetch_stops():
+    text = "observation_date,VIXCLS\n2026-10-01,15.50\n2026-10-02,.\n2026-10-05,18\n"
+    parsed = sc.parse_fred_vix_csv(text)
+    assert parsed[date(2026, 10, 1)] == pytest.approx(15.50)
+    assert date(2026, 10, 2) not in parsed
+    assert sc.prior_vix_close(date(2026, 10, 5), parsed) == pytest.approx(15.50)
+    # 07:00 UTC is still that calendar date in New York. A null close is skipped.
+    stamp = 1790319600  # 2026-09-25 07:00 UTC
+    payload = (
+        '{"chart":{"result":[{"timestamp":[1790319600,1790406000],'
+        '"indicators":{"quote":[{"close":[14.87,null]}]}}],"error":null}}'
+    )
+    yahoo = sc.parse_yahoo_vix_chart(payload)
+    assert date(2026, 9, 25) in yahoo
+    assert yahoo[date(2026, 9, 25)] == pytest.approx(14.87)
+    assert stamp == 1790319600
+    assert len(yahoo) == 1
+
+    # More than 100 closes, so a short error page cannot pass the source check.
+    extra = []
+    for month in range(1, 6):
+        for d in range(1, 29):
+            extra.append(f"2021-{month:02d}-{d:02d},{16 + d / 100:.2f}")
+    fred_body = "observation_date,VIXCLS\n" + "\n".join(extra)
+    seen = []
+
+    def transport(url, headers):
+        seen.append((url, headers.get("User-Agent", "")))
+        if "fredgraph" in url:
+            return fred_body
+        raise AssertionError("Yahoo should not be called when FRED parses")
+
+    closes, source = sc.fetch_vix_closes(transport=transport)
+    assert source == "FRED VIXCLS"
+    assert len(closes) >= 100
+    assert len(seen) == 1
+
+    def fallback(url, headers):
+        seen.append((url, headers.get("User-Agent", "")))
+        if "fredgraph" in url:
+            raise OSError("fred down")
+        body = {
+            "chart": {
+                "result": [{
+                    "timestamp": [1_600_000_000 + i * 86400 for i in range(120)],
+                    "indicators": {"quote": [{"close": [16.5] * 120}]},
+                }],
+                "error": None,
+            }
+        }
+        return json.dumps(body)
+
+    seen.clear()
+    closes, source = sc.fetch_vix_closes(transport=fallback)
+    assert source == "Yahoo ^VIX"
+    assert "Mozilla" in seen[1][1]
+    assert "chart" in seen[1][0]
+
+    def boom(url, headers):
+        raise OSError("no network")
+
+    with pytest.raises(SystemExit) as ei:
+        sc.fetch_vix_closes(transport=boom)
+    assert "VIX" in str(ei.value)
+    assert "Refusing" in str(ei.value)
+
+
+def test_vix_filter_keeps_the_same_days_for_the_random_book():
+    day_drop = date(2026, 10, 2)
+    day_keep = date(2026, 10, 5)
+    closes = {date(2026, 10, 1): 12.0, date(2026, 10, 2): 18.0}
+    # Oct 2 prior is 12 (drop if min is 16). Oct 5 prior is 18 (keep).
+    kept, dropped = sc.filter_days_by_vix([day_drop, day_keep], closes, 16.0, None)
+    assert kept == [day_keep]
+    assert [d for d, _p in dropped] == [day_drop]
+    sess = _und(day_keep)[day_keep]
+    und = {"SPY": {day_drop: _und(day_drop)[day_drop], day_keep: sess}}
+    events = {}
+    for sid in sc.SEARCH_IDS:
+        events[sid] = [
+            {"day": day_drop, "symbol": "SPY"},
+            {"day": day_keep, "symbol": "SPY"},
+            {"day": day_keep, "symbol": "SPY"},
+        ]
+    window = (210, 300)
+    full = sc.reference_random_events(events, und, ["SPY"], [day_drop, day_keep], window)
+    part = sc.reference_random_events(events, und, ["SPY"], kept, window)
+    assert all(e["day"] == day_keep for e in part)
+    assert [(e["day"], e["entry_min"], e["side"]) for e in part] == [
+        (e["day"], e["entry_min"], e["side"]) for e in full if e["day"] in set(kept)
+    ]
+    signal = [{"day": day_drop, "symbol": "SPY"}, {"day": day_keep, "symbol": "SPY"}]
+    assert [e["day"] for e in sc._filter_days(signal, set(kept))] == [day_keep]
+
+
+def test_regime_buckets_keep_days_the_filter_would_drop():
+    d1, d2, d3, d4 = [date(2026, 10, d) for d in (1, 2, 5, 6)]
+    # Priors: 10 and 15 are <16, 18 is 16-20, 25 is >=20.
+    # A vix_min of 16 would drop d1. The regime table still scores it.
+    prior = {d1: 10.0, d2: 15.0, d3: 18.0, d4: 25.0}
+    trades = [
+        {"day": d1, "net_pct": 10.0, "dollar": 1.0, "hit": True, "raw_entry": 0.6},
+        {"day": d2, "net_pct": -4.0, "dollar": -1.0, "hit": False, "raw_entry": 0.6},
+        {"day": d3, "net_pct": 1.0, "dollar": 1.0, "hit": True, "raw_entry": 0.6},
+        {"day": d4, "net_pct": -2.0, "dollar": -1.0, "hit": False, "raw_entry": 0.6},
+    ]
+    books = {("orb_1m", "atm", 0.15, 0.20, 10): trades}
+    rows = sc.regime_rows(
+        books,
+        [("in_sample", [d1, d2, d3]), ("holdout", [d4])],
+        prior,
+        ["orb_1m"],
+        ["atm"],
+    )
+    low = [r for r in rows if r["bucket"] == "<16" and r["split"] == "in_sample" and r["sl"] == 0.20 and r["time_stop"] == 10]
+    assert len(low) == 1 and low[0]["n"] == 2
+    assert low[0]["mean_net_pct"] == pytest.approx(3.0)
+    assert math.isfinite(low[0]["t"])
+    mid = [r for r in rows if r["bucket"] == "16-20" and r["split"] == "in_sample" and r["sl"] == 0.20 and r["time_stop"] == 10]
+    assert mid[0]["n"] == 1
+    high = [r for r in rows if r["bucket"] == ">=20" and r["split"] == "holdout" and r["sl"] == 0.20 and r["time_stop"] == 10]
+    assert high[0]["n"] == 1 and high[0]["mean_net_pct"] == pytest.approx(-2.0)
+    empty = [r for r in rows if r["bucket"] == ">=20" and r["split"] == "in_sample" and r["sl"] == 0.20 and r["time_stop"] == 10]
+    assert empty[0]["n"] == 0
+    intro = sc.regime_intro(4, [d1, d2, d3], [d4], 0, 2, 2, 1, 1, 1120, True)
+    assert "post-hoc" in intro and "not selected" in intro
+    assert "Search family N = 1120" in intro
+    assert "does not use the VIX day filter" in intro
+    assert "In-sample: 3 days" in intro and "Held-out: 1 day (" in intro
+
+
+def test_random_entries_are_uniform_on_the_allowed_window_and_share_fills():
+    window = (210, 300)  # 13:00 inclusive, 14:30 exclusive
+    day0 = date(2026, 1, 5)
+    sess = _und(day0)[day0]
+    eligible = sc.random_eligible_minutes(sess, window)
+    assert eligible == list(range(210, 300))
+    assert sc.random_eligible_minutes(sess, None)[0] == 5
+    assert sc.random_eligible_minutes(sess, None)[-1] == 355
+    # Hour pool on a full session: 9:35-9:59, five full hours, 15:00-15:25.
+    pool = {h: 0 for h in sc.ENTRY_HOURS}
+    for m in sc.random_eligible_minutes(sess, None):
+        pool[sc.minute_hour(m)] += 1
+    assert pool[9] == 25 and pool[10] == 60 and pool[14] == 60 and pool[15] == 26
+
+    n_days = 40
+    days = [day0 + timedelta(days=i) for i in range(n_days)]
+    und = {"SPY": {d: sess for d in days}}
+    events = {sid: [] for sid in sc.SEARCH_IDS}
+    for d in days:
+        for sid in sc.SEARCH_IDS:
+            events[sid].extend({"day": d, "symbol": "SPY"} for _ in range(50))
+    ref = sc.reference_random_events(events, und, ["SPY"], days, window)
+    assert len(ref) == 50 * n_days
+    counts = np.zeros(len(eligible), dtype=float)
+    index = {m: i for i, m in enumerate(eligible)}
+    for ev in ref:
+        assert ev["entry_min"] in index
+        counts[index[ev["entry_min"]]] += 1
+    assert len({ev["entry_min"] for ev in ref if ev["day"] == days[0]}) == 50
+    again = sc.reference_random_events(events, und, ["SPY"], days, window)
+    assert [(e["day"], e["entry_min"], e["side"]) for e in again] == [
+        (e["day"], e["entry_min"], e["side"]) for e in ref
+    ]
+    drawn, eligible_n = sc.hour_draw_table(ref, und, ["SPY"], days, window)
+    drawn_v = np.array([drawn[h] for h in sc.ENTRY_HOURS], dtype=float)
+    pool_v = np.array([eligible_n[h] for h in sc.ENTRY_HOURS], dtype=float)
+    expected = pool_v / pool_v.sum() * drawn_v.sum()
+    chi = float(((drawn_v - expected) ** 2 / np.maximum(expected, 1e-9)).sum())
+    assert chi < 40
+    # 13:00-13:59 is 60 minutes, 14:00-14:29 is 30. The draw share follows that.
+    assert drawn[13] / sum(drawn.values()) == pytest.approx(60 / 90, abs=0.04)
+    assert drawn[9] == 0 and drawn[15] == 0
+
+    # A paired control for an afternoon signal stays inside the clock and the bucket.
+    attempt = {
+        "day": day0, "symbol": "SPY", "entry_min": 220, "side": 1,
+        "signal": "orb_1m", "strike": "atm", "attempt_id": "a1",
+    }
+    paired = sc.paired_entry(attempt, und, window)
+    assert window[0] <= paired["entry_min"] < window[1]
+    assert paired["entry_min"] // 30 == 220 // 30
+    assert paired["entry_min"] != 220
+
+    import backtest as bt
+    contract = bt.lab_occ("SPY", day0, "C", 500)
+    opt = _opt(1.0)
+    opt["high"][40] = 1.0
+    opt["low"][40] = 1.0
+    opt["high"][41] = 1.40
+    book = {(day0, contract): opt}
+    ev = [{"day": day0, "symbol": "SPY", "side": 1, "entry_min": 40}]
+    und_one = {"SPY": {day0: sess}}
+    sig, _, _ = sc.run_book(ev, book, und_one, "atm", (0.15, 0.20, 10), COSTS, "orb_1m")
+    rnd, _, _ = sc.run_book(ev, book, und_one, "atm", (0.15, 0.20, 10), COSTS, "random")
+    assert len(sig) == 1 and len(rnd) == 1
+    for key in ("reason", "net_pct", "entry", "exit", "entry_min", "exit_min", "raw_entry", "spread_cost_pct"):
+        assert sig[0][key] == pytest.approx(rnd[0][key]) if isinstance(sig[0][key], float) else sig[0][key] == rnd[0][key]
+    assert sig[0]["reason"] == "tp"
+
+    stopped = _opt(1.0)
+    stopped["low"][50] = 0.70
+    stopped["high"][50] = 1.0
+    book2 = {(day0, contract): stopped}
+    ev2 = [{"day": day0, "symbol": "SPY", "side": 1, "entry_min": 50}]
+    sig2, _, _ = sc.run_book(ev2, book2, und_one, "atm", (0.15, 0.20, 30), COSTS, "mom5_1m")
+    rnd2, _, _ = sc.run_book(ev2, book2, und_one, "atm", (0.15, 0.20, 30), COSTS, "random")
+    assert sig2[0]["reason"] == "stop" and rnd2[0]["reason"] == "stop"
+    assert sig2[0]["net_pct"] == pytest.approx(rnd2[0]["net_pct"])
+    assert sig2[0]["exit"] == pytest.approx(rnd2[0]["exit"])
+
+
+def test_random_audit_reports_premium_spread_and_exit_shares():
+    trades = []
+    for i, reason in enumerate(["stop", "tp", "time", "time", "flat"] * 2):
+        trades.append({
+            "raw_entry": 0.50,
+            "spread_cost_pct": 4.0,
+            "reason": reason,
+            "net_pct": -6.0,
+            "entry_min": 30,
+            "time": "10:00",
+            "dollar": -1.0,
+            "hit": reason == "tp",
+        })
+    stats = sc.audit_fill_stats(trades, COSTS)
+    assert stats["p10"] == pytest.approx(0.50)
+    assert stats["p50"] == pytest.approx(0.50)
+    assert stats["p90"] == pytest.approx(0.50)
+    assert stats["spread_pct"] == pytest.approx(4.0)
+    assert stats["stop_share"] == pytest.approx(0.2)
+    assert stats["tp_share"] == pytest.approx(0.2)
+    assert stats["time_share"] == pytest.approx(0.4)
+    assert stats["flat_share"] == pytest.approx(0.2)
+    # $0.50 open, 1 cent half-spread each side, $0.65 commission each side.
+    # debit 0.51, credit 0.49, dollar -3.30, net % -3.30/51*100.
+    assert sc.flat_round_trip_pct(0.50, COSTS) == pytest.approx(-3.30 / 51.0 * 100.0)
+    assert stats["flat_pct"] == pytest.approx(sc.flat_round_trip_pct(0.50, COSTS))
+    drawn, pool = sc.hour_draw_table(
+        [{"day": date(2026, 10, 1), "entry_min": 5}, {"day": date(2026, 10, 1), "entry_min": 355}],
+        {"SPY": _und(date(2026, 10, 1))},
+        ["SPY"],
+        [date(2026, 10, 1)],
+        None,
+    )
+    assert drawn[9] == 1 and drawn[15] == 1 and drawn[12] == 0
+    assert pool[9] == 25 and pool[15] == 26
+
+
+def test_report_states_vix_days_and_marks_the_regime_table_descriptive():
+    meta = {
+        "stamp": "2026-10-24 16:00 ET",
+        "synthetic": False,
+        "coverage": "Symbols SPY. Strikes: atm.",
+        "cent_floor": 0.01,
+        "pct": 0.005,
+        "commission": 0.65,
+        "n_is": 9,
+        "n_oos": 3,
+        "is_first": "2026-08-01",
+        "is_last": "2026-10-01",
+        "oos_first": "2026-10-02",
+        "oos_last": "2026-10-06",
+        "n_family": 2240,
+        "t_crit": sc.norm_ppf(1 - (0.05 / 2240) / 2),
+        "skip_note": "premium skips included.",
+        "family_note": sc.family_note(("atm", "2itm")),
+        "premium_line": sc.describe_premium(None),
+        "window_line": sc.describe_window(None, None),
+        "hour_table": [],
+        "vix_line": sc.describe_vix_filter(16, None, [date(2026, 10, 1)] * 12, [], "FRED VIXCLS", 9, 3),
+        "vix_regime": {
+            "intro": sc.regime_intro(
+                16, [date(2026, 10, 1)] * 12, [date(2026, 10, 2)] * 4, 0, 12, 4, 9, 3, 2240, True,
+            ),
+            "rows": [{
+                "signal": "orb_1m", "strike": "atm", "sl": 0.20, "time_stop": 10,
+                "split": "in_sample", "bucket": ">=20", "n": 4,
+                "hit_rate": 0.5, "mean_net_pct": 1.5, "t": 0.4,
+            }, {
+                "signal": "random", "strike": "atm", "sl": 0.20, "time_stop": 30,
+                "split": "holdout", "bucket": "<16", "n": 2,
+                "hit_rate": 0.0, "mean_net_pct": -9.0, "t": -1.2,
+            }],
+        },
+        "random_audit": {
+            "note": (
+                "Draws are now uniform on the intersection of 9:35-15:25 and that clock. "
+                "Fills and exits go through run_book and simulate_trade, the same functions a signal trade uses."
+            ),
+            "drawn": {h: (1 if h == 13 else 0) for h in sc.ENTRY_HOURS},
+            "pool": {h: (60 if h == 13 else 0) for h in sc.ENTRY_HOURS},
+            "rows": [{
+                "strike": "atm", "sl": 0.20, "time_stop": 10, "n": 8,
+                "mean_net_pct": -9.0, "hit_rate": 0.1, "signal_net": -1.0,
+                "p10": 0.40, "p50": 0.55, "p90": 0.90, "signal_prem": 1.20,
+                "spread_pct": 4.0, "flat_pct": -8.5,
+                "stop_share": 0.5, "tp_share": 0.1, "time_share": 0.3, "flat_share": 0.1,
+                "fill_hours": {h: {"n": 0, "net_pct": float("nan")} for h in sc.ENTRY_HOURS},
+            }],
+        },
+    }
+    text = sc.render_report(meta, [], [])
+    assert "Days kept: 12" in text and "Days dropped: 0" in text
+    assert "9 in-sample" in text and "3 held-out" in text
+    assert "after the VIX day filter" in text
+    assert "Search family N = 2240" in text
+    assert "not part of N" in text
+    assert "## By VIX regime" in text
+    assert "post-hoc" in text and "not selected" in text
+    assert "in-sample" in text and "held-out" in text
+    assert "## Random baseline audit" in text
+    assert "run_book and simulate_trade" in text
+    assert "Flat cost %" in text
+    assert "-9.00" in text
+
