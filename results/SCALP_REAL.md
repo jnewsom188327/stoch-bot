@@ -1,4 +1,4 @@
-# 0DTE scalp on real option prints (2026-10-25 09:27 ET)
+# 0DTE scalp on real option prints (2026-10-25 10:48 ET)
 
 **Research tool, not trading advice.** Data only: historical Alpaca bars, no orders.
 
@@ -12,9 +12,11 @@ Premium band: none. Any real entry print at or above $0.05 can be taken. skips_p
 
 Entry cutoff: none beyond the existing rule. No new entry at or after 15:55 ET.
 
-Split: 45 in-sample days (2026-07-31 to 2026-10-02), 15 held-out days (2026-10-05 to 2026-10-23). The holdout section is the only place those days are scored, and only for the top 3 in-sample configs of each signal.
+VIX day filter: off (SCALP_VIX_MIN and SCALP_VIX_MAX empty). Prior-day VIX closes were still loaded from Yahoo ^VIX for the regime table. Days kept: 60. Days dropped: 0. The 25% holdout is computed on these days: 45 in-sample, 15 held-out.
 
-Search family N = 2240 (14 search signals x 2 strike modes (atm, 2itm) x 4 targets x 5 stops x 4 time stops; atm/2itm runs keep N = 2240 even when the run asks for only one of those two). Two-sided Bonferroni bar is p < 2.23214e-05 (|t| > 4.24 under a normal reference). FDR is Benjamini-Hochberg on the finite in-sample paired-difference p-values from this run. The random book is the control and is not part of N.
+Split: 45 in-sample days (2026-07-31 to 2026-10-02), 15 held-out days (2026-10-05 to 2026-10-23). This 25% holdout is computed after the VIX day filter (after dead OPRA days are dropped). The holdout section is the only place those days are scored for selection, and only for the top 3 in-sample configs of each signal.
+
+Search family N = 2240 (14 search signals x 2 strike modes (atm, 2itm) x 4 targets x 5 stops x 4 time stops; atm/2itm runs keep N = 2240 even when the run asks for only one of those two). Two-sided Bonferroni bar is p < 2.23214e-05 (|t| > 4.24 under a normal reference). FDR is Benjamini-Hochberg on the finite in-sample paired-difference p-values from this run. The random book is the control and is not part of N. The VIX regime buckets are descriptive and are not part of N.
 
 ## Break-even hit rate
 
@@ -272,6 +274,42 @@ Full grid: `results/scalp_real_results.csv` (hit_rate and breakeven_hit_rate are
 | 2itm | 20% | 0.10 | 5m | 220 | 4.89 | 15.5% | -1.48 | -19.26 | 882.98 | -2.58 | [-2.56, -0.29] |
 | 2itm | 30% | 0.10 | 10m | 219 | 4.87 | 11.4% | -1.49 | -18.98 | 989.68 | -1.87 | [-2.90, 0.07] |
 
+## Random baseline audit
+
+The reference random book is the baseline, not a search signal. Bug fixed in this version: minutes used to be drawn from all of 9:35-15:25, and a minute outside SCALP_FIRST_ENTRY / SCALP_LAST_ENTRY was dropped afterward. With a late window that threw away most draws, the book was a thinned leftover rather than N uniform entries inside the window the signals may trade. Draws are now uniform on the intersection of 9:35-15:25 and that clock. Fills and exits go through run_book and simulate_trade, the same functions a signal trade uses. No separate fill bug was found. This audit is descriptive. It is not used to rank configs and it is not part of N.
+
+Drawn entry minutes by hour, in sample, before the one-position rule. Eligible is the count of real minutes in the allowed window (9:35-15:25, and the entry clock when set) across the same days and symbols. A uniform draw tracks that pool. Fills are not uniform: the one-position rule keeps the earlier entry and drops a later overlap, and a missing print or a premium-band skip drops a draw. Those filters are the same ones a signal book uses.
+
+| | 9 ET | 10 ET | 11 ET | 12 ET | 13 ET | 14 ET | 15 ET |
+|---|---|---|---|---|---|---|---|
+| Drawn | 19 | 40 | 40 | 40 | 31 | 54 | 6 |
+| Eligible minutes | 2250 | 5400 | 5400 | 5400 | 5400 | 5400 | 2340 |
+
+Filled reference book, in sample, 15% target, each stop, time stop 10m and 30m. Premium is the raw option open at entry. Spread % is the median round-trip half-spread (entry side plus exit side) as a percent of that premium. Flat cost % is the median net % of a round trip that sells at the same raw price, after the half-spread and the commission. Compare Net % with Flat cost %. A random mean near the flat cost is the cost model, not a second exit engine. Signal net % is the median of the in-sample search-signal means at the same strike and exit. Signal premium is the median raw entry across those signal fills. Exit shares are the fraction of random fills that left by stop, target, time, or the 15:55 flat. Fills by hour are counts from 9 ET through 15 ET.
+
+| Strike | SL | Time | Trades | Net % | Hit | Signal net % | Prem p10 | Prem med | Prem p90 | Signal prem | Spread % | Flat cost % | Stop | Target | Time | Flat | Fills by hour 9-15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| atm | 0.10 | 10m | 223 | -3.98 | 37.7% | -2.93 | 0.58 | 1.02 | 1.78 | 1.20 | 1.96 | -3.20 | 61.0% | 37.7% | 1.3% | 0.0% | 17/38/39/40/30/53/6 |
+| atm | 0.10 | 30m | 223 | -4.05 | 38.1% | -2.95 | 0.58 | 1.02 | 1.78 | 1.19 | 1.96 | -3.20 | 61.9% | 38.1% | 0.0% | 0.0% | 17/38/39/40/30/53/6 |
+| atm | 0.15 | 10m | 222 | -4.85 | 44.1% | -3.40 | 0.58 | 1.02 | 1.78 | 1.20 | 1.96 | -3.20 | 52.3% | 44.1% | 3.6% | 0.0% | 17/38/39/40/30/52/6 |
+| atm | 0.15 | 30m | 221 | -5.01 | 45.2% | -3.48 | 0.58 | 1.02 | 1.76 | 1.20 | 1.96 | -3.20 | 54.8% | 45.2% | 0.0% | 0.0% | 17/38/38/40/30/52/6 |
+| atm | 0.20 | 10m | 220 | -5.60 | 47.3% | -3.78 | 0.58 | 1.02 | 1.76 | 1.21 | 1.96 | -3.20 | 44.5% | 47.3% | 8.2% | 0.0% | 17/38/39/40/30/50/6 |
+| atm | 0.20 | 30m | 219 | -5.75 | 50.7% | -3.92 | 0.58 | 1.02 | 1.75 | 1.21 | 1.96 | -3.20 | 48.4% | 50.7% | 0.9% | 0.0% | 17/38/38/40/30/50/6 |
+| atm | 0.30 | 10m | 219 | -5.60 | 51.6% | -3.61 | 0.58 | 1.02 | 1.76 | 1.21 | 1.96 | -3.20 | 26.9% | 51.6% | 21.5% | 0.0% | 17/38/39/40/30/49/6 |
+| atm | 0.30 | 30m | 218 | -5.36 | 61.9% | -3.96 | 0.58 | 1.02 | 1.75 | 1.21 | 1.96 | -3.20 | 36.7% | 61.9% | 1.4% | 0.0% | 17/38/38/40/30/49/6 |
+| atm | none | 10m | 216 | -4.63 | 54.2% | -3.36 | 0.58 | 1.02 | 1.77 | 1.20 | 1.96 | -3.20 | 0.0% | 54.2% | 45.8% | 0.0% | 17/38/39/40/28/48/6 |
+| atm | none | 30m | 207 | -4.27 | 72.0% | -4.63 | 0.59 | 1.02 | 1.75 | 1.20 | 1.96 | -3.20 | 0.0% | 72.0% | 28.0% | 0.0% | 17/36/36/39/28/46/5 |
+| 2itm | 0.10 | 10m | 219 | -2.27 | 30.6% | -1.81 | 1.92 | 2.41 | 3.03 | 2.52 | 1.00 | -1.53 | 55.3% | 30.6% | 14.2% | 0.0% | 16/38/39/39/30/51/6 |
+| 2itm | 0.10 | 30m | 218 | -2.30 | 37.2% | -1.97 | 1.92 | 2.41 | 3.00 | 2.53 | 0.99 | -1.53 | 62.8% | 37.2% | 0.0% | 0.0% | 16/38/38/39/30/51/6 |
+| 2itm | 0.15 | 10m | 217 | -3.17 | 32.7% | -1.67 | 1.93 | 2.41 | 3.00 | 2.53 | 1.01 | -1.53 | 41.5% | 32.7% | 25.8% | 0.0% | 16/38/39/39/30/49/6 |
+| 2itm | 0.15 | 30m | 215 | -2.33 | 46.0% | -1.86 | 1.92 | 2.40 | 2.98 | 2.53 | 1.07 | -1.53 | 51.2% | 46.0% | 2.8% | 0.0% | 16/37/38/39/30/49/6 |
+| 2itm | 0.20 | 10m | 216 | -3.30 | 34.7% | -1.50 | 1.92 | 2.41 | 3.00 | 2.52 | 1.02 | -1.53 | 27.8% | 34.7% | 37.5% | 0.0% | 16/38/39/39/29/49/6 |
+| 2itm | 0.20 | 30m | 211 | -1.83 | 53.6% | -1.31 | 1.93 | 2.41 | 2.98 | 2.53 | 1.07 | -1.53 | 39.8% | 53.6% | 6.6% | 0.0% | 15/36/38/39/29/49/5 |
+| 2itm | 0.30 | 10m | 214 | -2.75 | 36.4% | -1.78 | 1.92 | 2.41 | 3.02 | 2.52 | 1.03 | -1.53 | 9.3% | 36.4% | 54.2% | 0.0% | 16/38/39/39/28/48/6 |
+| 2itm | 0.30 | 30m | 204 | -0.94 | 61.3% | -1.55 | 1.93 | 2.41 | 3.02 | 2.53 | 1.07 | -1.53 | 25.5% | 61.3% | 13.2% | 0.0% | 15/36/37/38/28/46/4 |
+| 2itm | none | 10m | 214 | -2.31 | 37.4% | -1.54 | 1.92 | 2.41 | 3.02 | 2.52 | 1.03 | -1.53 | 0.0% | 37.4% | 62.6% | 0.0% | 16/38/39/39/28/48/6 |
+| 2itm | none | 30m | 201 | -1.30 | 63.7% | -1.58 | 1.93 | 2.41 | 2.98 | 2.52 | 1.07 | -1.53 | 0.0% | 63.7% | 36.3% | 0.0% | 15/34/36/38/28/46/4 |
+
 ## Holdout, one look
 
 Chosen on the in-sample paired-difference t (at least 5 fills on each side). These rows were not used to pick the configs.
@@ -356,8 +394,1815 @@ Descriptive only, not used for selection. Mean net % and fill count by the clock
 | signal | vix95_raw_1m | atm | 15% | none | 10m | 171 / -3.05 | 179 / -5.29 | 191 / -2.99 | 178 / -0.58 | 190 / -5.67 | 171 / -3.92 | 0 |
 | random | random | atm | 15% | none | 10m | 17 / 4.07 | 38 / -4.14 | 39 / -3.91 | 40 / 1.26 | 28 / -6.67 | 48 / -10.31 | 6 / -21.27 |
 
+## By VIX regime
+
+Descriptive only. These are post-hoc buckets, not selected, and they were not used to rank configs. They are not part of the search family. Search family N = 2240. Fixed target 15%. Each stop in the grid. Time stop 10m and 30m. Search signals and the reference random book, at each strike in this run (atm and 2itm on a default run; 1otm and 2otm when the strike input includes them). Net % is the per-trade mean. t is the day-clustered t on the trades in that bucket and split. This section does not use the VIX day filter. It uses all 60 OPRA days. In-sample: 45 days (2026-07-31 to 2026-10-02). Held-out: 15 days (2026-10-05 to 2026-10-23). That 25% holdout is computed on the OPRA days before the VIX day filter. Days with no prior VIX close are left out of the buckets: 0. The selection split is the same days, because the VIX day filter is off.
+
+| Signal | Strike | SL | Time | Split | Prior VIX | Trades | Hit | Net % | t |
+|---|---|---|---|---|---|---|---|---|---|
+| vix95_filt_3m | atm | 0.10 | 10m | in-sample | <16 | 73 | 47.9% | -1.61 | -0.98 |
+| vix95_filt_3m | atm | 0.10 | 10m | in-sample | 16-20 | 26 | 42.3% | -1.30 | -0.94 |
+| vix95_filt_3m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.10 | 10m | held-out | <16 | 15 | 40.0% | -3.03 | -0.77 |
+| vix95_filt_3m | atm | 0.10 | 10m | held-out | 16-20 | 18 | 44.4% | -0.61 | -0.20 |
+| vix95_filt_3m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.10 | 30m | in-sample | <16 | 73 | 47.9% | -1.61 | -0.98 |
+| vix95_filt_3m | atm | 0.10 | 30m | in-sample | 16-20 | 25 | 44.0% | -1.15 | -0.80 |
+| vix95_filt_3m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.10 | 30m | held-out | <16 | 15 | 40.0% | -3.03 | -0.77 |
+| vix95_filt_3m | atm | 0.10 | 30m | held-out | 16-20 | 18 | 50.0% | -0.15 | -0.05 |
+| vix95_filt_3m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.15 | 10m | in-sample | <16 | 73 | 53.4% | -2.33 | -1.28 |
+| vix95_filt_3m | atm | 0.15 | 10m | in-sample | 16-20 | 26 | 50.0% | -1.48 | -0.92 |
+| vix95_filt_3m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.15 | 10m | held-out | <16 | 15 | 40.0% | -6.00 | -1.28 |
+| vix95_filt_3m | atm | 0.15 | 10m | held-out | 16-20 | 18 | 72.2% | 5.91 | 2.16 |
+| vix95_filt_3m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.15 | 30m | in-sample | <16 | 73 | 54.8% | -2.09 | -1.15 |
+| vix95_filt_3m | atm | 0.15 | 30m | in-sample | 16-20 | 25 | 52.0% | -1.35 | -0.81 |
+| vix95_filt_3m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.15 | 30m | held-out | <16 | 15 | 40.0% | -6.00 | -1.28 |
+| vix95_filt_3m | atm | 0.15 | 30m | held-out | 16-20 | 18 | 77.8% | 5.64 | 1.82 |
+| vix95_filt_3m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.20 | 10m | in-sample | <16 | 72 | 55.6% | -3.24 | -1.45 |
+| vix95_filt_3m | atm | 0.20 | 10m | in-sample | 16-20 | 26 | 57.7% | -0.92 | -0.45 |
+| vix95_filt_3m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.20 | 10m | held-out | <16 | 14 | 50.0% | -3.17 | -0.71 |
+| vix95_filt_3m | atm | 0.20 | 10m | held-out | 16-20 | 18 | 72.2% | 5.09 | 1.61 |
+| vix95_filt_3m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.20 | 30m | in-sample | <16 | 72 | 58.3% | -3.10 | -1.36 |
+| vix95_filt_3m | atm | 0.20 | 30m | in-sample | 16-20 | 25 | 60.0% | -0.76 | -0.36 |
+| vix95_filt_3m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.20 | 30m | held-out | <16 | 14 | 50.0% | -5.57 | -1.11 |
+| vix95_filt_3m | atm | 0.20 | 30m | held-out | 16-20 | 18 | 77.8% | 4.54 | 1.26 |
+| vix95_filt_3m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.30 | 10m | in-sample | <16 | 69 | 63.8% | -2.03 | -0.86 |
+| vix95_filt_3m | atm | 0.30 | 10m | in-sample | 16-20 | 26 | 57.7% | -1.60 | -0.56 |
+| vix95_filt_3m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.30 | 10m | held-out | <16 | 14 | 50.0% | -1.94 | -0.49 |
+| vix95_filt_3m | atm | 0.30 | 10m | held-out | 16-20 | 18 | 72.2% | 4.56 | 1.51 |
+| vix95_filt_3m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.30 | 30m | in-sample | <16 | 64 | 70.3% | -1.32 | -0.53 |
+| vix95_filt_3m | atm | 0.30 | 30m | in-sample | 16-20 | 24 | 62.5% | -2.23 | -0.67 |
+| vix95_filt_3m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | 0.30 | 30m | held-out | <16 | 14 | 57.1% | -7.34 | -1.15 |
+| vix95_filt_3m | atm | 0.30 | 30m | held-out | 16-20 | 18 | 77.8% | 2.34 | 0.51 |
+| vix95_filt_3m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | none | 10m | in-sample | <16 | 69 | 63.8% | -1.28 | -0.58 |
+| vix95_filt_3m | atm | none | 10m | in-sample | 16-20 | 26 | 57.7% | -1.61 | -0.46 |
+| vix95_filt_3m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | none | 10m | held-out | <16 | 14 | 50.0% | -1.33 | -0.34 |
+| vix95_filt_3m | atm | none | 10m | held-out | 16-20 | 18 | 72.2% | 5.18 | 1.64 |
+| vix95_filt_3m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | none | 30m | in-sample | <16 | 60 | 73.3% | -0.90 | -0.29 |
+| vix95_filt_3m | atm | none | 30m | in-sample | 16-20 | 23 | 69.6% | -0.51 | -0.10 |
+| vix95_filt_3m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | atm | none | 30m | held-out | <16 | 13 | 53.8% | -11.33 | -1.32 |
+| vix95_filt_3m | atm | none | 30m | held-out | 16-20 | 17 | 88.2% | 6.27 | 1.48 |
+| vix95_filt_3m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.10 | 10m | in-sample | <16 | 70 | 37.1% | -0.85 | -0.48 |
+| vix95_filt_3m | 2itm | 0.10 | 10m | in-sample | 16-20 | 26 | 46.2% | 0.56 | 0.29 |
+| vix95_filt_3m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.10 | 10m | held-out | <16 | 15 | 40.0% | -1.55 | -0.40 |
+| vix95_filt_3m | 2itm | 0.10 | 10m | held-out | 16-20 | 18 | 61.1% | 4.84 | 1.77 |
+| vix95_filt_3m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.10 | 30m | in-sample | <16 | 69 | 43.5% | -0.72 | -0.41 |
+| vix95_filt_3m | 2itm | 0.10 | 30m | in-sample | 16-20 | 25 | 48.0% | 0.69 | 0.34 |
+| vix95_filt_3m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.10 | 30m | held-out | <16 | 15 | 40.0% | -1.55 | -0.40 |
+| vix95_filt_3m | 2itm | 0.10 | 30m | held-out | 16-20 | 18 | 66.7% | 5.10 | 1.68 |
+| vix95_filt_3m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.15 | 10m | in-sample | <16 | 66 | 42.4% | -0.64 | -0.34 |
+| vix95_filt_3m | 2itm | 0.15 | 10m | in-sample | 16-20 | 26 | 50.0% | 0.44 | 0.17 |
+| vix95_filt_3m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.15 | 10m | held-out | <16 | 14 | 50.0% | 0.86 | 0.24 |
+| vix95_filt_3m | 2itm | 0.15 | 10m | held-out | 16-20 | 18 | 66.7% | 5.78 | 2.33 |
+| vix95_filt_3m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.15 | 30m | in-sample | <16 | 62 | 54.8% | -0.15 | -0.07 |
+| vix95_filt_3m | 2itm | 0.15 | 30m | in-sample | 16-20 | 24 | 54.2% | 0.18 | 0.07 |
+| vix95_filt_3m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.15 | 30m | held-out | <16 | 14 | 50.0% | -1.56 | -0.37 |
+| vix95_filt_3m | 2itm | 0.15 | 30m | held-out | 16-20 | 18 | 72.2% | 5.10 | 1.58 |
+| vix95_filt_3m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.20 | 10m | in-sample | <16 | 66 | 45.5% | -0.33 | -0.15 |
+| vix95_filt_3m | 2itm | 0.20 | 10m | in-sample | 16-20 | 26 | 50.0% | -1.27 | -0.45 |
+| vix95_filt_3m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.20 | 10m | held-out | <16 | 14 | 50.0% | 2.08 | 0.66 |
+| vix95_filt_3m | 2itm | 0.20 | 10m | held-out | 16-20 | 18 | 66.7% | 5.68 | 2.55 |
+| vix95_filt_3m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.20 | 30m | in-sample | <16 | 60 | 63.3% | 0.67 | 0.27 |
+| vix95_filt_3m | 2itm | 0.20 | 30m | in-sample | 16-20 | 24 | 54.2% | -1.89 | -0.60 |
+| vix95_filt_3m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.20 | 30m | held-out | <16 | 14 | 57.1% | -1.18 | -0.25 |
+| vix95_filt_3m | 2itm | 0.20 | 30m | held-out | 16-20 | 18 | 72.2% | 3.72 | 0.99 |
+| vix95_filt_3m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.30 | 10m | in-sample | <16 | 66 | 45.5% | -0.38 | -0.17 |
+| vix95_filt_3m | 2itm | 0.30 | 10m | in-sample | 16-20 | 26 | 50.0% | 0.40 | 0.12 |
+| vix95_filt_3m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.30 | 10m | held-out | <16 | 14 | 50.0% | 2.32 | 0.75 |
+| vix95_filt_3m | 2itm | 0.30 | 10m | held-out | 16-20 | 18 | 66.7% | 5.12 | 2.51 |
+| vix95_filt_3m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.30 | 30m | in-sample | <16 | 57 | 66.7% | 1.54 | 0.54 |
+| vix95_filt_3m | 2itm | 0.30 | 30m | in-sample | 16-20 | 22 | 63.6% | -0.71 | -0.16 |
+| vix95_filt_3m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | 0.30 | 30m | held-out | <16 | 13 | 53.8% | -3.25 | -0.55 |
+| vix95_filt_3m | 2itm | 0.30 | 30m | held-out | 16-20 | 18 | 77.8% | 3.44 | 1.02 |
+| vix95_filt_3m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | none | 10m | in-sample | <16 | 66 | 47.0% | 0.49 | 0.24 |
+| vix95_filt_3m | 2itm | none | 10m | in-sample | 16-20 | 26 | 50.0% | -0.17 | -0.04 |
+| vix95_filt_3m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | none | 10m | held-out | <16 | 14 | 50.0% | 2.32 | 0.75 |
+| vix95_filt_3m | 2itm | none | 10m | held-out | 16-20 | 18 | 66.7% | 6.13 | 2.54 |
+| vix95_filt_3m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | none | 30m | in-sample | <16 | 57 | 68.4% | 1.42 | 0.48 |
+| vix95_filt_3m | 2itm | none | 30m | in-sample | 16-20 | 22 | 72.7% | 3.18 | 0.73 |
+| vix95_filt_3m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_filt_3m | 2itm | none | 30m | held-out | <16 | 13 | 53.8% | -3.76 | -0.60 |
+| vix95_filt_3m | 2itm | none | 30m | held-out | 16-20 | 17 | 82.4% | 6.42 | 1.56 |
+| vix95_filt_3m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.10 | 10m | in-sample | <16 | 340 | 44.7% | -1.82 | -2.61 |
+| vix95_raw_3m | atm | 0.10 | 10m | in-sample | 16-20 | 126 | 40.5% | -1.76 | -1.44 |
+| vix95_raw_3m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.10 | 10m | held-out | <16 | 79 | 36.7% | -3.58 | -2.27 |
+| vix95_raw_3m | atm | 0.10 | 10m | held-out | 16-20 | 92 | 34.8% | -3.23 | -4.31 |
+| vix95_raw_3m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.10 | 30m | in-sample | <16 | 340 | 45.3% | -1.81 | -2.61 |
+| vix95_raw_3m | atm | 0.10 | 30m | in-sample | 16-20 | 124 | 42.7% | -1.69 | -1.39 |
+| vix95_raw_3m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.10 | 30m | held-out | <16 | 79 | 40.5% | -3.17 | -1.99 |
+| vix95_raw_3m | atm | 0.10 | 30m | held-out | 16-20 | 92 | 37.0% | -3.10 | -3.85 |
+| vix95_raw_3m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.15 | 10m | in-sample | <16 | 339 | 51.0% | -2.28 | -2.80 |
+| vix95_raw_3m | atm | 0.15 | 10m | in-sample | 16-20 | 124 | 47.6% | -2.10 | -1.88 |
+| vix95_raw_3m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.15 | 10m | held-out | <16 | 77 | 42.9% | -4.24 | -2.49 |
+| vix95_raw_3m | atm | 0.15 | 10m | held-out | 16-20 | 90 | 45.6% | -2.91 | -2.77 |
+| vix95_raw_3m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.15 | 30m | in-sample | <16 | 339 | 53.4% | -2.12 | -2.60 |
+| vix95_raw_3m | atm | 0.15 | 30m | in-sample | 16-20 | 122 | 50.8% | -1.95 | -1.90 |
+| vix95_raw_3m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.15 | 30m | held-out | <16 | 77 | 50.6% | -3.10 | -1.74 |
+| vix95_raw_3m | atm | 0.15 | 30m | held-out | 16-20 | 90 | 47.8% | -3.00 | -2.91 |
+| vix95_raw_3m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.20 | 10m | in-sample | <16 | 334 | 54.5% | -2.65 | -3.35 |
+| vix95_raw_3m | atm | 0.20 | 10m | in-sample | 16-20 | 121 | 52.1% | -1.99 | -1.89 |
+| vix95_raw_3m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.20 | 10m | held-out | <16 | 75 | 46.7% | -3.68 | -2.06 |
+| vix95_raw_3m | atm | 0.20 | 10m | held-out | 16-20 | 88 | 50.0% | -3.45 | -2.53 |
+| vix95_raw_3m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.20 | 30m | in-sample | <16 | 332 | 58.4% | -2.48 | -2.82 |
+| vix95_raw_3m | atm | 0.20 | 30m | in-sample | 16-20 | 119 | 57.1% | -2.07 | -2.42 |
+| vix95_raw_3m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.20 | 30m | held-out | <16 | 75 | 57.3% | -3.25 | -1.64 |
+| vix95_raw_3m | atm | 0.20 | 30m | held-out | 16-20 | 88 | 52.3% | -3.78 | -2.81 |
+| vix95_raw_3m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.30 | 10m | in-sample | <16 | 321 | 58.3% | -2.44 | -2.71 |
+| vix95_raw_3m | atm | 0.30 | 10m | in-sample | 16-20 | 118 | 55.1% | -2.07 | -1.10 |
+| vix95_raw_3m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.30 | 10m | held-out | <16 | 74 | 48.6% | -5.13 | -1.91 |
+| vix95_raw_3m | atm | 0.30 | 10m | held-out | 16-20 | 81 | 51.9% | -4.65 | -2.95 |
+| vix95_raw_3m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.30 | 30m | in-sample | <16 | 312 | 67.3% | -1.89 | -1.96 |
+| vix95_raw_3m | atm | 0.30 | 30m | in-sample | 16-20 | 113 | 64.6% | -2.33 | -1.31 |
+| vix95_raw_3m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | 0.30 | 30m | held-out | <16 | 71 | 64.8% | -3.72 | -1.34 |
+| vix95_raw_3m | atm | 0.30 | 30m | held-out | 16-20 | 78 | 60.3% | -4.83 | -2.22 |
+| vix95_raw_3m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | none | 10m | in-sample | <16 | 318 | 58.5% | -2.37 | -2.41 |
+| vix95_raw_3m | atm | none | 10m | in-sample | 16-20 | 114 | 54.4% | -3.67 | -1.56 |
+| vix95_raw_3m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | none | 10m | held-out | <16 | 72 | 47.2% | -6.00 | -1.85 |
+| vix95_raw_3m | atm | none | 10m | held-out | 16-20 | 80 | 53.8% | -4.01 | -1.99 |
+| vix95_raw_3m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | none | 30m | in-sample | <16 | 277 | 72.9% | -1.86 | -1.32 |
+| vix95_raw_3m | atm | none | 30m | in-sample | 16-20 | 91 | 65.9% | -4.64 | -1.72 |
+| vix95_raw_3m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | atm | none | 30m | held-out | <16 | 58 | 69.0% | -4.46 | -1.20 |
+| vix95_raw_3m | atm | none | 30m | held-out | 16-20 | 68 | 66.2% | -6.37 | -1.81 |
+| vix95_raw_3m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.10 | 10m | in-sample | <16 | 326 | 35.3% | -1.16 | -1.76 |
+| vix95_raw_3m | 2itm | 0.10 | 10m | in-sample | 16-20 | 123 | 39.8% | -0.24 | -0.23 |
+| vix95_raw_3m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.10 | 10m | held-out | <16 | 77 | 36.4% | -0.84 | -0.51 |
+| vix95_raw_3m | 2itm | 0.10 | 10m | held-out | 16-20 | 92 | 38.0% | -1.31 | -1.18 |
+| vix95_raw_3m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.10 | 30m | in-sample | <16 | 322 | 42.2% | -0.76 | -1.04 |
+| vix95_raw_3m | 2itm | 0.10 | 30m | in-sample | 16-20 | 121 | 44.6% | -0.20 | -0.21 |
+| vix95_raw_3m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.10 | 30m | held-out | <16 | 77 | 44.2% | -0.43 | -0.26 |
+| vix95_raw_3m | 2itm | 0.10 | 30m | held-out | 16-20 | 92 | 40.2% | -1.28 | -1.12 |
+| vix95_raw_3m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.15 | 10m | in-sample | <16 | 317 | 39.4% | -1.28 | -1.77 |
+| vix95_raw_3m | 2itm | 0.15 | 10m | in-sample | 16-20 | 120 | 45.8% | -0.03 | -0.03 |
+| vix95_raw_3m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.15 | 10m | held-out | <16 | 75 | 40.0% | -0.97 | -0.62 |
+| vix95_raw_3m | 2itm | 0.15 | 10m | held-out | 16-20 | 86 | 44.2% | -1.50 | -1.12 |
+| vix95_raw_3m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.15 | 30m | in-sample | <16 | 306 | 51.0% | -0.67 | -0.80 |
+| vix95_raw_3m | 2itm | 0.15 | 30m | in-sample | 16-20 | 116 | 52.6% | -0.27 | -0.32 |
+| vix95_raw_3m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.15 | 30m | held-out | <16 | 73 | 50.7% | -0.65 | -0.45 |
+| vix95_raw_3m | 2itm | 0.15 | 30m | held-out | 16-20 | 85 | 49.4% | -1.40 | -0.89 |
+| vix95_raw_3m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.20 | 10m | in-sample | <16 | 313 | 41.5% | -1.61 | -1.78 |
+| vix95_raw_3m | 2itm | 0.20 | 10m | in-sample | 16-20 | 116 | 45.7% | -1.08 | -0.87 |
+| vix95_raw_3m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.20 | 10m | held-out | <16 | 74 | 40.5% | -1.95 | -1.02 |
+| vix95_raw_3m | 2itm | 0.20 | 10m | held-out | 16-20 | 85 | 44.7% | -2.77 | -1.98 |
+| vix95_raw_3m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.20 | 30m | in-sample | <16 | 297 | 55.9% | -1.05 | -1.04 |
+| vix95_raw_3m | 2itm | 0.20 | 30m | in-sample | 16-20 | 112 | 54.5% | -1.34 | -1.19 |
+| vix95_raw_3m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.20 | 30m | held-out | <16 | 69 | 53.6% | -1.67 | -0.94 |
+| vix95_raw_3m | 2itm | 0.20 | 30m | held-out | 16-20 | 81 | 50.6% | -2.86 | -1.50 |
+| vix95_raw_3m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.30 | 10m | in-sample | <16 | 304 | 41.4% | -1.94 | -2.02 |
+| vix95_raw_3m | 2itm | 0.30 | 10m | in-sample | 16-20 | 112 | 45.5% | -1.38 | -0.86 |
+| vix95_raw_3m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.30 | 10m | held-out | <16 | 73 | 39.7% | -2.74 | -1.15 |
+| vix95_raw_3m | 2itm | 0.30 | 10m | held-out | 16-20 | 81 | 45.7% | -2.71 | -1.76 |
+| vix95_raw_3m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.30 | 30m | in-sample | <16 | 274 | 59.9% | -1.25 | -1.12 |
+| vix95_raw_3m | 2itm | 0.30 | 30m | in-sample | 16-20 | 100 | 59.0% | -2.22 | -1.07 |
+| vix95_raw_3m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | 0.30 | 30m | held-out | <16 | 61 | 59.0% | -1.88 | -0.65 |
+| vix95_raw_3m | 2itm | 0.30 | 30m | held-out | 16-20 | 75 | 58.7% | -2.93 | -1.50 |
+| vix95_raw_3m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | none | 10m | in-sample | <16 | 303 | 41.6% | -1.86 | -1.85 |
+| vix95_raw_3m | 2itm | none | 10m | in-sample | 16-20 | 111 | 45.9% | -2.70 | -1.35 |
+| vix95_raw_3m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | none | 10m | held-out | <16 | 72 | 38.9% | -3.55 | -1.19 |
+| vix95_raw_3m | 2itm | none | 10m | held-out | 16-20 | 80 | 46.2% | -2.69 | -1.51 |
+| vix95_raw_3m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | none | 30m | in-sample | <16 | 250 | 64.0% | -0.30 | -0.22 |
+| vix95_raw_3m | 2itm | none | 30m | in-sample | 16-20 | 87 | 62.1% | -2.69 | -1.07 |
+| vix95_raw_3m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_3m | 2itm | none | 30m | held-out | <16 | 55 | 61.8% | -1.35 | -0.47 |
+| vix95_raw_3m | 2itm | none | 30m | held-out | 16-20 | 66 | 62.1% | -5.18 | -1.48 |
+| vix95_raw_3m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.10 | 10m | in-sample | <16 | 209 | 36.4% | -5.01 | -5.33 |
+| ttm_squeeze_3m | atm | 0.10 | 10m | in-sample | 16-20 | 107 | 34.6% | -4.29 | -3.79 |
+| ttm_squeeze_3m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.10 | 10m | held-out | <16 | 63 | 31.7% | -6.37 | -3.97 |
+| ttm_squeeze_3m | atm | 0.10 | 10m | held-out | 16-20 | 40 | 17.5% | -8.23 | -5.58 |
+| ttm_squeeze_3m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.10 | 30m | in-sample | <16 | 209 | 36.8% | -5.04 | -5.40 |
+| ttm_squeeze_3m | atm | 0.10 | 30m | in-sample | 16-20 | 107 | 35.5% | -4.29 | -3.91 |
+| ttm_squeeze_3m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.10 | 30m | held-out | <16 | 63 | 31.7% | -6.37 | -3.97 |
+| ttm_squeeze_3m | atm | 0.10 | 30m | held-out | 16-20 | 40 | 17.5% | -8.36 | -5.50 |
+| ttm_squeeze_3m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.15 | 10m | in-sample | <16 | 209 | 45.5% | -5.03 | -4.32 |
+| ttm_squeeze_3m | atm | 0.15 | 10m | in-sample | 16-20 | 106 | 44.3% | -4.11 | -4.52 |
+| ttm_squeeze_3m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.15 | 10m | held-out | <16 | 63 | 39.7% | -6.79 | -4.37 |
+| ttm_squeeze_3m | atm | 0.15 | 10m | held-out | 16-20 | 40 | 25.0% | -9.53 | -8.42 |
+| ttm_squeeze_3m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.15 | 30m | in-sample | <16 | 209 | 46.9% | -5.14 | -4.41 |
+| ttm_squeeze_3m | atm | 0.15 | 30m | in-sample | 16-20 | 106 | 45.3% | -4.44 | -4.86 |
+| ttm_squeeze_3m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.15 | 30m | held-out | <16 | 63 | 42.9% | -6.45 | -3.70 |
+| ttm_squeeze_3m | atm | 0.15 | 30m | held-out | 16-20 | 40 | 25.0% | -10.22 | -6.84 |
+| ttm_squeeze_3m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.20 | 10m | in-sample | <16 | 208 | 55.8% | -3.20 | -2.78 |
+| ttm_squeeze_3m | atm | 0.20 | 10m | in-sample | 16-20 | 104 | 48.1% | -4.97 | -5.34 |
+| ttm_squeeze_3m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.20 | 10m | held-out | <16 | 63 | 42.9% | -7.82 | -4.32 |
+| ttm_squeeze_3m | atm | 0.20 | 10m | held-out | 16-20 | 40 | 32.5% | -10.06 | -4.99 |
+| ttm_squeeze_3m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.20 | 30m | in-sample | <16 | 207 | 59.9% | -3.20 | -2.75 |
+| ttm_squeeze_3m | atm | 0.20 | 30m | in-sample | 16-20 | 104 | 50.0% | -5.24 | -5.40 |
+| ttm_squeeze_3m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.20 | 30m | held-out | <16 | 63 | 47.6% | -7.63 | -3.68 |
+| ttm_squeeze_3m | atm | 0.20 | 30m | held-out | 16-20 | 40 | 35.0% | -10.47 | -3.57 |
+| ttm_squeeze_3m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.30 | 10m | in-sample | <16 | 204 | 57.4% | -3.90 | -2.86 |
+| ttm_squeeze_3m | atm | 0.30 | 10m | in-sample | 16-20 | 104 | 52.9% | -5.21 | -5.03 |
+| ttm_squeeze_3m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.30 | 10m | held-out | <16 | 60 | 51.7% | -5.46 | -3.91 |
+| ttm_squeeze_3m | atm | 0.30 | 10m | held-out | 16-20 | 40 | 32.5% | -12.99 | -6.23 |
+| ttm_squeeze_3m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.30 | 30m | in-sample | <16 | 203 | 66.0% | -4.09 | -2.51 |
+| ttm_squeeze_3m | atm | 0.30 | 30m | in-sample | 16-20 | 103 | 59.2% | -5.48 | -4.03 |
+| ttm_squeeze_3m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | 0.30 | 30m | held-out | <16 | 60 | 60.0% | -6.90 | -3.37 |
+| ttm_squeeze_3m | atm | 0.30 | 30m | held-out | 16-20 | 40 | 42.5% | -13.19 | -5.06 |
+| ttm_squeeze_3m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | none | 10m | in-sample | <16 | 204 | 58.3% | -3.86 | -2.53 |
+| ttm_squeeze_3m | atm | none | 10m | in-sample | 16-20 | 101 | 54.5% | -5.18 | -4.78 |
+| ttm_squeeze_3m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | none | 10m | held-out | <16 | 58 | 53.4% | -4.79 | -3.75 |
+| ttm_squeeze_3m | atm | none | 10m | held-out | 16-20 | 37 | 32.4% | -17.62 | -5.17 |
+| ttm_squeeze_3m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | none | 30m | in-sample | <16 | 196 | 73.0% | -3.57 | -1.72 |
+| ttm_squeeze_3m | atm | none | 30m | in-sample | 16-20 | 96 | 65.6% | -6.78 | -3.13 |
+| ttm_squeeze_3m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | atm | none | 30m | held-out | <16 | 54 | 66.7% | -9.49 | -2.96 |
+| ttm_squeeze_3m | atm | none | 30m | held-out | 16-20 | 35 | 42.9% | -21.81 | -3.33 |
+| ttm_squeeze_3m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | in-sample | <16 | 210 | 30.0% | -1.92 | -2.28 |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | in-sample | 16-20 | 104 | 26.9% | -3.53 | -3.73 |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | held-out | <16 | 62 | 30.6% | -2.32 | -1.94 |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | held-out | 16-20 | 40 | 20.0% | -6.15 | -8.40 |
+| ttm_squeeze_3m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | in-sample | <16 | 209 | 39.2% | -1.75 | -1.88 |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | in-sample | 16-20 | 104 | 30.8% | -3.66 | -3.92 |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | held-out | <16 | 62 | 40.3% | -1.51 | -1.12 |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | held-out | 16-20 | 40 | 20.0% | -6.46 | -6.91 |
+| ttm_squeeze_3m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | in-sample | <16 | 208 | 35.1% | -1.26 | -1.33 |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | in-sample | 16-20 | 102 | 33.3% | -2.84 | -2.83 |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | held-out | <16 | 62 | 33.9% | -1.80 | -1.57 |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | held-out | 16-20 | 40 | 25.0% | -7.15 | -6.04 |
+| ttm_squeeze_3m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | in-sample | <16 | 206 | 50.0% | -0.98 | -0.87 |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | in-sample | 16-20 | 102 | 41.2% | -3.64 | -3.38 |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | held-out | <16 | 61 | 49.2% | -1.47 | -0.91 |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | held-out | 16-20 | 40 | 27.5% | -8.24 | -4.94 |
+| ttm_squeeze_3m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | in-sample | <16 | 206 | 37.9% | -0.97 | -0.89 |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | in-sample | 16-20 | 102 | 35.3% | -2.67 | -2.62 |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | held-out | <16 | 60 | 35.0% | -2.08 | -1.94 |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | held-out | 16-20 | 40 | 25.0% | -8.52 | -7.03 |
+| ttm_squeeze_3m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | in-sample | <16 | 203 | 57.1% | -0.26 | -0.18 |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | in-sample | 16-20 | 102 | 47.1% | -3.52 | -3.21 |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | held-out | <16 | 57 | 52.6% | -1.82 | -1.10 |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | held-out | 16-20 | 40 | 32.5% | -9.50 | -5.09 |
+| ttm_squeeze_3m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | in-sample | <16 | 206 | 38.8% | -1.05 | -0.93 |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | in-sample | 16-20 | 102 | 35.3% | -3.87 | -3.39 |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | held-out | <16 | 59 | 35.6% | -2.52 | -2.11 |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | held-out | 16-20 | 39 | 25.6% | -9.56 | -4.93 |
+| ttm_squeeze_3m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | in-sample | <16 | 201 | 61.7% | -0.01 | -0.00 |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | in-sample | 16-20 | 101 | 50.5% | -4.75 | -3.27 |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | held-out | <16 | 56 | 58.9% | -1.28 | -0.91 |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | held-out | 16-20 | 38 | 36.8% | -12.89 | -5.30 |
+| ttm_squeeze_3m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | none | 10m | in-sample | <16 | 206 | 38.8% | -0.68 | -0.62 |
+| ttm_squeeze_3m | 2itm | none | 10m | in-sample | 16-20 | 100 | 36.0% | -3.89 | -3.10 |
+| ttm_squeeze_3m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | none | 10m | held-out | <16 | 58 | 36.2% | -1.66 | -1.47 |
+| ttm_squeeze_3m | 2itm | none | 10m | held-out | 16-20 | 37 | 24.3% | -13.34 | -4.86 |
+| ttm_squeeze_3m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | none | 30m | in-sample | <16 | 196 | 61.7% | -0.23 | -0.14 |
+| ttm_squeeze_3m | 2itm | none | 30m | in-sample | 16-20 | 94 | 51.1% | -6.15 | -3.29 |
+| ttm_squeeze_3m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| ttm_squeeze_3m | 2itm | none | 30m | held-out | <16 | 53 | 58.5% | -3.69 | -2.00 |
+| ttm_squeeze_3m | 2itm | none | 30m | held-out | 16-20 | 35 | 34.3% | -18.00 | -3.56 |
+| ttm_squeeze_3m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | in-sample | <16 | 377 | 37.9% | -4.11 | -5.73 |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | in-sample | 16-20 | 122 | 35.2% | -3.58 | -4.80 |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | held-out | <16 | 77 | 31.2% | -6.46 | -9.48 |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | held-out | 16-20 | 77 | 45.5% | -1.03 | -0.58 |
+| ema_vwap_flip_3m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | in-sample | <16 | 377 | 38.5% | -4.12 | -5.78 |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | in-sample | 16-20 | 121 | 36.4% | -3.76 | -5.96 |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | held-out | <16 | 77 | 31.2% | -6.46 | -9.48 |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | held-out | 16-20 | 77 | 46.8% | -0.98 | -0.55 |
+| ema_vwap_flip_3m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | in-sample | <16 | 377 | 45.1% | -4.77 | -5.34 |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | in-sample | 16-20 | 121 | 40.5% | -4.78 | -5.19 |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | held-out | <16 | 76 | 42.1% | -6.18 | -5.46 |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | held-out | 16-20 | 77 | 54.5% | -0.71 | -0.30 |
+| ema_vwap_flip_3m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | in-sample | <16 | 375 | 46.4% | -4.73 | -5.00 |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | in-sample | 16-20 | 117 | 43.6% | -4.63 | -5.37 |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | held-out | <16 | 76 | 43.4% | -6.20 | -5.16 |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | held-out | 16-20 | 77 | 57.1% | -0.53 | -0.22 |
+| ema_vwap_flip_3m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | in-sample | <16 | 368 | 52.2% | -4.51 | -4.45 |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | in-sample | 16-20 | 121 | 49.6% | -3.47 | -3.55 |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | held-out | <16 | 74 | 51.4% | -4.65 | -2.41 |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | held-out | 16-20 | 77 | 58.4% | -1.32 | -0.49 |
+| ema_vwap_flip_3m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | in-sample | <16 | 364 | 54.4% | -4.57 | -4.24 |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | in-sample | 16-20 | 118 | 55.9% | -2.96 | -3.28 |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | held-out | <16 | 74 | 56.8% | -4.41 | -2.12 |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | held-out | 16-20 | 77 | 62.3% | -0.85 | -0.30 |
+| ema_vwap_flip_3m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | in-sample | <16 | 347 | 58.8% | -3.74 | -3.07 |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | in-sample | 16-20 | 112 | 53.6% | -3.03 | -1.98 |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | held-out | <16 | 72 | 55.6% | -4.36 | -2.03 |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | held-out | 16-20 | 72 | 63.9% | -0.78 | -0.47 |
+| ema_vwap_flip_3m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | in-sample | <16 | 327 | 64.8% | -3.99 | -2.72 |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | in-sample | 16-20 | 105 | 64.8% | -2.63 | -1.57 |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | held-out | <16 | 71 | 66.2% | -4.34 | -1.94 |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | held-out | 16-20 | 70 | 74.3% | 0.68 | 0.33 |
+| ema_vwap_flip_3m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | none | 10m | in-sample | <16 | 327 | 60.2% | -3.25 | -2.72 |
+| ema_vwap_flip_3m | atm | none | 10m | in-sample | 16-20 | 109 | 54.1% | -3.09 | -1.76 |
+| ema_vwap_flip_3m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | none | 10m | held-out | <16 | 67 | 56.7% | -4.66 | -1.68 |
+| ema_vwap_flip_3m | atm | none | 10m | held-out | 16-20 | 70 | 64.3% | -1.42 | -0.99 |
+| ema_vwap_flip_3m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | none | 30m | in-sample | <16 | 263 | 71.5% | -4.45 | -3.00 |
+| ema_vwap_flip_3m | atm | none | 30m | in-sample | 16-20 | 91 | 69.2% | -5.16 | -2.54 |
+| ema_vwap_flip_3m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | atm | none | 30m | held-out | <16 | 60 | 73.3% | -4.08 | -1.12 |
+| ema_vwap_flip_3m | atm | none | 30m | held-out | 16-20 | 61 | 83.6% | 0.90 | 0.33 |
+| ema_vwap_flip_3m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | in-sample | <16 | 363 | 32.8% | -2.25 | -2.84 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | in-sample | 16-20 | 120 | 31.7% | -2.20 | -3.51 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | held-out | <16 | 73 | 32.9% | -1.54 | -1.46 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | held-out | 16-20 | 77 | 45.5% | 0.74 | 0.40 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | in-sample | <16 | 359 | 35.7% | -2.70 | -3.27 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | in-sample | 16-20 | 116 | 35.3% | -2.29 | -3.52 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | held-out | <16 | 72 | 40.3% | -1.51 | -1.41 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | held-out | 16-20 | 77 | 50.6% | 1.15 | 0.63 |
+| ema_vwap_flip_3m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | in-sample | <16 | 353 | 40.8% | -1.58 | -1.82 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | in-sample | 16-20 | 117 | 36.8% | -1.29 | -1.85 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | held-out | <16 | 71 | 36.6% | -0.77 | -0.61 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | held-out | 16-20 | 76 | 50.0% | 0.36 | 0.16 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | in-sample | <16 | 339 | 47.5% | -1.98 | -2.14 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | in-sample | 16-20 | 112 | 50.9% | -0.49 | -0.50 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | held-out | <16 | 68 | 51.5% | -1.07 | -0.64 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | held-out | 16-20 | 75 | 56.0% | 0.51 | 0.23 |
+| ema_vwap_flip_3m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | in-sample | <16 | 339 | 44.5% | -0.65 | -0.68 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | in-sample | 16-20 | 115 | 40.9% | -0.96 | -1.16 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | held-out | <16 | 69 | 37.7% | -1.02 | -0.70 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | held-out | 16-20 | 75 | 52.0% | -0.12 | -0.05 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | in-sample | <16 | 312 | 54.8% | -1.17 | -0.94 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | in-sample | 16-20 | 110 | 56.4% | -0.13 | -0.12 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | held-out | <16 | 63 | 50.8% | -2.53 | -1.33 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | held-out | 16-20 | 72 | 62.5% | 0.85 | 0.30 |
+| ema_vwap_flip_3m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | in-sample | <16 | 325 | 44.9% | -0.84 | -0.80 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | in-sample | 16-20 | 108 | 40.7% | -0.84 | -0.62 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | held-out | <16 | 67 | 38.8% | -0.60 | -0.37 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | held-out | 16-20 | 69 | 53.6% | 0.79 | 0.41 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | in-sample | <16 | 283 | 59.4% | -1.55 | -1.25 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | in-sample | 16-20 | 99 | 61.6% | 0.07 | 0.05 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | held-out | <16 | 60 | 56.7% | -2.52 | -1.84 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | held-out | 16-20 | 64 | 71.9% | 1.93 | 0.83 |
+| ema_vwap_flip_3m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | none | 10m | in-sample | <16 | 314 | 45.2% | -0.39 | -0.42 |
+| ema_vwap_flip_3m | 2itm | none | 10m | in-sample | 16-20 | 107 | 40.2% | -1.28 | -0.88 |
+| ema_vwap_flip_3m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | none | 10m | held-out | <16 | 65 | 38.5% | -1.17 | -0.60 |
+| ema_vwap_flip_3m | 2itm | none | 10m | held-out | 16-20 | 69 | 55.1% | 0.86 | 0.52 |
+| ema_vwap_flip_3m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | none | 30m | in-sample | <16 | 245 | 62.4% | -0.98 | -0.84 |
+| ema_vwap_flip_3m | 2itm | none | 30m | in-sample | 16-20 | 86 | 59.3% | -3.59 | -1.84 |
+| ema_vwap_flip_3m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| ema_vwap_flip_3m | 2itm | none | 30m | held-out | <16 | 54 | 61.1% | -0.93 | -0.49 |
+| ema_vwap_flip_3m | 2itm | none | 30m | held-out | 16-20 | 56 | 73.2% | 0.73 | 0.26 |
+| ema_vwap_flip_3m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.10 | 10m | in-sample | <16 | 63 | 52.4% | 0.15 | 0.10 |
+| angle_flat_23_1m | atm | 0.10 | 10m | in-sample | 16-20 | 16 | 37.5% | -3.45 | -1.23 |
+| angle_flat_23_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.10 | 10m | held-out | <16 | 15 | 40.0% | -3.61 | -1.09 |
+| angle_flat_23_1m | atm | 0.10 | 10m | held-out | 16-20 | 22 | 27.3% | -5.75 | -3.38 |
+| angle_flat_23_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.10 | 30m | in-sample | <16 | 63 | 52.4% | 0.15 | 0.10 |
+| angle_flat_23_1m | atm | 0.10 | 30m | in-sample | 16-20 | 16 | 37.5% | -3.45 | -1.23 |
+| angle_flat_23_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.10 | 30m | held-out | <16 | 15 | 40.0% | -3.61 | -1.09 |
+| angle_flat_23_1m | atm | 0.10 | 30m | held-out | 16-20 | 22 | 27.3% | -5.75 | -3.38 |
+| angle_flat_23_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.15 | 10m | in-sample | <16 | 63 | 57.1% | -0.79 | -0.45 |
+| angle_flat_23_1m | atm | 0.15 | 10m | in-sample | 16-20 | 16 | 37.5% | -6.55 | -1.95 |
+| angle_flat_23_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.15 | 10m | held-out | <16 | 15 | 46.7% | -3.59 | -1.09 |
+| angle_flat_23_1m | atm | 0.15 | 10m | held-out | 16-20 | 22 | 50.0% | -2.61 | -0.54 |
+| angle_flat_23_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.15 | 30m | in-sample | <16 | 63 | 57.1% | -0.79 | -0.45 |
+| angle_flat_23_1m | atm | 0.15 | 30m | in-sample | 16-20 | 16 | 37.5% | -6.55 | -1.95 |
+| angle_flat_23_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.15 | 30m | held-out | <16 | 15 | 46.7% | -4.58 | -1.19 |
+| angle_flat_23_1m | atm | 0.15 | 30m | held-out | 16-20 | 22 | 50.0% | -2.61 | -0.54 |
+| angle_flat_23_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.20 | 10m | in-sample | <16 | 63 | 65.1% | -0.16 | -0.07 |
+| angle_flat_23_1m | atm | 0.20 | 10m | in-sample | 16-20 | 16 | 37.5% | -9.66 | -2.47 |
+| angle_flat_23_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.20 | 10m | held-out | <16 | 15 | 53.3% | -3.29 | -0.92 |
+| angle_flat_23_1m | atm | 0.20 | 10m | held-out | 16-20 | 22 | 50.0% | -4.34 | -0.83 |
+| angle_flat_23_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.20 | 30m | in-sample | <16 | 63 | 65.1% | -0.16 | -0.07 |
+| angle_flat_23_1m | atm | 0.20 | 30m | in-sample | 16-20 | 16 | 37.5% | -9.66 | -2.47 |
+| angle_flat_23_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.20 | 30m | held-out | <16 | 15 | 53.3% | -4.91 | -1.08 |
+| angle_flat_23_1m | atm | 0.20 | 30m | held-out | 16-20 | 22 | 50.0% | -5.06 | -0.90 |
+| angle_flat_23_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.30 | 10m | in-sample | <16 | 63 | 68.3% | -1.76 | -0.58 |
+| angle_flat_23_1m | atm | 0.30 | 10m | in-sample | 16-20 | 16 | 56.2% | -4.66 | -0.86 |
+| angle_flat_23_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.30 | 10m | held-out | <16 | 15 | 60.0% | -1.49 | -0.57 |
+| angle_flat_23_1m | atm | 0.30 | 10m | held-out | 16-20 | 22 | 54.5% | -4.91 | -0.71 |
+| angle_flat_23_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.30 | 30m | in-sample | <16 | 63 | 69.8% | -1.53 | -0.50 |
+| angle_flat_23_1m | atm | 0.30 | 30m | in-sample | 16-20 | 16 | 68.8% | -1.92 | -0.32 |
+| angle_flat_23_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | 0.30 | 30m | held-out | <16 | 15 | 73.3% | -0.64 | -0.22 |
+| angle_flat_23_1m | atm | 0.30 | 30m | held-out | 16-20 | 22 | 59.1% | -5.55 | -0.74 |
+| angle_flat_23_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | none | 10m | in-sample | <16 | 63 | 69.8% | -3.38 | -0.85 |
+| angle_flat_23_1m | atm | none | 10m | in-sample | 16-20 | 16 | 62.5% | -4.08 | -0.54 |
+| angle_flat_23_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | none | 10m | held-out | <16 | 15 | 60.0% | -1.62 | -0.63 |
+| angle_flat_23_1m | atm | none | 10m | held-out | 16-20 | 22 | 54.5% | -5.89 | -0.86 |
+| angle_flat_23_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | none | 30m | in-sample | <16 | 63 | 76.2% | -4.91 | -0.86 |
+| angle_flat_23_1m | atm | none | 30m | in-sample | 16-20 | 16 | 81.2% | -4.97 | -0.46 |
+| angle_flat_23_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | atm | none | 30m | held-out | <16 | 15 | 80.0% | 1.61 | 0.50 |
+| angle_flat_23_1m | atm | none | 30m | held-out | 16-20 | 22 | 63.6% | -6.64 | -0.95 |
+| angle_flat_23_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | in-sample | <16 | 64 | 54.7% | 2.41 | 1.52 |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 16 | 25.0% | -5.23 | -1.77 |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | held-out | <16 | 15 | 26.7% | -4.12 | -1.97 |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 22 | 36.4% | -2.39 | -0.73 |
+| angle_flat_23_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | in-sample | <16 | 64 | 56.2% | 2.49 | 1.57 |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 16 | 25.0% | -5.23 | -1.77 |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | held-out | <16 | 15 | 26.7% | -4.86 | -2.08 |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 22 | 36.4% | -2.39 | -0.73 |
+| angle_flat_23_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | in-sample | <16 | 63 | 63.5% | 3.15 | 1.61 |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 16 | 31.2% | -5.97 | -1.69 |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | held-out | <16 | 15 | 40.0% | -0.87 | -0.56 |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 22 | 45.5% | -2.36 | -0.60 |
+| angle_flat_23_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | in-sample | <16 | 64 | 65.6% | 3.25 | 1.68 |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 16 | 37.5% | -5.24 | -1.42 |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | held-out | <16 | 15 | 53.3% | -0.57 | -0.21 |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 22 | 45.5% | -2.85 | -0.67 |
+| angle_flat_23_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | in-sample | <16 | 63 | 65.1% | 2.87 | 1.25 |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 15 | 40.0% | -6.05 | -1.15 |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | held-out | <16 | 15 | 46.7% | 2.00 | 0.92 |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 22 | 45.5% | -3.96 | -0.94 |
+| angle_flat_23_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | in-sample | <16 | 64 | 70.3% | 3.32 | 1.32 |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 15 | 46.7% | -5.16 | -0.95 |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | held-out | <16 | 15 | 73.3% | 4.05 | 1.51 |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 22 | 50.0% | -3.97 | -0.89 |
+| angle_flat_23_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | in-sample | <16 | 63 | 65.1% | 1.45 | 0.51 |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 15 | 40.0% | -7.79 | -1.10 |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | held-out | <16 | 15 | 46.7% | 2.24 | 1.06 |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 22 | 45.5% | -4.87 | -1.28 |
+| angle_flat_23_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | in-sample | <16 | 64 | 71.9% | 1.64 | 0.52 |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 15 | 60.0% | -4.50 | -0.58 |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | held-out | <16 | 15 | 73.3% | 2.62 | 0.87 |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 22 | 54.5% | -5.61 | -0.86 |
+| angle_flat_23_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | none | 10m | in-sample | <16 | 63 | 66.7% | 1.55 | 0.49 |
+| angle_flat_23_1m | 2itm | none | 10m | in-sample | 16-20 | 15 | 46.7% | -4.95 | -0.65 |
+| angle_flat_23_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | none | 10m | held-out | <16 | 15 | 46.7% | 2.24 | 1.06 |
+| angle_flat_23_1m | 2itm | none | 10m | held-out | 16-20 | 22 | 50.0% | -3.60 | -0.69 |
+| angle_flat_23_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | none | 30m | in-sample | <16 | 64 | 75.0% | 0.50 | 0.11 |
+| angle_flat_23_1m | 2itm | none | 30m | in-sample | 16-20 | 15 | 80.0% | -3.69 | -0.33 |
+| angle_flat_23_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| angle_flat_23_1m | 2itm | none | 30m | held-out | <16 | 15 | 73.3% | 3.67 | 1.09 |
+| angle_flat_23_1m | 2itm | none | 30m | held-out | 16-20 | 22 | 68.2% | 0.22 | 0.04 |
+| angle_flat_23_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.10 | 10m | in-sample | <16 | 89 | 40.4% | -2.66 | -1.67 |
+| orb_1m | atm | 0.10 | 10m | in-sample | 16-20 | 41 | 36.6% | -2.81 | -1.33 |
+| orb_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.10 | 10m | held-out | <16 | 22 | 36.4% | -3.52 | -1.52 |
+| orb_1m | atm | 0.10 | 10m | held-out | 16-20 | 21 | 23.8% | -5.76 | -2.15 |
+| orb_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.10 | 30m | in-sample | <16 | 89 | 40.4% | -2.66 | -1.67 |
+| orb_1m | atm | 0.10 | 30m | in-sample | 16-20 | 41 | 36.6% | -3.07 | -1.56 |
+| orb_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.10 | 30m | held-out | <16 | 22 | 36.4% | -3.52 | -1.52 |
+| orb_1m | atm | 0.10 | 30m | held-out | 16-20 | 21 | 23.8% | -5.76 | -2.15 |
+| orb_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.15 | 10m | in-sample | <16 | 89 | 51.7% | -2.22 | -1.16 |
+| orb_1m | atm | 0.15 | 10m | in-sample | 16-20 | 41 | 41.5% | -4.38 | -1.63 |
+| orb_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.15 | 10m | held-out | <16 | 22 | 40.9% | -4.88 | -1.88 |
+| orb_1m | atm | 0.15 | 10m | held-out | 16-20 | 21 | 23.8% | -9.54 | -2.96 |
+| orb_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.15 | 30m | in-sample | <16 | 89 | 52.8% | -2.05 | -1.08 |
+| orb_1m | atm | 0.15 | 30m | in-sample | 16-20 | 41 | 41.5% | -4.76 | -1.90 |
+| orb_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.15 | 30m | held-out | <16 | 22 | 40.9% | -5.32 | -1.85 |
+| orb_1m | atm | 0.15 | 30m | held-out | 16-20 | 21 | 23.8% | -9.54 | -2.96 |
+| orb_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.20 | 10m | in-sample | <16 | 89 | 55.1% | -3.30 | -1.48 |
+| orb_1m | atm | 0.20 | 10m | in-sample | 16-20 | 41 | 43.9% | -6.32 | -1.85 |
+| orb_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.20 | 10m | held-out | <16 | 22 | 40.9% | -6.96 | -2.22 |
+| orb_1m | atm | 0.20 | 10m | held-out | 16-20 | 21 | 33.3% | -8.52 | -2.24 |
+| orb_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.20 | 30m | in-sample | <16 | 89 | 56.2% | -3.13 | -1.42 |
+| orb_1m | atm | 0.20 | 30m | in-sample | 16-20 | 41 | 43.9% | -6.59 | -2.00 |
+| orb_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.20 | 30m | held-out | <16 | 22 | 40.9% | -8.26 | -2.45 |
+| orb_1m | atm | 0.20 | 30m | held-out | 16-20 | 21 | 42.9% | -6.70 | -1.51 |
+| orb_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.30 | 10m | in-sample | <16 | 89 | 58.4% | -5.26 | -1.90 |
+| orb_1m | atm | 0.30 | 10m | in-sample | 16-20 | 41 | 48.8% | -7.78 | -2.05 |
+| orb_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.30 | 10m | held-out | <16 | 22 | 40.9% | -11.46 | -2.81 |
+| orb_1m | atm | 0.30 | 10m | held-out | 16-20 | 21 | 38.1% | -9.09 | -1.67 |
+| orb_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.30 | 30m | in-sample | <16 | 89 | 60.7% | -5.48 | -1.91 |
+| orb_1m | atm | 0.30 | 30m | in-sample | 16-20 | 41 | 48.8% | -9.73 | -2.38 |
+| orb_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | 0.30 | 30m | held-out | <16 | 22 | 40.9% | -12.15 | -3.46 |
+| orb_1m | atm | 0.30 | 30m | held-out | 16-20 | 21 | 47.6% | -10.25 | -1.48 |
+| orb_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | none | 10m | in-sample | <16 | 88 | 61.4% | -5.07 | -1.53 |
+| orb_1m | atm | none | 10m | in-sample | 16-20 | 40 | 50.0% | -8.33 | -2.09 |
+| orb_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | none | 10m | held-out | <16 | 20 | 40.0% | -16.23 | -2.09 |
+| orb_1m | atm | none | 10m | held-out | 16-20 | 21 | 38.1% | -11.91 | -1.84 |
+| orb_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | atm | none | 30m | in-sample | <16 | 84 | 70.2% | -3.77 | -0.98 |
+| orb_1m | atm | none | 30m | in-sample | 16-20 | 38 | 57.9% | -10.06 | -1.84 |
+| orb_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | atm | none | 30m | held-out | <16 | 19 | 42.1% | -21.66 | -2.64 |
+| orb_1m | atm | none | 30m | held-out | 16-20 | 18 | 55.6% | -6.01 | -0.92 |
+| orb_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.10 | 10m | in-sample | <16 | 90 | 43.3% | -0.42 | -0.26 |
+| orb_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 41 | 39.0% | -1.41 | -0.54 |
+| orb_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.10 | 10m | held-out | <16 | 22 | 31.8% | -2.92 | -1.39 |
+| orb_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 21 | 23.8% | -5.40 | -2.02 |
+| orb_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.10 | 30m | in-sample | <16 | 90 | 44.4% | -0.58 | -0.35 |
+| orb_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 41 | 39.0% | -1.69 | -0.67 |
+| orb_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.10 | 30m | held-out | <16 | 22 | 31.8% | -3.55 | -1.50 |
+| orb_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 21 | 23.8% | -5.40 | -2.02 |
+| orb_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.15 | 10m | in-sample | <16 | 90 | 48.9% | -1.02 | -0.52 |
+| orb_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 41 | 39.0% | -4.18 | -1.33 |
+| orb_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.15 | 10m | held-out | <16 | 22 | 31.8% | -4.69 | -1.89 |
+| orb_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 21 | 28.6% | -6.11 | -1.83 |
+| orb_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.15 | 30m | in-sample | <16 | 90 | 51.1% | -1.07 | -0.53 |
+| orb_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 41 | 39.0% | -4.65 | -1.50 |
+| orb_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.15 | 30m | held-out | <16 | 22 | 36.4% | -4.44 | -1.53 |
+| orb_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 21 | 38.1% | -4.93 | -1.24 |
+| orb_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.20 | 10m | in-sample | <16 | 90 | 50.0% | -2.41 | -1.08 |
+| orb_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 41 | 43.9% | -4.43 | -1.36 |
+| orb_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.20 | 10m | held-out | <16 | 22 | 31.8% | -7.17 | -2.49 |
+| orb_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 21 | 33.3% | -5.50 | -1.25 |
+| orb_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.20 | 30m | in-sample | <16 | 90 | 54.4% | -2.14 | -0.94 |
+| orb_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 41 | 43.9% | -5.63 | -1.69 |
+| orb_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.20 | 30m | held-out | <16 | 22 | 36.4% | -5.71 | -2.04 |
+| orb_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 21 | 42.9% | -6.35 | -1.13 |
+| orb_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.30 | 10m | in-sample | <16 | 90 | 50.0% | -4.19 | -1.57 |
+| orb_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 40 | 42.5% | -6.36 | -1.71 |
+| orb_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.30 | 10m | held-out | <16 | 22 | 31.8% | -7.51 | -2.01 |
+| orb_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 21 | 33.3% | -8.38 | -1.52 |
+| orb_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.30 | 30m | in-sample | <16 | 90 | 56.7% | -4.22 | -1.50 |
+| orb_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 40 | 47.5% | -7.55 | -1.94 |
+| orb_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | 0.30 | 30m | held-out | <16 | 22 | 40.9% | -7.17 | -1.88 |
+| orb_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 21 | 42.9% | -10.12 | -1.47 |
+| orb_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | none | 10m | in-sample | <16 | 89 | 52.8% | -3.35 | -1.14 |
+| orb_1m | 2itm | none | 10m | in-sample | 16-20 | 40 | 45.0% | -4.88 | -1.47 |
+| orb_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | none | 10m | held-out | <16 | 20 | 30.0% | -12.77 | -1.91 |
+| orb_1m | 2itm | none | 10m | held-out | 16-20 | 21 | 33.3% | -9.85 | -1.66 |
+| orb_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | none | 30m | in-sample | <16 | 85 | 63.5% | -1.85 | -0.58 |
+| orb_1m | 2itm | none | 30m | in-sample | 16-20 | 38 | 55.3% | -6.08 | -1.44 |
+| orb_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| orb_1m | 2itm | none | 30m | held-out | <16 | 19 | 36.8% | -15.47 | -2.07 |
+| orb_1m | 2itm | none | 30m | held-out | 16-20 | 18 | 50.0% | -5.98 | -0.89 |
+| orb_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.10 | 10m | in-sample | <16 | 753 | 34.4% | -5.09 | -10.93 |
+| vwap_reclaim_1m | atm | 0.10 | 10m | in-sample | 16-20 | 220 | 39.1% | -2.81 | -2.53 |
+| vwap_reclaim_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.10 | 10m | held-out | <16 | 149 | 34.2% | -5.50 | -4.63 |
+| vwap_reclaim_1m | atm | 0.10 | 10m | held-out | 16-20 | 135 | 41.5% | -2.33 | -2.28 |
+| vwap_reclaim_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.10 | 30m | in-sample | <16 | 752 | 34.4% | -5.08 | -10.88 |
+| vwap_reclaim_1m | atm | 0.10 | 30m | in-sample | 16-20 | 215 | 41.4% | -2.70 | -2.38 |
+| vwap_reclaim_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.10 | 30m | held-out | <16 | 149 | 34.2% | -5.50 | -4.63 |
+| vwap_reclaim_1m | atm | 0.10 | 30m | held-out | 16-20 | 135 | 41.5% | -2.33 | -2.28 |
+| vwap_reclaim_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.15 | 10m | in-sample | <16 | 612 | 42.6% | -5.51 | -8.48 |
+| vwap_reclaim_1m | atm | 0.15 | 10m | in-sample | 16-20 | 184 | 45.1% | -3.38 | -3.66 |
+| vwap_reclaim_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.15 | 10m | held-out | <16 | 124 | 41.9% | -6.10 | -4.28 |
+| vwap_reclaim_1m | atm | 0.15 | 10m | held-out | 16-20 | 109 | 54.1% | -1.51 | -0.93 |
+| vwap_reclaim_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.15 | 30m | in-sample | <16 | 608 | 43.8% | -5.45 | -7.89 |
+| vwap_reclaim_1m | atm | 0.15 | 30m | in-sample | 16-20 | 179 | 49.7% | -2.98 | -2.81 |
+| vwap_reclaim_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.15 | 30m | held-out | <16 | 124 | 44.4% | -5.68 | -3.73 |
+| vwap_reclaim_1m | atm | 0.15 | 30m | held-out | 16-20 | 109 | 54.1% | -1.51 | -0.93 |
+| vwap_reclaim_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.20 | 10m | in-sample | <16 | 518 | 46.9% | -6.25 | -9.94 |
+| vwap_reclaim_1m | atm | 0.20 | 10m | in-sample | 16-20 | 153 | 51.6% | -2.79 | -2.04 |
+| vwap_reclaim_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.20 | 10m | held-out | <16 | 105 | 45.7% | -7.03 | -5.27 |
+| vwap_reclaim_1m | atm | 0.20 | 10m | held-out | 16-20 | 95 | 56.8% | -2.78 | -1.48 |
+| vwap_reclaim_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.20 | 30m | in-sample | <16 | 507 | 49.5% | -6.18 | -9.43 |
+| vwap_reclaim_1m | atm | 0.20 | 30m | in-sample | 16-20 | 147 | 58.5% | -2.29 | -1.33 |
+| vwap_reclaim_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.20 | 30m | held-out | <16 | 104 | 51.0% | -6.30 | -4.53 |
+| vwap_reclaim_1m | atm | 0.20 | 30m | held-out | 16-20 | 94 | 58.5% | -2.36 | -1.28 |
+| vwap_reclaim_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.30 | 10m | in-sample | <16 | 432 | 52.1% | -6.69 | -9.60 |
+| vwap_reclaim_1m | atm | 0.30 | 10m | in-sample | 16-20 | 134 | 51.5% | -5.16 | -2.45 |
+| vwap_reclaim_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.30 | 10m | held-out | <16 | 83 | 47.0% | -9.06 | -3.93 |
+| vwap_reclaim_1m | atm | 0.30 | 10m | held-out | 16-20 | 79 | 62.0% | -3.66 | -1.55 |
+| vwap_reclaim_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.30 | 30m | in-sample | <16 | 386 | 59.8% | -6.35 | -7.04 |
+| vwap_reclaim_1m | atm | 0.30 | 30m | in-sample | 16-20 | 122 | 59.0% | -5.93 | -2.17 |
+| vwap_reclaim_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | 0.30 | 30m | held-out | <16 | 73 | 54.8% | -8.65 | -3.79 |
+| vwap_reclaim_1m | atm | 0.30 | 30m | held-out | 16-20 | 74 | 66.2% | -1.96 | -1.18 |
+| vwap_reclaim_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | none | 10m | in-sample | <16 | 401 | 53.9% | -6.49 | -8.18 |
+| vwap_reclaim_1m | atm | none | 10m | in-sample | 16-20 | 126 | 53.2% | -5.65 | -3.29 |
+| vwap_reclaim_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | none | 10m | held-out | <16 | 80 | 50.0% | -10.54 | -3.58 |
+| vwap_reclaim_1m | atm | none | 10m | held-out | 16-20 | 76 | 61.8% | -4.10 | -1.70 |
+| vwap_reclaim_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | none | 30m | in-sample | <16 | 299 | 69.6% | -5.52 | -4.31 |
+| vwap_reclaim_1m | atm | none | 30m | in-sample | 16-20 | 101 | 68.3% | -8.81 | -3.72 |
+| vwap_reclaim_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | atm | none | 30m | held-out | <16 | 57 | 61.4% | -11.88 | -2.56 |
+| vwap_reclaim_1m | atm | none | 30m | held-out | 16-20 | 61 | 70.5% | -3.13 | -1.18 |
+| vwap_reclaim_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | in-sample | <16 | 545 | 32.1% | -2.35 | -4.95 |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 176 | 34.7% | -1.52 | -2.01 |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | held-out | <16 | 107 | 28.0% | -2.64 | -1.64 |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 107 | 49.5% | 1.05 | 0.87 |
+| vwap_reclaim_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | in-sample | <16 | 523 | 35.4% | -2.79 | -5.46 |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 168 | 40.5% | -1.18 | -1.30 |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | held-out | <16 | 104 | 37.5% | -2.06 | -1.05 |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 105 | 49.5% | 0.88 | 0.67 |
+| vwap_reclaim_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | in-sample | <16 | 438 | 34.9% | -3.08 | -4.87 |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 143 | 41.3% | -1.38 | -1.48 |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | held-out | <16 | 86 | 32.6% | -2.48 | -1.30 |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 86 | 55.8% | 0.77 | 0.43 |
+| vwap_reclaim_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | in-sample | <16 | 396 | 42.7% | -3.56 | -5.49 |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 131 | 49.6% | -1.08 | -0.90 |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | held-out | <16 | 80 | 47.5% | -1.78 | -0.72 |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 85 | 56.5% | 0.44 | 0.30 |
+| vwap_reclaim_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | in-sample | <16 | 388 | 35.6% | -3.53 | -5.21 |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 132 | 43.9% | -1.97 | -1.49 |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | held-out | <16 | 78 | 30.8% | -3.37 | -1.86 |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 76 | 59.2% | 0.54 | 0.29 |
+| vwap_reclaim_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | in-sample | <16 | 323 | 48.3% | -3.62 | -4.60 |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 120 | 54.2% | -1.66 | -1.04 |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | held-out | <16 | 66 | 50.0% | -2.40 | -0.97 |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 71 | 66.2% | 2.03 | 1.95 |
+| vwap_reclaim_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | in-sample | <16 | 371 | 37.5% | -3.39 | -3.99 |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 119 | 42.9% | -2.59 | -1.86 |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | held-out | <16 | 76 | 30.3% | -4.85 | -1.80 |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 72 | 59.7% | 0.43 | 0.21 |
+| vwap_reclaim_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | in-sample | <16 | 276 | 52.9% | -4.04 | -3.77 |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 99 | 57.6% | -3.22 | -1.91 |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | held-out | <16 | 60 | 51.7% | -4.67 | -1.70 |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 59 | 66.1% | -0.20 | -0.10 |
+| vwap_reclaim_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | none | 10m | in-sample | <16 | 365 | 37.8% | -2.82 | -3.71 |
+| vwap_reclaim_1m | 2itm | none | 10m | in-sample | 16-20 | 117 | 42.7% | -3.01 | -2.19 |
+| vwap_reclaim_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | none | 10m | held-out | <16 | 74 | 31.1% | -5.51 | -1.94 |
+| vwap_reclaim_1m | 2itm | none | 10m | held-out | 16-20 | 72 | 59.7% | 0.36 | 0.18 |
+| vwap_reclaim_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | none | 30m | in-sample | <16 | 255 | 57.6% | -2.03 | -1.53 |
+| vwap_reclaim_1m | 2itm | none | 30m | in-sample | 16-20 | 91 | 59.3% | -6.91 | -4.14 |
+| vwap_reclaim_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vwap_reclaim_1m | 2itm | none | 30m | held-out | <16 | 52 | 51.9% | -7.58 | -1.60 |
+| vwap_reclaim_1m | 2itm | none | 30m | held-out | 16-20 | 53 | 69.8% | 0.51 | 0.22 |
+| vwap_reclaim_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.10 | 10m | in-sample | <16 | 612 | 34.0% | -4.02 | -8.34 |
+| mom5_1m | atm | 0.10 | 10m | in-sample | 16-20 | 301 | 34.2% | -3.51 | -5.44 |
+| mom5_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.10 | 10m | held-out | <16 | 128 | 34.4% | -4.23 | -7.29 |
+| mom5_1m | atm | 0.10 | 10m | held-out | 16-20 | 234 | 40.2% | -2.17 | -3.44 |
+| mom5_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.10 | 30m | in-sample | <16 | 612 | 34.6% | -4.05 | -8.20 |
+| mom5_1m | atm | 0.10 | 30m | in-sample | 16-20 | 301 | 34.6% | -3.60 | -5.55 |
+| mom5_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.10 | 30m | held-out | <16 | 128 | 34.4% | -4.23 | -7.29 |
+| mom5_1m | atm | 0.10 | 30m | held-out | 16-20 | 234 | 40.6% | -2.11 | -3.25 |
+| mom5_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.15 | 10m | in-sample | <16 | 612 | 42.8% | -4.32 | -7.33 |
+| mom5_1m | atm | 0.15 | 10m | in-sample | 16-20 | 301 | 42.2% | -4.03 | -4.77 |
+| mom5_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.15 | 10m | held-out | <16 | 128 | 42.2% | -5.11 | -4.65 |
+| mom5_1m | atm | 0.15 | 10m | held-out | 16-20 | 234 | 49.6% | -1.80 | -2.35 |
+| mom5_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.15 | 30m | in-sample | <16 | 611 | 44.5% | -4.35 | -7.22 |
+| mom5_1m | atm | 0.15 | 30m | in-sample | 16-20 | 300 | 43.0% | -4.24 | -5.03 |
+| mom5_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.15 | 30m | held-out | <16 | 128 | 42.2% | -5.17 | -4.68 |
+| mom5_1m | atm | 0.15 | 30m | held-out | 16-20 | 233 | 51.1% | -1.94 | -2.47 |
+| mom5_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.20 | 10m | in-sample | <16 | 611 | 47.3% | -4.95 | -7.32 |
+| mom5_1m | atm | 0.20 | 10m | in-sample | 16-20 | 300 | 47.0% | -4.79 | -4.21 |
+| mom5_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.20 | 10m | held-out | <16 | 128 | 48.4% | -5.76 | -4.44 |
+| mom5_1m | atm | 0.20 | 10m | held-out | 16-20 | 234 | 55.1% | -1.95 | -1.82 |
+| mom5_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.20 | 30m | in-sample | <16 | 610 | 50.0% | -5.16 | -7.58 |
+| mom5_1m | atm | 0.20 | 30m | in-sample | 16-20 | 297 | 48.8% | -4.86 | -3.89 |
+| mom5_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.20 | 30m | held-out | <16 | 128 | 48.4% | -5.86 | -4.43 |
+| mom5_1m | atm | 0.20 | 30m | held-out | 16-20 | 232 | 56.5% | -2.32 | -1.87 |
+| mom5_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.30 | 10m | in-sample | <16 | 608 | 53.5% | -4.83 | -6.32 |
+| mom5_1m | atm | 0.30 | 10m | in-sample | 16-20 | 297 | 54.9% | -3.95 | -3.95 |
+| mom5_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.30 | 10m | held-out | <16 | 127 | 52.0% | -7.05 | -4.51 |
+| mom5_1m | atm | 0.30 | 10m | held-out | 16-20 | 231 | 60.6% | -1.61 | -1.68 |
+| mom5_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.30 | 30m | in-sample | <16 | 593 | 60.4% | -5.30 | -6.43 |
+| mom5_1m | atm | 0.30 | 30m | in-sample | 16-20 | 284 | 60.6% | -4.26 | -3.10 |
+| mom5_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | 0.30 | 30m | held-out | <16 | 124 | 54.8% | -7.86 | -4.33 |
+| mom5_1m | atm | 0.30 | 30m | held-out | 16-20 | 218 | 67.0% | -1.74 | -1.06 |
+| mom5_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | none | 10m | in-sample | <16 | 578 | 56.7% | -3.83 | -5.08 |
+| mom5_1m | atm | none | 10m | in-sample | 16-20 | 279 | 56.3% | -4.50 | -4.66 |
+| mom5_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | none | 10m | held-out | <16 | 124 | 54.0% | -6.91 | -4.46 |
+| mom5_1m | atm | none | 10m | held-out | 16-20 | 213 | 62.0% | -2.44 | -2.02 |
+| mom5_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | atm | none | 30m | in-sample | <16 | 459 | 68.0% | -5.53 | -5.09 |
+| mom5_1m | atm | none | 30m | in-sample | 16-20 | 219 | 66.2% | -5.89 | -2.73 |
+| mom5_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | atm | none | 30m | held-out | <16 | 93 | 59.1% | -13.72 | -7.65 |
+| mom5_1m | atm | none | 30m | held-out | 16-20 | 170 | 68.8% | -4.55 | -1.48 |
+| mom5_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.10 | 10m | in-sample | <16 | 610 | 33.9% | -2.34 | -4.69 |
+| mom5_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 301 | 36.2% | -1.67 | -2.51 |
+| mom5_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.10 | 10m | held-out | <16 | 128 | 29.7% | -3.35 | -13.78 |
+| mom5_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 234 | 39.3% | -1.00 | -2.28 |
+| mom5_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.10 | 30m | in-sample | <16 | 610 | 36.2% | -2.51 | -4.71 |
+| mom5_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 301 | 37.9% | -1.94 | -2.83 |
+| mom5_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.10 | 30m | held-out | <16 | 128 | 32.8% | -3.32 | -10.09 |
+| mom5_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 233 | 42.5% | -0.86 | -1.97 |
+| mom5_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.15 | 10m | in-sample | <16 | 608 | 38.8% | -2.90 | -4.25 |
+| mom5_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 300 | 39.3% | -3.15 | -3.42 |
+| mom5_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.15 | 10m | held-out | <16 | 127 | 33.9% | -4.85 | -10.35 |
+| mom5_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 234 | 44.9% | -1.45 | -2.05 |
+| mom5_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.15 | 30m | in-sample | <16 | 604 | 45.5% | -2.73 | -3.66 |
+| mom5_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 298 | 42.6% | -3.45 | -3.78 |
+| mom5_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.15 | 30m | held-out | <16 | 127 | 38.6% | -4.94 | -7.63 |
+| mom5_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 233 | 49.4% | -1.52 | -1.60 |
+| mom5_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.20 | 10m | in-sample | <16 | 605 | 42.5% | -2.99 | -3.93 |
+| mom5_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 299 | 45.5% | -2.55 | -3.13 |
+| mom5_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.20 | 10m | held-out | <16 | 126 | 35.7% | -5.12 | -7.55 |
+| mom5_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 232 | 50.0% | -1.02 | -1.73 |
+| mom5_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.20 | 30m | in-sample | <16 | 589 | 53.1% | -2.49 | -2.93 |
+| mom5_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 290 | 50.7% | -3.16 | -3.58 |
+| mom5_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.20 | 30m | held-out | <16 | 124 | 43.5% | -5.80 | -7.10 |
+| mom5_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 227 | 57.3% | -1.26 | -1.20 |
+| mom5_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.30 | 10m | in-sample | <16 | 596 | 45.5% | -2.66 | -3.27 |
+| mom5_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 291 | 49.5% | -2.25 | -2.92 |
+| mom5_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.30 | 10m | held-out | <16 | 125 | 36.8% | -5.30 | -5.99 |
+| mom5_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 222 | 51.4% | -1.54 | -1.90 |
+| mom5_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.30 | 30m | in-sample | <16 | 551 | 59.3% | -3.11 | -3.29 |
+| mom5_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 265 | 60.0% | -2.35 | -2.76 |
+| mom5_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | 0.30 | 30m | held-out | <16 | 112 | 51.8% | -6.07 | -5.64 |
+| mom5_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 199 | 62.8% | -1.84 | -1.17 |
+| mom5_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | none | 10m | in-sample | <16 | 568 | 45.8% | -2.69 | -3.21 |
+| mom5_1m | 2itm | none | 10m | in-sample | 16-20 | 276 | 50.0% | -2.19 | -3.03 |
+| mom5_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | none | 10m | held-out | <16 | 121 | 36.4% | -5.52 | -6.57 |
+| mom5_1m | 2itm | none | 10m | held-out | 16-20 | 212 | 51.4% | -1.86 | -1.75 |
+| mom5_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | none | 30m | in-sample | <16 | 444 | 62.8% | -2.57 | -2.29 |
+| mom5_1m | 2itm | none | 30m | in-sample | 16-20 | 212 | 61.8% | -3.40 | -2.18 |
+| mom5_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| mom5_1m | 2itm | none | 30m | held-out | <16 | 90 | 53.3% | -9.54 | -9.43 |
+| mom5_1m | 2itm | none | 30m | held-out | 16-20 | 164 | 63.4% | -3.33 | -1.50 |
+| mom5_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.10 | 10m | in-sample | <16 | 141 | 39.0% | -3.57 | -4.29 |
+| diamond_tuned_1m | atm | 0.10 | 10m | in-sample | 16-20 | 64 | 43.8% | -1.83 | -1.24 |
+| diamond_tuned_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.10 | 10m | held-out | <16 | 33 | 36.4% | -4.76 | -4.62 |
+| diamond_tuned_1m | atm | 0.10 | 10m | held-out | 16-20 | 23 | 39.1% | -2.71 | -1.37 |
+| diamond_tuned_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.10 | 30m | in-sample | <16 | 141 | 39.7% | -3.56 | -4.27 |
+| diamond_tuned_1m | atm | 0.10 | 30m | in-sample | 16-20 | 64 | 43.8% | -2.11 | -1.34 |
+| diamond_tuned_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.10 | 30m | held-out | <16 | 33 | 36.4% | -4.76 | -4.62 |
+| diamond_tuned_1m | atm | 0.10 | 30m | held-out | 16-20 | 23 | 39.1% | -2.71 | -1.37 |
+| diamond_tuned_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.15 | 10m | in-sample | <16 | 141 | 50.4% | -2.87 | -2.52 |
+| diamond_tuned_1m | atm | 0.15 | 10m | in-sample | 16-20 | 62 | 51.6% | -1.71 | -0.98 |
+| diamond_tuned_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.15 | 10m | held-out | <16 | 32 | 40.6% | -4.41 | -2.61 |
+| diamond_tuned_1m | atm | 0.15 | 10m | held-out | 16-20 | 23 | 60.9% | 1.63 | 0.83 |
+| diamond_tuned_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.15 | 30m | in-sample | <16 | 141 | 52.5% | -2.74 | -2.30 |
+| diamond_tuned_1m | atm | 0.15 | 30m | in-sample | 16-20 | 62 | 51.6% | -2.16 | -1.17 |
+| diamond_tuned_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.15 | 30m | held-out | <16 | 32 | 53.1% | -2.83 | -1.56 |
+| diamond_tuned_1m | atm | 0.15 | 30m | held-out | 16-20 | 23 | 65.2% | 2.04 | 0.78 |
+| diamond_tuned_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.20 | 10m | in-sample | <16 | 140 | 55.7% | -2.47 | -1.72 |
+| diamond_tuned_1m | atm | 0.20 | 10m | in-sample | 16-20 | 62 | 53.2% | -2.15 | -1.02 |
+| diamond_tuned_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.20 | 10m | held-out | <16 | 31 | 45.2% | -2.14 | -0.94 |
+| diamond_tuned_1m | atm | 0.20 | 10m | held-out | 16-20 | 23 | 69.6% | 3.15 | 1.19 |
+| diamond_tuned_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.20 | 30m | in-sample | <16 | 140 | 60.0% | -2.50 | -1.72 |
+| diamond_tuned_1m | atm | 0.20 | 30m | in-sample | 16-20 | 62 | 56.5% | -2.72 | -1.16 |
+| diamond_tuned_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.20 | 30m | held-out | <16 | 31 | 64.5% | -1.17 | -0.49 |
+| diamond_tuned_1m | atm | 0.20 | 30m | held-out | 16-20 | 23 | 73.9% | 3.34 | 1.07 |
+| diamond_tuned_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.30 | 10m | in-sample | <16 | 139 | 58.3% | -2.57 | -1.59 |
+| diamond_tuned_1m | atm | 0.30 | 10m | in-sample | 16-20 | 61 | 55.7% | -1.91 | -0.94 |
+| diamond_tuned_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.30 | 10m | held-out | <16 | 30 | 46.7% | -2.28 | -0.85 |
+| diamond_tuned_1m | atm | 0.30 | 10m | held-out | 16-20 | 23 | 73.9% | 4.17 | 2.09 |
+| diamond_tuned_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.30 | 30m | in-sample | <16 | 137 | 65.0% | -3.92 | -2.11 |
+| diamond_tuned_1m | atm | 0.30 | 30m | in-sample | 16-20 | 61 | 67.2% | -1.91 | -0.66 |
+| diamond_tuned_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | 0.30 | 30m | held-out | <16 | 30 | 70.0% | -1.44 | -0.57 |
+| diamond_tuned_1m | atm | 0.30 | 30m | held-out | 16-20 | 23 | 78.3% | 2.87 | 0.88 |
+| diamond_tuned_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | none | 10m | in-sample | <16 | 138 | 58.7% | -3.05 | -1.72 |
+| diamond_tuned_1m | atm | none | 10m | in-sample | 16-20 | 60 | 58.3% | 0.05 | 0.03 |
+| diamond_tuned_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | none | 10m | held-out | <16 | 29 | 48.3% | -0.76 | -0.37 |
+| diamond_tuned_1m | atm | none | 10m | held-out | 16-20 | 23 | 73.9% | 3.55 | 1.65 |
+| diamond_tuned_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | none | 30m | in-sample | <16 | 132 | 68.2% | -5.03 | -2.09 |
+| diamond_tuned_1m | atm | none | 30m | in-sample | 16-20 | 59 | 74.6% | 1.29 | 0.54 |
+| diamond_tuned_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | atm | none | 30m | held-out | <16 | 29 | 79.3% | -0.90 | -0.23 |
+| diamond_tuned_1m | atm | none | 30m | held-out | 16-20 | 21 | 76.2% | 2.07 | 0.52 |
+| diamond_tuned_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | in-sample | <16 | 137 | 38.0% | -0.90 | -0.96 |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 63 | 22.2% | -3.82 | -2.90 |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | held-out | <16 | 30 | 23.3% | -1.68 | -1.18 |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 23 | 56.5% | 3.05 | 1.85 |
+| diamond_tuned_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | in-sample | <16 | 138 | 42.0% | -0.87 | -0.93 |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 62 | 27.4% | -4.36 | -3.15 |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | held-out | <16 | 30 | 36.7% | -2.42 | -1.23 |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 23 | 60.9% | 3.60 | 1.96 |
+| diamond_tuned_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | in-sample | <16 | 136 | 44.1% | -0.56 | -0.45 |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 61 | 29.5% | -3.91 | -2.56 |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | held-out | <16 | 30 | 26.7% | 1.00 | 0.57 |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 23 | 65.2% | 5.48 | 3.04 |
+| diamond_tuned_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | in-sample | <16 | 136 | 50.0% | -1.04 | -0.77 |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 60 | 38.3% | -4.15 | -2.55 |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | held-out | <16 | 30 | 53.3% | 1.41 | 0.59 |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 23 | 69.6% | 4.33 | 1.75 |
+| diamond_tuned_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | in-sample | <16 | 136 | 45.6% | -0.08 | -0.06 |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 61 | 31.1% | -3.13 | -2.00 |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | held-out | <16 | 30 | 26.7% | 0.34 | 0.17 |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 23 | 69.6% | 6.13 | 4.00 |
+| diamond_tuned_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | in-sample | <16 | 135 | 54.8% | -1.21 | -0.78 |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 60 | 53.3% | -1.41 | -0.74 |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | held-out | <16 | 30 | 53.3% | -0.24 | -0.09 |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 23 | 73.9% | 5.04 | 2.24 |
+| diamond_tuned_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | in-sample | <16 | 134 | 46.3% | -1.00 | -0.73 |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 59 | 32.2% | -2.79 | -1.38 |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | held-out | <16 | 30 | 26.7% | -0.23 | -0.10 |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 23 | 69.6% | 5.66 | 3.85 |
+| diamond_tuned_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | in-sample | <16 | 133 | 55.6% | -2.83 | -1.52 |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 58 | 58.6% | -0.86 | -0.48 |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | held-out | <16 | 30 | 60.0% | -0.30 | -0.10 |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 23 | 73.9% | 3.34 | 1.27 |
+| diamond_tuned_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | none | 10m | in-sample | <16 | 134 | 46.3% | -0.57 | -0.40 |
+| diamond_tuned_1m | 2itm | none | 10m | in-sample | 16-20 | 59 | 32.2% | -2.41 | -1.23 |
+| diamond_tuned_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | none | 10m | held-out | <16 | 29 | 27.6% | 1.67 | 0.94 |
+| diamond_tuned_1m | 2itm | none | 10m | held-out | 16-20 | 23 | 69.6% | 5.49 | 3.49 |
+| diamond_tuned_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | none | 30m | in-sample | <16 | 129 | 56.6% | -2.40 | -1.08 |
+| diamond_tuned_1m | 2itm | none | 30m | in-sample | 16-20 | 57 | 61.4% | 0.55 | 0.36 |
+| diamond_tuned_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| diamond_tuned_1m | 2itm | none | 30m | held-out | <16 | 29 | 62.1% | -0.30 | -0.10 |
+| diamond_tuned_1m | 2itm | none | 30m | held-out | 16-20 | 21 | 71.4% | 1.50 | 0.40 |
+| diamond_tuned_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.10 | 10m | in-sample | <16 | 151 | 43.0% | -2.59 | -2.65 |
+| vix_unison_1m | atm | 0.10 | 10m | in-sample | 16-20 | 53 | 45.3% | -0.71 | -0.41 |
+| vix_unison_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.10 | 10m | held-out | <16 | 25 | 44.0% | -1.30 | -0.62 |
+| vix_unison_1m | atm | 0.10 | 10m | held-out | 16-20 | 27 | 63.0% | 3.66 | 1.79 |
+| vix_unison_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.10 | 30m | in-sample | <16 | 151 | 43.0% | -2.64 | -2.69 |
+| vix_unison_1m | atm | 0.10 | 30m | in-sample | 16-20 | 53 | 47.2% | -0.57 | -0.32 |
+| vix_unison_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.10 | 30m | held-out | <16 | 25 | 44.0% | -1.75 | -0.77 |
+| vix_unison_1m | atm | 0.10 | 30m | held-out | 16-20 | 27 | 63.0% | 3.66 | 1.79 |
+| vix_unison_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.15 | 10m | in-sample | <16 | 149 | 47.7% | -3.69 | -2.91 |
+| vix_unison_1m | atm | 0.15 | 10m | in-sample | 16-20 | 53 | 54.7% | -0.53 | -0.31 |
+| vix_unison_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.15 | 10m | held-out | <16 | 24 | 45.8% | -2.87 | -1.09 |
+| vix_unison_1m | atm | 0.15 | 10m | held-out | 16-20 | 27 | 66.7% | 2.92 | 0.94 |
+| vix_unison_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.15 | 30m | in-sample | <16 | 148 | 48.0% | -3.93 | -3.29 |
+| vix_unison_1m | atm | 0.15 | 30m | in-sample | 16-20 | 53 | 56.6% | -0.39 | -0.23 |
+| vix_unison_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.15 | 30m | held-out | <16 | 24 | 50.0% | -2.79 | -0.92 |
+| vix_unison_1m | atm | 0.15 | 30m | held-out | 16-20 | 27 | 66.7% | 2.92 | 0.94 |
+| vix_unison_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.20 | 10m | in-sample | <16 | 147 | 54.4% | -3.08 | -2.28 |
+| vix_unison_1m | atm | 0.20 | 10m | in-sample | 16-20 | 53 | 58.5% | -0.82 | -0.54 |
+| vix_unison_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.20 | 10m | held-out | <16 | 23 | 52.2% | -1.05 | -0.35 |
+| vix_unison_1m | atm | 0.20 | 10m | held-out | 16-20 | 27 | 70.4% | 2.55 | 0.69 |
+| vix_unison_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.20 | 30m | in-sample | <16 | 146 | 57.5% | -3.07 | -2.21 |
+| vix_unison_1m | atm | 0.20 | 30m | in-sample | 16-20 | 53 | 60.4% | -1.23 | -0.81 |
+| vix_unison_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.20 | 30m | held-out | <16 | 23 | 60.9% | -1.52 | -0.50 |
+| vix_unison_1m | atm | 0.20 | 30m | held-out | 16-20 | 27 | 70.4% | 2.55 | 0.69 |
+| vix_unison_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.30 | 10m | in-sample | <16 | 142 | 59.2% | -3.01 | -1.86 |
+| vix_unison_1m | atm | 0.30 | 10m | in-sample | 16-20 | 52 | 63.5% | 0.80 | 0.44 |
+| vix_unison_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.30 | 10m | held-out | <16 | 22 | 50.0% | -1.37 | -0.35 |
+| vix_unison_1m | atm | 0.30 | 10m | held-out | 16-20 | 27 | 70.4% | 2.67 | 0.66 |
+| vix_unison_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.30 | 30m | in-sample | <16 | 140 | 66.4% | -3.26 | -1.93 |
+| vix_unison_1m | atm | 0.30 | 30m | in-sample | 16-20 | 51 | 70.6% | -0.15 | -0.07 |
+| vix_unison_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | 0.30 | 30m | held-out | <16 | 22 | 72.7% | 1.43 | 0.31 |
+| vix_unison_1m | atm | 0.30 | 30m | held-out | 16-20 | 27 | 77.8% | 3.09 | 0.73 |
+| vix_unison_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | none | 10m | in-sample | <16 | 137 | 59.9% | -2.73 | -1.63 |
+| vix_unison_1m | atm | none | 10m | in-sample | 16-20 | 52 | 65.4% | 3.70 | 2.40 |
+| vix_unison_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | none | 10m | held-out | <16 | 22 | 50.0% | -2.81 | -0.60 |
+| vix_unison_1m | atm | none | 10m | held-out | 16-20 | 27 | 70.4% | 1.28 | 0.28 |
+| vix_unison_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | none | 30m | in-sample | <16 | 129 | 70.5% | -4.28 | -2.03 |
+| vix_unison_1m | atm | none | 30m | in-sample | 16-20 | 50 | 78.0% | 1.29 | 0.37 |
+| vix_unison_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | atm | none | 30m | held-out | <16 | 22 | 72.7% | -0.71 | -0.12 |
+| vix_unison_1m | atm | none | 30m | held-out | 16-20 | 27 | 77.8% | 0.24 | 0.04 |
+| vix_unison_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.10 | 10m | in-sample | <16 | 146 | 43.2% | 0.34 | 0.31 |
+| vix_unison_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 53 | 41.5% | -0.62 | -0.38 |
+| vix_unison_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.10 | 10m | held-out | <16 | 25 | 40.0% | -0.14 | -0.06 |
+| vix_unison_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 26 | 65.4% | 4.86 | 1.86 |
+| vix_unison_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.10 | 30m | in-sample | <16 | 145 | 47.6% | 0.54 | 0.47 |
+| vix_unison_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 53 | 43.4% | -0.31 | -0.21 |
+| vix_unison_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.10 | 30m | held-out | <16 | 25 | 48.0% | 0.40 | 0.13 |
+| vix_unison_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 26 | 65.4% | 4.86 | 1.86 |
+| vix_unison_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.15 | 10m | in-sample | <16 | 143 | 50.3% | 1.02 | 0.83 |
+| vix_unison_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 53 | 49.1% | -0.47 | -0.29 |
+| vix_unison_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.15 | 10m | held-out | <16 | 24 | 41.7% | -0.02 | -0.01 |
+| vix_unison_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 25 | 64.0% | 2.74 | 0.87 |
+| vix_unison_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.15 | 30m | in-sample | <16 | 141 | 56.7% | 0.89 | 0.70 |
+| vix_unison_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 53 | 50.9% | -0.78 | -0.51 |
+| vix_unison_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.15 | 30m | held-out | <16 | 24 | 62.5% | 2.19 | 0.59 |
+| vix_unison_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 25 | 64.0% | 2.74 | 0.87 |
+| vix_unison_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.20 | 10m | in-sample | <16 | 141 | 51.8% | 0.45 | 0.35 |
+| vix_unison_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 51 | 51.0% | 0.66 | 0.46 |
+| vix_unison_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.20 | 10m | held-out | <16 | 23 | 43.5% | -0.49 | -0.13 |
+| vix_unison_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 25 | 64.0% | 1.19 | 0.32 |
+| vix_unison_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.20 | 30m | in-sample | <16 | 139 | 59.7% | 0.08 | 0.06 |
+| vix_unison_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 49 | 57.1% | -0.59 | -0.32 |
+| vix_unison_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.20 | 30m | held-out | <16 | 23 | 60.9% | 0.84 | 0.19 |
+| vix_unison_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 25 | 64.0% | 0.95 | 0.26 |
+| vix_unison_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.30 | 10m | in-sample | <16 | 138 | 52.9% | 0.42 | 0.32 |
+| vix_unison_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 50 | 50.0% | 2.23 | 1.15 |
+| vix_unison_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.30 | 10m | held-out | <16 | 22 | 40.9% | -1.88 | -0.36 |
+| vix_unison_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 25 | 64.0% | 3.27 | 1.09 |
+| vix_unison_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.30 | 30m | in-sample | <16 | 135 | 65.2% | 0.64 | 0.50 |
+| vix_unison_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 48 | 66.7% | 0.64 | 0.24 |
+| vix_unison_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | 0.30 | 30m | held-out | <16 | 22 | 63.6% | -0.87 | -0.14 |
+| vix_unison_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 25 | 76.0% | 3.84 | 1.34 |
+| vix_unison_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | none | 10m | in-sample | <16 | 136 | 52.9% | 0.32 | 0.22 |
+| vix_unison_1m | 2itm | none | 10m | in-sample | 16-20 | 50 | 50.0% | 3.13 | 1.93 |
+| vix_unison_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | none | 10m | held-out | <16 | 22 | 40.9% | -1.23 | -0.26 |
+| vix_unison_1m | 2itm | none | 10m | held-out | 16-20 | 25 | 64.0% | 2.51 | 0.79 |
+| vix_unison_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | none | 30m | in-sample | <16 | 128 | 67.2% | -0.25 | -0.15 |
+| vix_unison_1m | 2itm | none | 30m | in-sample | 16-20 | 47 | 70.2% | 2.86 | 0.90 |
+| vix_unison_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m | 2itm | none | 30m | held-out | <16 | 22 | 63.6% | -1.41 | -0.22 |
+| vix_unison_1m | 2itm | none | 30m | held-out | 16-20 | 25 | 76.0% | 1.68 | 0.45 |
+| vix_unison_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.10 | 10m | in-sample | <16 | 152 | 34.2% | -4.66 | -4.72 |
+| vix_unison_1m_flip | atm | 0.10 | 10m | in-sample | 16-20 | 53 | 32.1% | -4.48 | -2.55 |
+| vix_unison_1m_flip | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.10 | 10m | held-out | <16 | 25 | 28.0% | -5.70 | -2.69 |
+| vix_unison_1m_flip | atm | 0.10 | 10m | held-out | 16-20 | 27 | 25.9% | -5.78 | -2.75 |
+| vix_unison_1m_flip | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.10 | 30m | in-sample | <16 | 152 | 34.2% | -4.66 | -4.72 |
+| vix_unison_1m_flip | atm | 0.10 | 30m | in-sample | 16-20 | 53 | 32.1% | -4.48 | -2.55 |
+| vix_unison_1m_flip | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.10 | 30m | held-out | <16 | 25 | 28.0% | -5.70 | -2.69 |
+| vix_unison_1m_flip | atm | 0.10 | 30m | held-out | 16-20 | 27 | 25.9% | -5.78 | -2.75 |
+| vix_unison_1m_flip | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.15 | 10m | in-sample | <16 | 150 | 42.0% | -5.01 | -3.97 |
+| vix_unison_1m_flip | atm | 0.15 | 10m | in-sample | 16-20 | 53 | 37.7% | -5.69 | -2.72 |
+| vix_unison_1m_flip | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.15 | 10m | held-out | <16 | 25 | 32.0% | -7.88 | -2.73 |
+| vix_unison_1m_flip | atm | 0.15 | 10m | held-out | 16-20 | 27 | 33.3% | -7.25 | -2.40 |
+| vix_unison_1m_flip | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.15 | 30m | in-sample | <16 | 150 | 43.3% | -5.15 | -3.87 |
+| vix_unison_1m_flip | atm | 0.15 | 30m | in-sample | 16-20 | 53 | 37.7% | -6.17 | -3.17 |
+| vix_unison_1m_flip | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.15 | 30m | held-out | <16 | 25 | 32.0% | -8.08 | -2.75 |
+| vix_unison_1m_flip | atm | 0.15 | 30m | held-out | 16-20 | 27 | 33.3% | -7.25 | -2.40 |
+| vix_unison_1m_flip | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.20 | 10m | in-sample | <16 | 148 | 47.3% | -5.84 | -4.00 |
+| vix_unison_1m_flip | atm | 0.20 | 10m | in-sample | 16-20 | 53 | 45.3% | -5.83 | -2.53 |
+| vix_unison_1m_flip | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.20 | 10m | held-out | <16 | 25 | 36.0% | -8.21 | -2.14 |
+| vix_unison_1m_flip | atm | 0.20 | 10m | held-out | 16-20 | 26 | 42.3% | -7.48 | -2.14 |
+| vix_unison_1m_flip | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.20 | 30m | in-sample | <16 | 147 | 49.7% | -5.72 | -3.82 |
+| vix_unison_1m_flip | atm | 0.20 | 30m | in-sample | 16-20 | 53 | 45.3% | -6.23 | -2.72 |
+| vix_unison_1m_flip | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.20 | 30m | held-out | <16 | 25 | 40.0% | -8.68 | -2.12 |
+| vix_unison_1m_flip | atm | 0.20 | 30m | held-out | 16-20 | 26 | 42.3% | -7.48 | -2.14 |
+| vix_unison_1m_flip | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.30 | 10m | in-sample | <16 | 144 | 53.5% | -6.03 | -3.27 |
+| vix_unison_1m_flip | atm | 0.30 | 10m | in-sample | 16-20 | 50 | 54.0% | -5.94 | -2.10 |
+| vix_unison_1m_flip | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.30 | 10m | held-out | <16 | 25 | 44.0% | -8.30 | -2.12 |
+| vix_unison_1m_flip | atm | 0.30 | 10m | held-out | 16-20 | 24 | 50.0% | -8.42 | -1.82 |
+| vix_unison_1m_flip | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.30 | 30m | in-sample | <16 | 143 | 62.9% | -4.70 | -2.52 |
+| vix_unison_1m_flip | atm | 0.30 | 30m | in-sample | 16-20 | 50 | 58.0% | -5.63 | -2.46 |
+| vix_unison_1m_flip | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | 0.30 | 30m | held-out | <16 | 25 | 48.0% | -11.06 | -2.41 |
+| vix_unison_1m_flip | atm | 0.30 | 30m | held-out | 16-20 | 24 | 50.0% | -9.69 | -2.00 |
+| vix_unison_1m_flip | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | none | 10m | in-sample | <16 | 139 | 52.5% | -7.97 | -3.47 |
+| vix_unison_1m_flip | atm | none | 10m | in-sample | 16-20 | 47 | 51.1% | -7.61 | -1.96 |
+| vix_unison_1m_flip | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | none | 10m | held-out | <16 | 22 | 40.9% | -9.77 | -1.94 |
+| vix_unison_1m_flip | atm | none | 10m | held-out | 16-20 | 24 | 50.0% | -12.84 | -2.08 |
+| vix_unison_1m_flip | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | none | 30m | in-sample | <16 | 134 | 65.7% | -6.59 | -2.63 |
+| vix_unison_1m_flip | atm | none | 30m | in-sample | 16-20 | 46 | 65.2% | -6.20 | -1.53 |
+| vix_unison_1m_flip | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | atm | none | 30m | held-out | <16 | 21 | 52.4% | -20.68 | -1.78 |
+| vix_unison_1m_flip | atm | none | 30m | held-out | 16-20 | 23 | 52.2% | -16.80 | -2.28 |
+| vix_unison_1m_flip | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | in-sample | <16 | 144 | 30.6% | -3.20 | -2.52 |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | in-sample | 16-20 | 53 | 28.3% | -4.25 | -3.10 |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | held-out | <16 | 23 | 21.7% | -4.87 | -1.96 |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | held-out | 16-20 | 27 | 33.3% | -3.11 | -1.22 |
+| vix_unison_1m_flip | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | in-sample | <16 | 143 | 35.0% | -2.98 | -2.28 |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | in-sample | 16-20 | 53 | 28.3% | -4.38 | -3.30 |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | held-out | <16 | 23 | 26.1% | -4.96 | -1.88 |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | held-out | 16-20 | 27 | 33.3% | -3.11 | -1.22 |
+| vix_unison_1m_flip | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | in-sample | <16 | 144 | 36.8% | -4.00 | -2.96 |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | in-sample | 16-20 | 53 | 39.6% | -3.49 | -2.30 |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | held-out | <16 | 23 | 21.7% | -6.35 | -2.24 |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | held-out | 16-20 | 26 | 34.6% | -6.03 | -1.70 |
+| vix_unison_1m_flip | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | in-sample | <16 | 143 | 42.0% | -4.01 | -3.02 |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | in-sample | 16-20 | 53 | 41.5% | -3.79 | -2.59 |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | held-out | <16 | 23 | 30.4% | -6.36 | -1.94 |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | held-out | 16-20 | 26 | 34.6% | -6.03 | -1.70 |
+| vix_unison_1m_flip | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | in-sample | <16 | 141 | 40.4% | -4.08 | -2.74 |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | in-sample | 16-20 | 51 | 47.1% | -3.07 | -1.58 |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | held-out | <16 | 23 | 26.1% | -5.21 | -1.44 |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | held-out | 16-20 | 25 | 48.0% | -4.64 | -1.23 |
+| vix_unison_1m_flip | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | in-sample | <16 | 140 | 48.6% | -3.88 | -2.54 |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | in-sample | 16-20 | 51 | 51.0% | -3.15 | -1.98 |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | held-out | <16 | 23 | 43.5% | -5.06 | -1.05 |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | held-out | 16-20 | 25 | 48.0% | -4.64 | -1.23 |
+| vix_unison_1m_flip | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | in-sample | <16 | 132 | 41.7% | -4.80 | -2.67 |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | in-sample | 16-20 | 46 | 45.7% | -5.46 | -1.89 |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | held-out | <16 | 22 | 22.7% | -7.38 | -1.73 |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | held-out | 16-20 | 24 | 50.0% | -6.17 | -1.42 |
+| vix_unison_1m_flip | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | in-sample | <16 | 130 | 54.6% | -3.88 | -2.03 |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | in-sample | 16-20 | 46 | 58.7% | -3.39 | -1.14 |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | held-out | <16 | 21 | 47.6% | -7.82 | -1.38 |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | held-out | 16-20 | 24 | 50.0% | -8.91 | -1.87 |
+| vix_unison_1m_flip | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | none | 10m | in-sample | <16 | 131 | 41.2% | -5.61 | -2.79 |
+| vix_unison_1m_flip | 2itm | none | 10m | in-sample | 16-20 | 46 | 45.7% | -5.35 | -1.57 |
+| vix_unison_1m_flip | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | none | 10m | held-out | <16 | 21 | 23.8% | -6.01 | -1.61 |
+| vix_unison_1m_flip | 2itm | none | 10m | held-out | 16-20 | 24 | 50.0% | -7.17 | -1.43 |
+| vix_unison_1m_flip | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | none | 30m | in-sample | <16 | 127 | 55.9% | -3.11 | -1.51 |
+| vix_unison_1m_flip | 2itm | none | 30m | in-sample | 16-20 | 45 | 62.2% | -3.28 | -0.97 |
+| vix_unison_1m_flip | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_1m_flip | 2itm | none | 30m | held-out | <16 | 20 | 50.0% | -14.32 | -1.43 |
+| vix_unison_1m_flip | 2itm | none | 30m | held-out | 16-20 | 23 | 52.2% | -10.47 | -1.79 |
+| vix_unison_1m_flip | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.10 | 10m | in-sample | <16 | 50 | 48.0% | -0.68 | -0.41 |
+| vix_unison_3m | atm | 0.10 | 10m | in-sample | 16-20 | 19 | 26.3% | -5.25 | -2.25 |
+| vix_unison_3m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.10 | 10m | held-out | <16 | 10 | 50.0% | -0.23 | -0.05 |
+| vix_unison_3m | atm | 0.10 | 10m | held-out | 16-20 | 18 | 50.0% | 0.42 | 0.44 |
+| vix_unison_3m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.10 | 30m | in-sample | <16 | 50 | 48.0% | -0.68 | -0.41 |
+| vix_unison_3m | atm | 0.10 | 30m | in-sample | 16-20 | 19 | 26.3% | -5.25 | -2.25 |
+| vix_unison_3m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.10 | 30m | held-out | <16 | 10 | 50.0% | -0.23 | -0.05 |
+| vix_unison_3m | atm | 0.10 | 30m | held-out | 16-20 | 18 | 50.0% | 0.42 | 0.44 |
+| vix_unison_3m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.15 | 10m | in-sample | <16 | 50 | 54.0% | -1.43 | -0.71 |
+| vix_unison_3m | atm | 0.15 | 10m | in-sample | 16-20 | 19 | 36.8% | -5.27 | -2.06 |
+| vix_unison_3m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.15 | 10m | held-out | <16 | 10 | 50.0% | -2.71 | -0.52 |
+| vix_unison_3m | atm | 0.15 | 10m | held-out | 16-20 | 18 | 50.0% | -2.07 | -1.80 |
+| vix_unison_3m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.15 | 30m | in-sample | <16 | 50 | 54.0% | -1.43 | -0.71 |
+| vix_unison_3m | atm | 0.15 | 30m | in-sample | 16-20 | 19 | 36.8% | -5.12 | -2.04 |
+| vix_unison_3m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.15 | 30m | held-out | <16 | 10 | 50.0% | -2.71 | -0.52 |
+| vix_unison_3m | atm | 0.15 | 30m | held-out | 16-20 | 18 | 50.0% | -2.07 | -1.80 |
+| vix_unison_3m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.20 | 10m | in-sample | <16 | 50 | 58.0% | -2.19 | -0.84 |
+| vix_unison_3m | atm | 0.20 | 10m | in-sample | 16-20 | 19 | 52.6% | -2.67 | -0.90 |
+| vix_unison_3m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.20 | 10m | held-out | <16 | 10 | 60.0% | -1.59 | -0.36 |
+| vix_unison_3m | atm | 0.20 | 10m | held-out | 16-20 | 18 | 55.6% | -2.62 | -1.38 |
+| vix_unison_3m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.20 | 30m | in-sample | <16 | 50 | 58.0% | -2.26 | -0.87 |
+| vix_unison_3m | atm | 0.20 | 30m | in-sample | 16-20 | 19 | 52.6% | -2.51 | -0.88 |
+| vix_unison_3m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.20 | 30m | held-out | <16 | 10 | 60.0% | -1.71 | -0.38 |
+| vix_unison_3m | atm | 0.20 | 30m | held-out | 16-20 | 18 | 55.6% | -2.62 | -1.38 |
+| vix_unison_3m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.30 | 10m | in-sample | <16 | 50 | 62.0% | -2.17 | -0.84 |
+| vix_unison_3m | atm | 0.30 | 10m | in-sample | 16-20 | 19 | 63.2% | 1.96 | 0.49 |
+| vix_unison_3m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.30 | 10m | held-out | <16 | 10 | 60.0% | -1.18 | -0.27 |
+| vix_unison_3m | atm | 0.30 | 10m | held-out | 16-20 | 18 | 61.1% | -1.66 | -1.45 |
+| vix_unison_3m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.30 | 30m | in-sample | <16 | 50 | 64.0% | -3.74 | -1.43 |
+| vix_unison_3m | atm | 0.30 | 30m | in-sample | 16-20 | 19 | 63.2% | -0.58 | -0.17 |
+| vix_unison_3m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | 0.30 | 30m | held-out | <16 | 9 | 55.6% | -1.13 | -0.21 |
+| vix_unison_3m | atm | 0.30 | 30m | held-out | 16-20 | 17 | 76.5% | 2.32 | 0.75 |
+| vix_unison_3m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | none | 10m | in-sample | <16 | 50 | 62.0% | -1.73 | -0.66 |
+| vix_unison_3m | atm | none | 10m | in-sample | 16-20 | 19 | 68.4% | 4.74 | 1.72 |
+| vix_unison_3m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | none | 10m | held-out | <16 | 10 | 60.0% | -0.72 | -0.17 |
+| vix_unison_3m | atm | none | 10m | held-out | 16-20 | 18 | 61.1% | -2.73 | -1.13 |
+| vix_unison_3m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | none | 30m | in-sample | <16 | 49 | 75.5% | -2.77 | -0.71 |
+| vix_unison_3m | atm | none | 30m | in-sample | 16-20 | 18 | 72.2% | -1.13 | -0.19 |
+| vix_unison_3m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | atm | none | 30m | held-out | <16 | 9 | 55.6% | -3.27 | -0.51 |
+| vix_unison_3m | atm | none | 30m | held-out | 16-20 | 17 | 82.4% | -0.65 | -0.12 |
+| vix_unison_3m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.10 | 10m | in-sample | <16 | 48 | 47.9% | 0.73 | 0.42 |
+| vix_unison_3m | 2itm | 0.10 | 10m | in-sample | 16-20 | 19 | 31.6% | -3.55 | -1.89 |
+| vix_unison_3m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.10 | 10m | held-out | <16 | 10 | 20.0% | -6.46 | -1.46 |
+| vix_unison_3m | 2itm | 0.10 | 10m | held-out | 16-20 | 18 | 38.9% | -1.22 | -0.65 |
+| vix_unison_3m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.10 | 30m | in-sample | <16 | 48 | 50.0% | 0.93 | 0.52 |
+| vix_unison_3m | 2itm | 0.10 | 30m | in-sample | 16-20 | 19 | 31.6% | -3.55 | -1.89 |
+| vix_unison_3m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.10 | 30m | held-out | <16 | 10 | 20.0% | -6.46 | -1.46 |
+| vix_unison_3m | 2itm | 0.10 | 30m | held-out | 16-20 | 18 | 44.4% | -0.35 | -0.21 |
+| vix_unison_3m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.15 | 10m | in-sample | <16 | 48 | 54.2% | 0.99 | 0.49 |
+| vix_unison_3m | 2itm | 0.15 | 10m | in-sample | 16-20 | 19 | 42.1% | -1.74 | -0.91 |
+| vix_unison_3m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.15 | 10m | held-out | <16 | 10 | 30.0% | -1.96 | -0.51 |
+| vix_unison_3m | 2itm | 0.15 | 10m | held-out | 16-20 | 18 | 38.9% | -3.96 | -1.83 |
+| vix_unison_3m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.15 | 30m | in-sample | <16 | 48 | 56.2% | 0.49 | 0.24 |
+| vix_unison_3m | 2itm | 0.15 | 30m | in-sample | 16-20 | 19 | 47.4% | -1.55 | -0.77 |
+| vix_unison_3m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.15 | 30m | held-out | <16 | 9 | 44.4% | -3.18 | -0.58 |
+| vix_unison_3m | 2itm | 0.15 | 30m | held-out | 16-20 | 18 | 44.4% | -3.10 | -1.55 |
+| vix_unison_3m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.20 | 10m | in-sample | <16 | 48 | 56.2% | 0.07 | 0.03 |
+| vix_unison_3m | 2itm | 0.20 | 10m | in-sample | 16-20 | 19 | 52.6% | 1.05 | 0.27 |
+| vix_unison_3m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.20 | 10m | held-out | <16 | 10 | 30.0% | -2.42 | -0.63 |
+| vix_unison_3m | 2itm | 0.20 | 10m | held-out | 16-20 | 18 | 44.4% | -2.96 | -1.56 |
+| vix_unison_3m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.20 | 30m | in-sample | <16 | 48 | 58.3% | -0.28 | -0.12 |
+| vix_unison_3m | 2itm | 0.20 | 30m | in-sample | 16-20 | 19 | 57.9% | 0.83 | 0.21 |
+| vix_unison_3m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.20 | 30m | held-out | <16 | 9 | 44.4% | -5.53 | -0.90 |
+| vix_unison_3m | 2itm | 0.20 | 30m | held-out | 16-20 | 17 | 64.7% | 1.18 | 0.41 |
+| vix_unison_3m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.30 | 10m | in-sample | <16 | 48 | 56.2% | -0.40 | -0.17 |
+| vix_unison_3m | 2itm | 0.30 | 10m | in-sample | 16-20 | 19 | 57.9% | 3.64 | 1.15 |
+| vix_unison_3m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.30 | 10m | held-out | <16 | 10 | 30.0% | -2.06 | -0.54 |
+| vix_unison_3m | 2itm | 0.30 | 10m | held-out | 16-20 | 18 | 50.0% | -2.37 | -1.38 |
+| vix_unison_3m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.30 | 30m | in-sample | <16 | 48 | 62.5% | -1.12 | -0.43 |
+| vix_unison_3m | 2itm | 0.30 | 30m | in-sample | 16-20 | 19 | 68.4% | 2.39 | 0.90 |
+| vix_unison_3m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | 0.30 | 30m | held-out | <16 | 9 | 44.4% | -9.95 | -1.34 |
+| vix_unison_3m | 2itm | 0.30 | 30m | held-out | 16-20 | 17 | 76.5% | 2.92 | 0.95 |
+| vix_unison_3m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | none | 10m | in-sample | <16 | 48 | 56.2% | 0.29 | 0.12 |
+| vix_unison_3m | 2itm | none | 10m | in-sample | 16-20 | 19 | 63.2% | 5.82 | 2.48 |
+| vix_unison_3m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | none | 10m | held-out | <16 | 10 | 30.0% | -2.06 | -0.54 |
+| vix_unison_3m | 2itm | none | 10m | held-out | 16-20 | 18 | 50.0% | -3.43 | -1.48 |
+| vix_unison_3m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | none | 30m | in-sample | <16 | 46 | 69.6% | 0.61 | 0.15 |
+| vix_unison_3m | 2itm | none | 30m | in-sample | 16-20 | 18 | 72.2% | 0.68 | 0.12 |
+| vix_unison_3m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m | 2itm | none | 30m | held-out | <16 | 9 | 44.4% | -10.01 | -1.36 |
+| vix_unison_3m | 2itm | none | 30m | held-out | 16-20 | 17 | 82.4% | 1.13 | 0.21 |
+| vix_unison_3m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.10 | 10m | in-sample | <16 | 49 | 32.7% | -4.67 | -2.78 |
+| vix_unison_3m_flip | atm | 0.10 | 10m | in-sample | 16-20 | 19 | 52.6% | 1.92 | 0.85 |
+| vix_unison_3m_flip | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.10 | 10m | held-out | <16 | 10 | 20.0% | -5.53 | -2.06 |
+| vix_unison_3m_flip | atm | 0.10 | 10m | held-out | 16-20 | 18 | 44.4% | -1.00 | -0.47 |
+| vix_unison_3m_flip | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.10 | 30m | in-sample | <16 | 49 | 32.7% | -4.67 | -2.78 |
+| vix_unison_3m_flip | atm | 0.10 | 30m | in-sample | 16-20 | 19 | 57.9% | 2.58 | 1.02 |
+| vix_unison_3m_flip | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.10 | 30m | held-out | <16 | 10 | 20.0% | -7.52 | -2.40 |
+| vix_unison_3m_flip | atm | 0.10 | 30m | held-out | 16-20 | 18 | 44.4% | -1.00 | -0.47 |
+| vix_unison_3m_flip | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.15 | 10m | in-sample | <16 | 49 | 40.8% | -5.68 | -2.80 |
+| vix_unison_3m_flip | atm | 0.15 | 10m | in-sample | 16-20 | 19 | 52.6% | -0.17 | -0.06 |
+| vix_unison_3m_flip | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.15 | 10m | held-out | <16 | 10 | 30.0% | -6.02 | -1.53 |
+| vix_unison_3m_flip | atm | 0.15 | 10m | held-out | 16-20 | 18 | 50.0% | -2.11 | -0.67 |
+| vix_unison_3m_flip | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.15 | 30m | in-sample | <16 | 49 | 40.8% | -5.68 | -2.80 |
+| vix_unison_3m_flip | atm | 0.15 | 30m | in-sample | 16-20 | 19 | 57.9% | 0.48 | 0.16 |
+| vix_unison_3m_flip | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.15 | 30m | held-out | <16 | 10 | 30.0% | -8.51 | -2.63 |
+| vix_unison_3m_flip | atm | 0.15 | 30m | held-out | 16-20 | 18 | 50.0% | -2.11 | -0.67 |
+| vix_unison_3m_flip | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.20 | 10m | in-sample | <16 | 49 | 44.9% | -5.98 | -2.70 |
+| vix_unison_3m_flip | atm | 0.20 | 10m | in-sample | 16-20 | 19 | 57.9% | 0.12 | 0.04 |
+| vix_unison_3m_flip | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.20 | 10m | held-out | <16 | 10 | 30.0% | -6.12 | -1.27 |
+| vix_unison_3m_flip | atm | 0.20 | 10m | held-out | 16-20 | 18 | 61.1% | 0.57 | 0.33 |
+| vix_unison_3m_flip | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.20 | 30m | in-sample | <16 | 49 | 46.9% | -6.29 | -2.67 |
+| vix_unison_3m_flip | atm | 0.20 | 30m | in-sample | 16-20 | 19 | 68.4% | 2.05 | 0.78 |
+| vix_unison_3m_flip | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.20 | 30m | held-out | <16 | 10 | 40.0% | -8.51 | -1.92 |
+| vix_unison_3m_flip | atm | 0.20 | 30m | held-out | 16-20 | 18 | 66.7% | 1.20 | 0.73 |
+| vix_unison_3m_flip | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.30 | 10m | in-sample | <16 | 48 | 50.0% | -5.96 | -2.38 |
+| vix_unison_3m_flip | atm | 0.30 | 10m | in-sample | 16-20 | 19 | 63.2% | 0.63 | 0.22 |
+| vix_unison_3m_flip | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.30 | 10m | held-out | <16 | 10 | 30.0% | -9.05 | -1.43 |
+| vix_unison_3m_flip | atm | 0.30 | 10m | held-out | 16-20 | 18 | 61.1% | -0.51 | -0.26 |
+| vix_unison_3m_flip | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.30 | 30m | in-sample | <16 | 48 | 56.2% | -6.45 | -2.19 |
+| vix_unison_3m_flip | atm | 0.30 | 30m | in-sample | 16-20 | 19 | 73.7% | 1.26 | 0.62 |
+| vix_unison_3m_flip | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | 0.30 | 30m | held-out | <16 | 9 | 44.4% | -9.57 | -1.33 |
+| vix_unison_3m_flip | atm | 0.30 | 30m | held-out | 16-20 | 18 | 66.7% | -2.12 | -1.02 |
+| vix_unison_3m_flip | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | none | 10m | in-sample | <16 | 48 | 50.0% | -5.11 | -2.34 |
+| vix_unison_3m_flip | atm | none | 10m | in-sample | 16-20 | 19 | 63.2% | 2.04 | 0.71 |
+| vix_unison_3m_flip | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | none | 10m | held-out | <16 | 10 | 30.0% | -5.46 | -0.84 |
+| vix_unison_3m_flip | atm | none | 10m | held-out | 16-20 | 16 | 56.2% | -2.38 | -0.50 |
+| vix_unison_3m_flip | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | none | 30m | in-sample | <16 | 46 | 63.0% | -4.98 | -1.52 |
+| vix_unison_3m_flip | atm | none | 30m | in-sample | 16-20 | 18 | 83.3% | 1.59 | 0.29 |
+| vix_unison_3m_flip | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | atm | none | 30m | held-out | <16 | 9 | 55.6% | -5.60 | -0.63 |
+| vix_unison_3m_flip | atm | none | 30m | held-out | 16-20 | 14 | 71.4% | -5.80 | -0.55 |
+| vix_unison_3m_flip | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | in-sample | <16 | 51 | 33.3% | -2.91 | -1.84 |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | in-sample | 16-20 | 19 | 42.1% | -0.21 | -0.09 |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | held-out | <16 | 10 | 20.0% | -3.01 | -1.04 |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | held-out | 16-20 | 18 | 44.4% | -0.36 | -0.13 |
+| vix_unison_3m_flip | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | in-sample | <16 | 51 | 33.3% | -3.28 | -2.06 |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | in-sample | 16-20 | 19 | 42.1% | 0.18 | 0.08 |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | held-out | <16 | 10 | 30.0% | -3.98 | -1.47 |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | held-out | 16-20 | 18 | 44.4% | -0.36 | -0.13 |
+| vix_unison_3m_flip | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | in-sample | <16 | 51 | 37.3% | -4.14 | -2.18 |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | in-sample | 16-20 | 19 | 47.4% | -0.47 | -0.18 |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | held-out | <16 | 10 | 20.0% | -3.08 | -0.85 |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | held-out | 16-20 | 18 | 55.6% | 1.16 | 0.66 |
+| vix_unison_3m_flip | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | in-sample | <16 | 51 | 39.2% | -4.48 | -2.39 |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | in-sample | 16-20 | 19 | 57.9% | 2.27 | 0.98 |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | held-out | <16 | 10 | 40.0% | -4.60 | -1.21 |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | held-out | 16-20 | 18 | 61.1% | 1.84 | 1.01 |
+| vix_unison_3m_flip | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | in-sample | <16 | 51 | 41.2% | -3.89 | -1.91 |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | in-sample | 16-20 | 19 | 47.4% | -2.29 | -0.77 |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | held-out | <16 | 10 | 20.0% | -4.53 | -1.05 |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | held-out | 16-20 | 18 | 61.1% | 1.16 | 0.68 |
+| vix_unison_3m_flip | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | in-sample | <16 | 51 | 47.1% | -4.39 | -1.89 |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | in-sample | 16-20 | 19 | 57.9% | 0.44 | 0.16 |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | held-out | <16 | 9 | 33.3% | -8.38 | -1.67 |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | held-out | 16-20 | 18 | 66.7% | 1.84 | 1.16 |
+| vix_unison_3m_flip | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | in-sample | <16 | 49 | 42.9% | -2.94 | -1.62 |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | in-sample | 16-20 | 19 | 52.6% | 1.28 | 0.49 |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | held-out | <16 | 10 | 20.0% | -1.64 | -0.37 |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | held-out | 16-20 | 17 | 58.8% | 0.92 | 0.40 |
+| vix_unison_3m_flip | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | in-sample | <16 | 48 | 54.2% | -1.97 | -0.88 |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | in-sample | 16-20 | 19 | 73.7% | 3.83 | 0.90 |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | held-out | <16 | 9 | 55.6% | 1.10 | 0.17 |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | held-out | 16-20 | 17 | 64.7% | -2.38 | -1.02 |
+| vix_unison_3m_flip | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | none | 10m | in-sample | <16 | 49 | 42.9% | -2.38 | -1.39 |
+| vix_unison_3m_flip | 2itm | none | 10m | in-sample | 16-20 | 19 | 52.6% | 1.28 | 0.49 |
+| vix_unison_3m_flip | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | none | 10m | held-out | <16 | 10 | 20.0% | -1.64 | -0.37 |
+| vix_unison_3m_flip | 2itm | none | 10m | held-out | 16-20 | 16 | 56.2% | -0.21 | -0.05 |
+| vix_unison_3m_flip | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | none | 30m | in-sample | <16 | 47 | 57.4% | -1.45 | -0.56 |
+| vix_unison_3m_flip | 2itm | none | 30m | in-sample | 16-20 | 18 | 72.2% | 1.40 | 0.25 |
+| vix_unison_3m_flip | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix_unison_3m_flip | 2itm | none | 30m | held-out | <16 | 9 | 55.6% | 1.10 | 0.17 |
+| vix_unison_3m_flip | 2itm | none | 30m | held-out | 16-20 | 14 | 71.4% | -3.48 | -0.36 |
+| vix_unison_3m_flip | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.10 | 10m | in-sample | <16 | 1036 | 36.4% | -4.21 | -13.44 |
+| vix95_raw_1m | atm | 0.10 | 10m | in-sample | 16-20 | 423 | 36.9% | -3.34 | -4.44 |
+| vix95_raw_1m | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.10 | 10m | held-out | <16 | 244 | 40.6% | -3.24 | -4.69 |
+| vix95_raw_1m | atm | 0.10 | 10m | held-out | 16-20 | 218 | 39.0% | -2.41 | -3.77 |
+| vix95_raw_1m | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.10 | 30m | in-sample | <16 | 1035 | 37.0% | -4.28 | -13.57 |
+| vix95_raw_1m | atm | 0.10 | 30m | in-sample | 16-20 | 420 | 38.3% | -3.28 | -4.24 |
+| vix95_raw_1m | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.10 | 30m | held-out | <16 | 244 | 41.0% | -3.50 | -4.36 |
+| vix95_raw_1m | atm | 0.10 | 30m | held-out | 16-20 | 217 | 39.6% | -2.27 | -3.53 |
+| vix95_raw_1m | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.15 | 10m | in-sample | <16 | 961 | 45.0% | -4.31 | -9.24 |
+| vix95_raw_1m | atm | 0.15 | 10m | in-sample | 16-20 | 392 | 46.4% | -2.90 | -2.98 |
+| vix95_raw_1m | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.15 | 10m | held-out | <16 | 229 | 48.5% | -3.34 | -3.29 |
+| vix95_raw_1m | atm | 0.15 | 10m | held-out | 16-20 | 200 | 46.0% | -3.12 | -3.60 |
+| vix95_raw_1m | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.15 | 30m | in-sample | <16 | 959 | 46.6% | -4.51 | -9.83 |
+| vix95_raw_1m | atm | 0.15 | 30m | in-sample | 16-20 | 390 | 50.3% | -2.61 | -2.72 |
+| vix95_raw_1m | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.15 | 30m | held-out | <16 | 229 | 51.1% | -3.44 | -3.30 |
+| vix95_raw_1m | atm | 0.15 | 30m | held-out | 16-20 | 200 | 47.0% | -3.02 | -3.58 |
+| vix95_raw_1m | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.20 | 10m | in-sample | <16 | 879 | 49.8% | -4.39 | -8.80 |
+| vix95_raw_1m | atm | 0.20 | 10m | in-sample | 16-20 | 372 | 53.2% | -2.30 | -2.31 |
+| vix95_raw_1m | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.20 | 10m | held-out | <16 | 216 | 52.8% | -3.45 | -2.96 |
+| vix95_raw_1m | atm | 0.20 | 10m | held-out | 16-20 | 190 | 54.2% | -2.49 | -1.74 |
+| vix95_raw_1m | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.20 | 30m | in-sample | <16 | 869 | 53.5% | -4.70 | -9.48 |
+| vix95_raw_1m | atm | 0.20 | 30m | in-sample | 16-20 | 363 | 57.6% | -2.31 | -2.31 |
+| vix95_raw_1m | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.20 | 30m | held-out | <16 | 216 | 58.8% | -3.20 | -2.29 |
+| vix95_raw_1m | atm | 0.20 | 30m | held-out | 16-20 | 188 | 56.4% | -2.20 | -1.43 |
+| vix95_raw_1m | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.30 | 10m | in-sample | <16 | 800 | 54.0% | -4.13 | -6.28 |
+| vix95_raw_1m | atm | 0.30 | 10m | in-sample | 16-20 | 341 | 54.8% | -2.54 | -2.17 |
+| vix95_raw_1m | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.30 | 10m | held-out | <16 | 199 | 55.3% | -3.71 | -2.68 |
+| vix95_raw_1m | atm | 0.30 | 10m | held-out | 16-20 | 171 | 60.8% | -1.42 | -1.26 |
+| vix95_raw_1m | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.30 | 30m | in-sample | <16 | 761 | 61.1% | -5.39 | -7.19 |
+| vix95_raw_1m | atm | 0.30 | 30m | in-sample | 16-20 | 318 | 65.4% | -2.28 | -1.73 |
+| vix95_raw_1m | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | 0.30 | 30m | held-out | <16 | 187 | 64.2% | -4.44 | -2.53 |
+| vix95_raw_1m | atm | 0.30 | 30m | held-out | 16-20 | 166 | 67.5% | -0.87 | -0.60 |
+| vix95_raw_1m | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | none | 10m | in-sample | <16 | 754 | 55.2% | -4.23 | -5.01 |
+| vix95_raw_1m | atm | none | 10m | in-sample | 16-20 | 326 | 56.1% | -2.14 | -1.63 |
+| vix95_raw_1m | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | none | 10m | held-out | <16 | 189 | 54.5% | -4.38 | -2.90 |
+| vix95_raw_1m | atm | none | 10m | held-out | 16-20 | 164 | 62.2% | -1.89 | -1.57 |
+| vix95_raw_1m | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | none | 30m | in-sample | <16 | 600 | 68.5% | -5.88 | -4.62 |
+| vix95_raw_1m | atm | none | 30m | in-sample | 16-20 | 258 | 69.8% | -2.47 | -1.27 |
+| vix95_raw_1m | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | atm | none | 30m | held-out | <16 | 151 | 69.5% | -5.40 | -2.20 |
+| vix95_raw_1m | atm | none | 30m | held-out | 16-20 | 140 | 74.3% | -0.94 | -0.37 |
+| vix95_raw_1m | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.10 | 10m | in-sample | <16 | 889 | 32.2% | -2.04 | -5.58 |
+| vix95_raw_1m | 2itm | 0.10 | 10m | in-sample | 16-20 | 381 | 33.9% | -1.28 | -1.80 |
+| vix95_raw_1m | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.10 | 10m | held-out | <16 | 216 | 30.6% | -1.48 | -1.85 |
+| vix95_raw_1m | 2itm | 0.10 | 10m | held-out | 16-20 | 197 | 36.5% | -1.27 | -1.81 |
+| vix95_raw_1m | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.10 | 30m | in-sample | <16 | 868 | 36.6% | -2.26 | -5.68 |
+| vix95_raw_1m | 2itm | 0.10 | 30m | in-sample | 16-20 | 371 | 39.6% | -1.34 | -1.81 |
+| vix95_raw_1m | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.10 | 30m | held-out | <16 | 211 | 39.3% | -1.50 | -1.49 |
+| vix95_raw_1m | 2itm | 0.10 | 30m | held-out | 16-20 | 197 | 40.1% | -1.17 | -1.50 |
+| vix95_raw_1m | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.15 | 10m | in-sample | <16 | 807 | 36.9% | -2.03 | -4.30 |
+| vix95_raw_1m | 2itm | 0.15 | 10m | in-sample | 16-20 | 345 | 39.4% | -1.09 | -1.25 |
+| vix95_raw_1m | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.15 | 10m | held-out | <16 | 195 | 36.9% | -1.19 | -1.25 |
+| vix95_raw_1m | 2itm | 0.15 | 10m | held-out | 16-20 | 179 | 43.0% | -1.36 | -1.30 |
+| vix95_raw_1m | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.15 | 30m | in-sample | <16 | 772 | 46.2% | -2.24 | -4.70 |
+| vix95_raw_1m | 2itm | 0.15 | 30m | in-sample | 16-20 | 331 | 49.5% | -0.95 | -1.05 |
+| vix95_raw_1m | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.15 | 30m | held-out | <16 | 184 | 47.8% | -1.51 | -1.22 |
+| vix95_raw_1m | 2itm | 0.15 | 30m | held-out | 16-20 | 178 | 48.9% | -1.04 | -0.83 |
+| vix95_raw_1m | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.20 | 10m | in-sample | <16 | 755 | 38.8% | -1.94 | -3.20 |
+| vix95_raw_1m | 2itm | 0.20 | 10m | in-sample | 16-20 | 332 | 40.7% | -1.52 | -1.55 |
+| vix95_raw_1m | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.20 | 10m | held-out | <16 | 190 | 36.3% | -1.95 | -1.80 |
+| vix95_raw_1m | 2itm | 0.20 | 10m | held-out | 16-20 | 165 | 46.7% | -1.12 | -0.92 |
+| vix95_raw_1m | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.20 | 30m | in-sample | <16 | 691 | 50.9% | -2.74 | -4.22 |
+| vix95_raw_1m | 2itm | 0.20 | 30m | in-sample | 16-20 | 305 | 53.1% | -1.62 | -1.55 |
+| vix95_raw_1m | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.20 | 30m | held-out | <16 | 175 | 53.1% | -1.83 | -1.45 |
+| vix95_raw_1m | 2itm | 0.20 | 30m | held-out | 16-20 | 161 | 57.8% | -0.30 | -0.21 |
+| vix95_raw_1m | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.30 | 10m | in-sample | <16 | 716 | 38.4% | -2.29 | -3.44 |
+| vix95_raw_1m | 2itm | 0.30 | 10m | in-sample | 16-20 | 313 | 42.5% | -1.26 | -1.14 |
+| vix95_raw_1m | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.30 | 10m | held-out | <16 | 178 | 36.0% | -2.63 | -2.12 |
+| vix95_raw_1m | 2itm | 0.30 | 10m | held-out | 16-20 | 156 | 49.4% | -0.91 | -0.99 |
+| vix95_raw_1m | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.30 | 30m | in-sample | <16 | 607 | 54.4% | -3.83 | -4.77 |
+| vix95_raw_1m | 2itm | 0.30 | 30m | in-sample | 16-20 | 269 | 61.0% | -0.58 | -0.37 |
+| vix95_raw_1m | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | 0.30 | 30m | held-out | <16 | 150 | 58.0% | -1.95 | -1.39 |
+| vix95_raw_1m | 2itm | 0.30 | 30m | held-out | 16-20 | 146 | 67.1% | 0.96 | 0.87 |
+| vix95_raw_1m | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | none | 10m | in-sample | <16 | 699 | 38.9% | -2.47 | -3.40 |
+| vix95_raw_1m | 2itm | none | 10m | in-sample | 16-20 | 307 | 42.3% | -1.19 | -1.08 |
+| vix95_raw_1m | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | none | 10m | held-out | <16 | 176 | 35.8% | -2.72 | -2.13 |
+| vix95_raw_1m | 2itm | none | 10m | held-out | 16-20 | 153 | 50.3% | -1.13 | -1.05 |
+| vix95_raw_1m | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | none | 30m | in-sample | <16 | 525 | 57.7% | -3.98 | -3.61 |
+| vix95_raw_1m | 2itm | none | 30m | in-sample | 16-20 | 233 | 62.7% | -0.74 | -0.43 |
+| vix95_raw_1m | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| vix95_raw_1m | 2itm | none | 30m | held-out | <16 | 136 | 61.0% | -1.59 | -0.92 |
+| vix95_raw_1m | 2itm | none | 30m | held-out | 16-20 | 131 | 72.5% | 0.85 | 0.41 |
+| vix95_raw_1m | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.10 | 10m | in-sample | <16 | 159 | 37.1% | -4.34 | -4.91 |
+| random | atm | 0.10 | 10m | in-sample | 16-20 | 64 | 39.1% | -3.11 | -2.24 |
+| random | atm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.10 | 10m | held-out | <16 | 33 | 39.4% | -4.32 | -2.27 |
+| random | atm | 0.10 | 10m | held-out | 16-20 | 32 | 43.8% | -1.73 | -0.62 |
+| random | atm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.10 | 30m | in-sample | <16 | 159 | 37.1% | -4.51 | -4.96 |
+| random | atm | 0.10 | 30m | in-sample | 16-20 | 64 | 40.6% | -2.93 | -2.06 |
+| random | atm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.10 | 30m | held-out | <16 | 32 | 40.6% | -4.28 | -2.17 |
+| random | atm | 0.10 | 30m | held-out | 16-20 | 32 | 43.8% | -1.95 | -0.71 |
+| random | atm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.15 | 10m | in-sample | <16 | 159 | 43.4% | -5.33 | -4.94 |
+| random | atm | 0.15 | 10m | in-sample | 16-20 | 63 | 46.0% | -3.64 | -2.11 |
+| random | atm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.15 | 10m | held-out | <16 | 33 | 51.5% | -3.57 | -1.62 |
+| random | atm | 0.15 | 10m | held-out | 16-20 | 32 | 53.1% | -1.47 | -0.48 |
+| random | atm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.15 | 30m | in-sample | <16 | 159 | 44.0% | -5.56 | -5.10 |
+| random | atm | 0.15 | 30m | in-sample | 16-20 | 62 | 48.4% | -3.58 | -2.03 |
+| random | atm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.15 | 30m | held-out | <16 | 32 | 53.1% | -3.50 | -1.54 |
+| random | atm | 0.15 | 30m | held-out | 16-20 | 32 | 53.1% | -1.95 | -0.65 |
+| random | atm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.20 | 10m | in-sample | <16 | 158 | 45.6% | -6.33 | -5.62 |
+| random | atm | 0.20 | 10m | in-sample | 16-20 | 62 | 51.6% | -3.76 | -1.91 |
+| random | atm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.20 | 10m | held-out | <16 | 33 | 60.6% | -2.00 | -1.39 |
+| random | atm | 0.20 | 10m | held-out | 16-20 | 32 | 56.2% | -1.83 | -0.64 |
+| random | atm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.20 | 30m | in-sample | <16 | 158 | 48.7% | -6.68 | -5.77 |
+| random | atm | 0.20 | 30m | in-sample | 16-20 | 61 | 55.7% | -3.32 | -1.56 |
+| random | atm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.20 | 30m | held-out | <16 | 31 | 64.5% | -1.94 | -1.34 |
+| random | atm | 0.20 | 30m | held-out | 16-20 | 32 | 59.4% | -2.10 | -0.71 |
+| random | atm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.30 | 10m | in-sample | <16 | 157 | 49.7% | -6.95 | -4.71 |
+| random | atm | 0.30 | 10m | in-sample | 16-20 | 62 | 56.5% | -2.20 | -1.10 |
+| random | atm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.30 | 10m | held-out | <16 | 33 | 66.7% | -1.03 | -0.66 |
+| random | atm | 0.30 | 10m | held-out | 16-20 | 32 | 56.2% | -3.73 | -1.03 |
+| random | atm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | atm | 0.30 | 30m | in-sample | <16 | 157 | 59.2% | -6.85 | -4.17 |
+| random | atm | 0.30 | 30m | in-sample | 16-20 | 61 | 68.9% | -1.55 | -0.64 |
+| random | atm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | 0.30 | 30m | held-out | <16 | 31 | 77.4% | 1.22 | 0.68 |
+| random | atm | 0.30 | 30m | held-out | 16-20 | 32 | 59.4% | -5.02 | -1.23 |
+| random | atm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | atm | none | 10m | in-sample | <16 | 154 | 52.6% | -6.32 | -4.11 |
+| random | atm | none | 10m | in-sample | 16-20 | 62 | 58.1% | -0.42 | -0.28 |
+| random | atm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | none | 10m | held-out | <16 | 33 | 66.7% | -0.72 | -0.52 |
+| random | atm | none | 10m | held-out | 16-20 | 32 | 59.4% | -3.18 | -1.14 |
+| random | atm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| random | atm | none | 30m | in-sample | <16 | 148 | 70.3% | -5.47 | -2.53 |
+| random | atm | none | 30m | in-sample | 16-20 | 59 | 76.3% | -1.25 | -0.42 |
+| random | atm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | atm | none | 30m | held-out | <16 | 31 | 83.9% | 0.98 | 0.30 |
+| random | atm | none | 30m | held-out | 16-20 | 32 | 78.1% | 0.81 | 0.19 |
+| random | atm | none | 30m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.10 | 10m | in-sample | <16 | 156 | 30.1% | -2.40 | -3.58 |
+| random | 2itm | 0.10 | 10m | in-sample | 16-20 | 63 | 31.7% | -1.96 | -1.66 |
+| random | 2itm | 0.10 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.10 | 10m | held-out | <16 | 33 | 36.4% | -0.50 | -0.26 |
+| random | 2itm | 0.10 | 10m | held-out | 16-20 | 32 | 43.8% | -0.10 | -0.05 |
+| random | 2itm | 0.10 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.10 | 30m | in-sample | <16 | 156 | 36.5% | -2.49 | -3.24 |
+| random | 2itm | 0.10 | 30m | in-sample | 16-20 | 62 | 38.7% | -1.84 | -1.53 |
+| random | 2itm | 0.10 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.10 | 30m | held-out | <16 | 32 | 46.9% | 0.51 | 0.28 |
+| random | 2itm | 0.10 | 30m | held-out | 16-20 | 32 | 43.8% | -0.59 | -0.32 |
+| random | 2itm | 0.10 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.15 | 10m | in-sample | <16 | 155 | 31.6% | -3.52 | -3.90 |
+| random | 2itm | 0.15 | 10m | in-sample | 16-20 | 62 | 35.5% | -2.30 | -1.51 |
+| random | 2itm | 0.15 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.15 | 10m | held-out | <16 | 33 | 39.4% | -0.78 | -0.40 |
+| random | 2itm | 0.15 | 10m | held-out | 16-20 | 32 | 46.9% | -0.92 | -0.50 |
+| random | 2itm | 0.15 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.15 | 30m | in-sample | <16 | 154 | 43.5% | -3.00 | -2.72 |
+| random | 2itm | 0.15 | 30m | in-sample | 16-20 | 61 | 52.5% | -0.63 | -0.28 |
+| random | 2itm | 0.15 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.15 | 30m | held-out | <16 | 31 | 54.8% | 1.00 | 0.49 |
+| random | 2itm | 0.15 | 30m | held-out | 16-20 | 32 | 50.0% | -1.53 | -0.77 |
+| random | 2itm | 0.15 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.20 | 10m | in-sample | <16 | 154 | 33.8% | -3.86 | -3.66 |
+| random | 2itm | 0.20 | 10m | in-sample | 16-20 | 62 | 37.1% | -1.90 | -1.22 |
+| random | 2itm | 0.20 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.20 | 10m | held-out | <16 | 33 | 42.4% | -0.96 | -0.44 |
+| random | 2itm | 0.20 | 10m | held-out | 16-20 | 32 | 46.9% | -1.97 | -0.96 |
+| random | 2itm | 0.20 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.20 | 30m | in-sample | <16 | 151 | 51.7% | -2.59 | -2.11 |
+| random | 2itm | 0.20 | 30m | in-sample | 16-20 | 60 | 58.3% | 0.09 | 0.04 |
+| random | 2itm | 0.20 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.20 | 30m | held-out | <16 | 31 | 61.3% | 1.34 | 0.89 |
+| random | 2itm | 0.20 | 30m | held-out | 16-20 | 32 | 53.1% | -2.91 | -1.15 |
+| random | 2itm | 0.20 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.30 | 10m | in-sample | <16 | 152 | 34.9% | -3.53 | -3.02 |
+| random | 2itm | 0.30 | 10m | in-sample | 16-20 | 62 | 40.3% | -0.83 | -0.50 |
+| random | 2itm | 0.30 | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.30 | 10m | held-out | <16 | 33 | 45.5% | 0.98 | 0.40 |
+| random | 2itm | 0.30 | 10m | held-out | 16-20 | 32 | 46.9% | -2.54 | -0.84 |
+| random | 2itm | 0.30 | 10m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | 0.30 | 30m | in-sample | <16 | 145 | 59.3% | -1.58 | -1.07 |
+| random | 2itm | 0.30 | 30m | in-sample | 16-20 | 59 | 66.1% | 0.65 | 0.27 |
+| random | 2itm | 0.30 | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | 0.30 | 30m | held-out | <16 | 31 | 64.5% | 2.33 | 1.13 |
+| random | 2itm | 0.30 | 30m | held-out | 16-20 | 32 | 59.4% | -3.46 | -0.89 |
+| random | 2itm | 0.30 | 30m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | none | 10m | in-sample | <16 | 152 | 36.2% | -3.36 | -2.74 |
+| random | 2itm | none | 10m | in-sample | 16-20 | 62 | 40.3% | 0.27 | 0.19 |
+| random | 2itm | none | 10m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | none | 10m | held-out | <16 | 33 | 45.5% | 0.98 | 0.40 |
+| random | 2itm | none | 10m | held-out | 16-20 | 32 | 50.0% | -0.34 | -0.17 |
+| random | 2itm | none | 10m | held-out | >=20 | 0 |  |  |  |
+| random | 2itm | none | 30m | in-sample | <16 | 143 | 61.5% | -1.72 | -0.96 |
+| random | 2itm | none | 30m | in-sample | 16-20 | 58 | 69.0% | -0.29 | -0.10 |
+| random | 2itm | none | 30m | in-sample | >=20 | 0 |  |  |  |
+| random | 2itm | none | 30m | held-out | <16 | 31 | 64.5% | 1.18 | 0.53 |
+| random | 2itm | none | 30m | held-out | 16-20 | 32 | 71.9% | 1.12 | 0.37 |
+| random | 2itm | none | 30m | held-out | >=20 | 0 |  |  |  |
+
 ## How to read a pass
 
-A config is interesting only if the in-sample paired difference beats the Bonferroni or FDR bar **and** the holdout mean is still positive against its own random book. Anything short of that is a description of this sample, not an edge. 0DTE spreads are often wider than the half-spread assumed here; when they are, the break-even hit rate moves up.
+A config is interesting only if the in-sample paired difference beats the Bonferroni or FDR bar **and** the holdout mean is still positive against its own random book. Anything short of that is a description of this sample, not an edge. The By VIX regime table is one of those descriptions: post-hoc buckets, not a selected result. 0DTE spreads are often wider than the half-spread assumed here; when they are, the break-even hit rate moves up.
 
 Skipped entries with no print within 2 minutes, exits skipped as stale, and entry prints outside the premium band (skips_premium) are columns in the csv. Across the in-sample search grid (each exit is its own book, so the same signal is counted once per exit): 7879 entry skips, 139 stale-exit skips, and 0 skips_premium out of 786559 one-position attempts. On a search row, skips_premium counts that signal's premium skips plus paired controls outside the band.
