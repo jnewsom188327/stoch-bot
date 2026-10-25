@@ -1,0 +1,47 @@
+name: GEX logger
+
+on:
+  schedule:
+    # Every 5 minutes, 13:00 through 21:55 UTC, Monday-Friday.
+    # GitHub cron is UTC and does not follow US daylight saving time.
+    # 09:30-16:00 America/New_York is 13:30-20:00 UTC in EDT and 14:30-21:00 UTC in EST.
+    # The wider UTC window covers both. gex_logger.py exits immediately when
+    # Alpaca's clock and calendar say the regular session is closed (weekend,
+    # holiday, early close, or outside that day's open-close), so the extra
+    # minutes are a couple of GET requests and no commit.
+    - cron: "*/5 13-21 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gex-logger
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Record GEX and push it to gex-data
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          GEX_LOGGER_PY: /tmp/gex_logger.py
+          GEX_PYTHON: python3
+        run: |
+          set -euo pipefail
+          cp gex_logger.py /tmp/gex_logger.py
+          rm -rf /tmp/gex-run
+          mkdir -p /tmp/gex-run
+          python3 /tmp/gex_logger.py --out /tmp/gex-run
+          if [ ! -s /tmp/gex-run/last_run.json ]; then
+            echo "No snapshot written (market closed or nothing to record)."
+            exit 0
+          fi
+          bash scripts/publish_gex_branch.sh /tmp/gex-run/last_run.json
