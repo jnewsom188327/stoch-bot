@@ -21004,7 +21004,6 @@ date,time,symbol,side,entry,exit,reason,net_pct,signal,strike,tp,sl,time_stop,sp
 2026-08-07,09:43,QQQ,PUT,3.9396,3.5104,stop,-11.2255,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807P00723000,-44.2240
 2026-08-07,09:51,QQQ,PUT,3.5979,4.6307,tp,28.3451,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807P00724000,101.9830
 2026-08-07,10:25,QQQ,CALL,3.6079,3.2148,stop,-11.2558,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807C00718000,-40.6105
-2026-08-07,10:05,QQQ,PUT,3.3868,3.0178,stop,-11.2794,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807P00720000,-38.2015
 2026-08-07,10:13,QQQ,PUT,3.3064,2.9462,stop,-11.2887,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807P00719000,-37.3255
 2026-08-07,10:41,QQQ,PUT,3.3266,2.9641,stop,-11.2863,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807P00722000,-37.5445
 2026-08-07,10:42,QQQ,CALL,3.1155,2.7163,stop,-13.2290,vwap_reclaim_1m,2itm,0.30,0.10,10,in_sample,random_paired,QQQ260807C00718000,-41.2150
