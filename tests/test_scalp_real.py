@@ -379,6 +379,263 @@ def test_tuned_diamond_constants_match_the_bot_and_this_file_places_no_orders():
     assert "open_trade" not in src
 
 
+def test_otm_strike_price_for_calls_and_puts():
+    # 500.2 rounds to 500. OTM is the mirror of the 2itm offset.
+    assert sc.strike_price(500.2, 1, "1otm") == 501
+    assert sc.strike_price(500.2, -1, "1otm") == 499
+    assert sc.strike_price(500.2, 1, "2otm") == 502
+    assert sc.strike_price(500.2, -1, "2otm") == 498
+    assert sc.strike_price(501.6, 1, "1otm") == 503  # round(501.6) + 1
+    assert sc.strike_price(501.6, -1, "2otm") == 500  # round(501.6) - 2
+    assert "1otm" in sc.STRIKE_MODES and "2otm" in sc.STRIKE_MODES
+
+
+def test_default_strike_modes_and_family_n_stay_2240():
+    # No new inputs: the default strike string is still 2itm,atm, in the original order.
+    assert sc._parse_strikes("2itm,atm") == ("atm", "2itm")
+    assert sc.family_strike_modes(None) == ("atm", "2itm")
+    assert sc.family_strike_modes(("atm", "2itm")) == ("atm", "2itm")
+    assert sc.family_strike_modes(("atm",)) == ("atm", "2itm")
+    assert sc.family_strike_modes(("2itm",)) == ("atm", "2itm")
+    assert sc.search_config_count() == 2240
+    assert sc.search_config_count(("2itm", "atm")) == 2240
+    assert sc.search_config_count(("atm",)) == 14 * 2 * 4 * 5 * 4
+    # A run that includes the new strikes counts the modes it actually runs.
+    assert sc.search_config_count(("1otm",)) == 14 * 1 * 4 * 5 * 4
+    assert sc.search_config_count(("1otm", "2otm")) == 14 * 2 * 4 * 5 * 4
+    assert sc.search_config_count(("atm", "2itm", "1otm", "2otm")) == 14 * 4 * 4 * 5 * 4
+    assert "full grid" in sc.family_note(("1otm",))
+    # atm and 2itm prices are the original formulas.
+    assert sc.strike_price(500.2, 1, "atm") == 500
+    assert sc.strike_price(500.2, -1, "atm") == 500
+    assert sc.strike_price(500.2, 1, "2itm") == 498
+    assert sc.strike_price(500.2, -1, "2itm") == 502
+    assert sc.strike_price(501.6, 1, "2itm") == 500
+    assert sc.strike_price(501.6, -1, "2itm") == 504
+    grid_strikes = {strike for _sig, strike, _tp, _sl, _ts in sc.iter_configs()}
+    assert grid_strikes == {"atm", "2itm"}
+    with pytest.raises(SystemExit) as ei:
+        sc._parse_strikes("3otm")
+    msg = str(ei.value)
+    assert "1otm" in msg and "2otm" in msg and "atm" in msg
+    assert sc._parse_strikes("2otm,1otm,atm") == ("atm", "1otm", "2otm")
+
+
+def test_premium_band_skip_is_counted_and_applied_to_controls():
+    import backtest as bt
+    day = date(2026, 10, 1)
+    und = {"SPY": _und(day, 500)}
+    contract = bt.lab_occ("SPY", day, "C", 500)
+    opt = _opt(0.60)
+    opt["open"][40] = 0.30
+    opt["high"][40] = 0.30
+    opt["low"][40] = 0.30
+    opt["close"][40] = 0.30
+    opt["open"][80] = 0.81
+    opt["high"][80] = 0.81
+    opt["low"][80] = 0.81
+    opt["close"][80] = 0.81
+    book = {(day, contract): opt}
+    band = (0.45, 0.80)
+    events = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 40},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 50},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 80},
+    ]
+    trades, attempts, skips = sc.run_book(
+        events, book, und, "atm", (0.30, 0.30, 5), COSTS, "orb_1m", premium=band,
+    )
+    assert [t["entry_min"] for t in trades] == [50]
+    assert trades[0]["raw_entry"] == pytest.approx(0.60)
+    assert skips["skip_premium"] == 2
+    assert sum(1 for a in attempts if a["status"] == "skip_premium") == 2
+    # Inclusive edges are entries. Just outside is a premium skip.
+    for price, taken in ((0.45, True), (0.80, True), (0.44, False), (0.81, False)):
+        edged = _opt(price)
+        got, _att, sk = sc.run_book(
+            [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 40}],
+            {(day, contract): edged}, und, "atm", (0.30, None, 2), COSTS, "orb_1m", premium=band,
+        )
+        assert (len(got) == 1) is taken
+        assert sk["skip_premium"] == (0 if taken else 1)
+    # No band: the cheap print is still a trade. Default behavior does not count premium skips.
+    open_book, _att, open_skips = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 40}],
+        book, und, "atm", (0.30, None, 2), COSTS, "random",
+    )
+    assert len(open_book) == 1 and open_skips["skip_premium"] == 0
+    # Paired controls use the same band. 0.30 is skipped and counted; 0.60 is taken.
+    controls = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 40, "attempt_id": "cheap"},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 50, "attempt_id": "mid"},
+    ]
+    filled, prem = sc.simulate_controls(controls, book, und, (0.30, None, 2), COSTS, "atm", premium=band)
+    assert [t["attempt_id"] for t in filled] == ["mid"]
+    assert [s["attempt_id"] for s in prem] == ["cheap"]
+    # The reference random book is run_book, so the same skip applies there too.
+    ref, _att, ref_skips = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 40}],
+        book, und, "1otm", (0.30, None, 2), COSTS, "random", premium=band,
+    )
+    # 1otm call at spot 500 is strike 501, which this book does not contain, so this is an entry skip.
+    # Use the atm contract for the reference path above; repeat on atm to show the count.
+    assert ref == []
+    ref2, _att, ref_skips2 = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 40}],
+        book, und, "atm", (0.30, None, 2), COSTS, "random", premium=band,
+    )
+    assert ref2 == [] and ref_skips2["skip_premium"] == 1
+
+
+def test_last_entry_cutoff_blocks_signal_and_control():
+    import backtest as bt
+    day = date(2026, 10, 1)
+    und = {"SPY": _und(day)}
+    contract = bt.lab_occ("SPY", day, "C", 500)
+    book = {(day, contract): _opt(1.0)}
+    # 14:00 ET is session minute 270. Entries at or after it are out.
+    window = (None, sc.parse_clock_et("14:00", "SCALP_LAST_ENTRY")[1])
+    assert window == (None, 270)
+    events = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 269},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 270},
+    ]
+    trades, attempts, _skips = sc.run_book(
+        events, book, und, "atm", (0.30, None, 2), COSTS, "orb_1m", entry_window=window,
+    )
+    assert [t["entry_min"] for t in trades] == [269]
+    assert [a["entry_min"] for a in attempts] == [269]
+    # A missing print at 13:59 must not slip into 14:00.
+    slipped = _opt(1.0)
+    slipped["real"][269] = False
+    slipped["open"][269] = np.nan
+    late_only, _att, late_skips = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 269}],
+        {(day, contract): slipped}, und, "atm", (0.30, None, 2), COSTS, "orb_1m", entry_window=window,
+    )
+    assert late_only == []
+    assert late_skips["skip_premium"] == 0
+    controls = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 270, "attempt_id": "late"},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 260, "attempt_id": "ok"},
+    ]
+    filled, prem = sc.simulate_controls(
+        controls, book, und, (0.30, None, 2), COSTS, "atm", entry_window=window,
+    )
+    assert [t["attempt_id"] for t in filled] == ["ok"]
+    assert prem == []
+    # Default window still allows 14:00 and still blocks the 15:55 bar.
+    open_window, _att, _sk = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 270},
+         {"day": day, "symbol": "SPY", "side": 1, "entry_min": 384},
+         {"day": day, "symbol": "SPY", "side": 1, "entry_min": 385}],
+        book, und, "atm", (0.50, None, 2), COSTS, "random",
+    )
+    assert [t["entry_min"] for t in open_window] == [270, 384]
+
+
+def test_first_entry_cutoff_blocks_signal_and_control():
+    import backtest as bt
+    day = date(2026, 10, 1)
+    und = {"SPY": _und(day)}
+    contract = bt.lab_occ("SPY", day, "C", 500)
+    book = {(day, contract): _opt(1.0)}
+    # 13:00 ET is session minute 210. Nothing before it is an entry.
+    window = (sc.parse_clock_et("13:00", "SCALP_FIRST_ENTRY")[1], None)
+    assert window == (210, None)
+    events = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 209},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 210},
+    ]
+    trades, attempts, _skips = sc.run_book(
+        events, book, und, "atm", (0.30, None, 2), COSTS, "orb_1m", entry_window=window,
+    )
+    assert [t["entry_min"] for t in trades] == [210]
+    assert [a["entry_min"] for a in attempts] == [210]
+    # A 12:59 signal must not become an entry by slipping onto 13:00.
+    slipped = _opt(1.0)
+    slipped["real"][209] = False
+    slipped["open"][209] = np.nan
+    early, _att, _sk = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 209}],
+        {(day, contract): slipped}, und, "atm", (0.30, None, 2), COSTS, "random", entry_window=window,
+    )
+    assert early == []
+    controls = [
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 209, "attempt_id": "early"},
+        {"day": day, "symbol": "SPY", "side": 1, "entry_min": 210, "attempt_id": "ok"},
+    ]
+    filled, prem = sc.simulate_controls(
+        controls, book, und, (0.30, None, 2), COSTS, "atm", entry_window=window,
+    )
+    assert [t["attempt_id"] for t in filled] == ["ok"]
+    assert prem == []
+    # Empty inputs: no extra cutoff. 12:59 is still an entry.
+    assert sc.parse_clock_et("", "SCALP_FIRST_ENTRY") == (None, None)
+    assert sc.parse_clock_et("  ", "SCALP_LAST_ENTRY") == (None, None)
+    before, _att, _sk = sc.run_book(
+        [{"day": day, "symbol": "SPY", "side": 1, "entry_min": 209}],
+        book, und, "atm", (0.30, None, 2), COSTS, "orb_1m",
+    )
+    assert [t["entry_min"] for t in before] == [209]
+
+
+def test_entry_hour_breakdown_and_report_state_the_new_rules():
+    trades = [
+        {"time": "09:40", "net_pct": 10.0},
+        {"time": "09:50", "net_pct": -2.0},
+        {"time": "13:05", "net_pct": 4.0},
+        {"time": "15:10", "net_pct": -1.0},
+    ]
+    got = sc.entry_hour_breakdown(trades)
+    assert list(got) == [9, 10, 11, 12, 13, 14, 15]
+    assert got[9]["n"] == 2 and got[9]["net_pct"] == pytest.approx(4.0)
+    assert got[10]["n"] == 0 and math.isnan(got[10]["net_pct"])
+    assert got[13]["n"] == 1 and got[13]["net_pct"] == pytest.approx(4.0)
+    assert got[15]["net_pct"] == pytest.approx(-1.0)
+    meta = {
+        "stamp": "2026-10-24 16:00 ET",
+        "synthetic": False,
+        "coverage": "Symbols SPY, QQQ. Strikes: 1otm.",
+        "cent_floor": 0.01,
+        "pct": 0.005,
+        "commission": 0.65,
+        "n_is": 10,
+        "n_oos": 3,
+        "is_first": "2026-08-01",
+        "is_last": "2026-10-01",
+        "oos_first": "2026-10-02",
+        "oos_last": "2026-10-06",
+        "n_family": 1120,
+        "t_crit": sc.norm_ppf(1 - (0.05 / 1120) / 2),
+        "skip_note": "premium skips included.",
+        "family_note": sc.family_note(("1otm",)),
+        "premium_line": sc.describe_premium((0.45, 0.80)),
+        "window_line": sc.describe_window("13:00", "15:00"),
+        "hour_table": [{
+            "book": "signal", "signal": "orb_1m", "strike": "1otm",
+            "tp": 0.20, "sl": 0.20, "time_stop": 10,
+            "hours": got,
+        }],
+    }
+    text = sc.render_report(meta, [], [])
+    assert "Descriptive only, not used for selection" in text
+    assert "Break-even hit rate at $0.60" in text
+    assert "Break-even hit rate at $2.00" in text
+    assert "$0.45" in text and "$0.80" in text
+    assert "before 13:00 ET" in text and "at or after 15:00 ET" in text
+    assert "Search family N = 1120" in text
+    assert "not used to rank" in text
+    p60 = sc.breakeven_hit_rate(0.20, 0.20, 0.60, 0.01, 0.005, 0.65)
+    assert f"{p60 * 100:.1f}%" in text
+    pre = sc.render_predeclared()
+    assert "1otm call = round(spot) + 1" in pre
+    assert "2otm put = round(spot) - 2" in pre
+    assert "SCALP_PREMIUM_MIN" in pre and "skips_premium" in pre
+    assert "SCALP_FIRST_ENTRY" in pre and "SCALP_LAST_ENTRY" in pre
+    assert "N = 2240" in pre
+
+
 def test_workflow_is_manual_data_only_and_cannot_push_main():
     text = open(".github/workflows/scalp_real.yml").read()
     assert "workflow_dispatch:" in text
@@ -390,3 +647,10 @@ def test_workflow_is_manual_data_only_and_cannot_push_main():
     assert "main|master" in text
     for banned in ("submit_order", "TradingClient", "MarketOrderRequest"):
         assert banned not in text
+    assert "python -m pytest -q tests/test_scalp_real.py" in text
+    assert "SCALP_PREMIUM_MIN:" in text
+    assert "SCALP_PREMIUM_MAX:" in text
+    assert "SCALP_FIRST_ENTRY:" in text
+    assert "SCALP_LAST_ENTRY:" in text
+    assert "14:00" in text
+    assert 'default: "2itm,atm"' in text
