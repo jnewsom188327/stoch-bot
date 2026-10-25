@@ -4,7 +4,8 @@ DATA ONLY. No order is sent by scalp_real.py or by .github/workflows/scalp_real.
 This file is a research plan, not trading advice.
 
 DATA
-- SPY and QQQ, 0DTE, strikes atm and 2itm (workflow input may run a subset; the family below is the full grid).
+- SPY and QQQ, 0DTE. Strike modes are atm, 2itm, 1otm, and 2otm. The workflow default is 2itm,atm.
+  The config list below is that default grid. A run may choose a subset. Bonferroni N follows the rule in SPLIT AND TESTS.
 - As many recent completed sessions as the workflow days input asks for (default 60).
 - A session needs at least 180 regular-hours 1-minute bars on every symbol. Today is excluded until 16:00 ET.
 - Days on which Alpaca returns no OPRA 1-minute bar for any requested contract are dropped before the split.
@@ -25,12 +26,24 @@ FILLS
 - The entry print is the open of the first REAL option bar at that minute or the following minute (within 2 minutes).
 - No real print in those two minutes: skip the entry and count it. A forward-filled price is not an entry.
 - An option open under 0.05 is skipped.
+- Premium band (SCALP_PREMIUM_MIN and SCALP_PREMIUM_MAX, dollars per share). Empty means no bound on that side.
+  The entry print is the real option open used as the entry. An entry is taken only when that open is inside [min, max].
+  A print outside the band is not a trade: it is skipped and counted as skips_premium.
+  The same band applies to paired random controls and to the reference random book.
+  A control whose entry print falls outside the band is skipped and counted the same way.
+  On a search result row, skips_premium is the signal book's premium skips plus the paired controls skipped for the band.
+  On a random baseline row, skips_premium is that book's own premium skips.
 - Exits walk 1-minute bars. A minute with no print may use the lab_fetch_opt close only when that close is at most 5 minutes old.
 - A price older than 5 minutes is never an exit. If the time stop or the 15:55 flat falls on a stale minute, the trade is unfilled and counted.
 - Same bar: a stop is applied before a target. A stop that gaps fills at the bar open when that open is worse than the stop.
 - A target fills at the target price (not at a higher wick).
 - One open position per symbol inside each (signal, strike) book. A new signal while the book is in a trade is ignored.
 - Calls at the same minute are considered before puts. Flat at the 15:55 bar (session minute 385). No new entry at or after 15:55.
+- Entry clock (SCALP_FIRST_ENTRY and SCALP_LAST_ENTRY, HH:MM ET). Empty means no extra cutoff.
+  Empty SCALP_LAST_ENTRY keeps the existing rule: no new entry at or after 15:55.
+  When SCALP_FIRST_ENTRY is set, no signal entry and no control entry before that time.
+  When SCALP_LAST_ENTRY is set, no signal entry and no control entry at or after that time.
+  The same window applies to paired random controls and to the reference random book.
 
 SPLIT AND TESTS
 - After dead OPRA days are dropped, the last round(25%) of remaining days, at least 1, are held out.
@@ -39,7 +52,8 @@ SPLIT AND TESTS
   then mean net %, then trade count. A config needs at least 5 signal fills and 5 paired fills to be ranked.
 - Primary t-stat is day-clustered on the per-trade net percent (sum of within-day deviations, divided by n).
 - Bootstrap 95% CI resamples days with replacement (default 2000) and recomputes the per-trade mean. Seed 20261024 plus a fixed per-config salt.
-- Search family N = 2240 (every search signal x atm/2itm x 4 targets x 5 stops x 4 time stops).
+- Search family N = 2240 when the run uses only atm and 2itm (every search signal x those two strikes x 4 targets x 5 stops x 4 time stops), including a run that asks for only one of those two.
+- A run that includes 1otm or 2otm recomputes N from the strike modes in that run (the full grid of those modes x the same signals and exits) and prints that N and the Bonferroni bar.
 - The random rows are the baseline. They are not in N and they are not ranked for the holdout.
 - Bonferroni: two-sided normal p * N < 0.05. FDR: Benjamini-Hochberg on the in-sample paired-difference p-values.
 - Break-even hit rate assumes the trade exits at the target or the stop and never by time: p = -net_loss / (net_win - net_loss),
@@ -90,7 +104,9 @@ EXITS
 
 STRIKE
 - Spot is the underlying open at the fill minute (a missing minute may use a close at most 5 minutes old).
-- atm = round(spot). 2itm call = round(spot) - 2. 2itm put = round(spot) + 2. Expiration is the session date. Symbol from backtest.lab_occ.
+- atm = round(spot). 2itm call = round(spot) - 2. 2itm put = round(spot) + 2.
+- 1otm call = round(spot) + 1. 1otm put = round(spot) - 1. 2otm call = round(spot) + 2. 2otm put = round(spot) - 2.
+- Expiration is the session date. Symbol from backtest.lab_occ.
 
 CONFIG COUNT 2400 rows follow (2240 search + 160 random baseline). Columns: signal,strike,tp,sl,time_stop,role
 CONFIGS

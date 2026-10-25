@@ -12,8 +12,20 @@ on:
         description: "Tickers, comma separated"
         default: "SPY,QQQ"
       strikes:
-        description: "0DTE strikes: atm, 2itm, or 2itm,atm"
+        description: "0DTE strikes: atm, 2itm, 1otm, 2otm, or a comma-separated subset. Default 2itm,atm leaves existing runs unchanged."
         default: "2itm,atm"
+      premium_min:
+        description: "Only take an entry when the option open (dollars per share) is at least this. Empty = no minimum. Outside [min, max] is skipped and counted as skips_premium, including paired controls and the reference random book."
+        default: ""
+      premium_max:
+        description: "Only take an entry when the option open (dollars per share) is at most this. Empty = no maximum."
+        default: ""
+      first_entry:
+        description: "No signal or control entry before this HH:MM ET. Empty = existing behavior. A late-day run uses 13:00."
+        default: ""
+      last_entry:
+        description: "No signal or control entry at or after this HH:MM ET. Empty = existing behavior (no new entry at or after 15:55). Example: 14:00. For the late-day 1otm run, use 15:00."
+        default: ""
       half_spread_cents:
         description: "Extra half-spread floor in cents per side (the run uses the larger of this and the percent below)"
         default: "1"
@@ -56,6 +68,10 @@ jobs:
           SCALP_DAYS: ${{ github.event.inputs.days }}
           SCALP_SYMBOLS: ${{ github.event.inputs.symbols }}
           SCALP_STRIKES: ${{ github.event.inputs.strikes }}
+          SCALP_PREMIUM_MIN: ${{ github.event.inputs.premium_min }}
+          SCALP_PREMIUM_MAX: ${{ github.event.inputs.premium_max }}
+          SCALP_FIRST_ENTRY: ${{ github.event.inputs.first_entry }}
+          SCALP_LAST_ENTRY: ${{ github.event.inputs.last_entry }}
           SCALP_HALF_SPREAD_CENTS: ${{ github.event.inputs.half_spread_cents }}
           SCALP_HALF_SPREAD_PCT: ${{ github.event.inputs.half_spread_pct }}
           SCALP_COMMISSION: ${{ github.event.inputs.commission }}

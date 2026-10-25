@@ -48,6 +48,7 @@ BOOT_DEFAULT = 2000
 HOLD_FRAC = 0.25
 TOP_K = 3
 MIN_TRADES = 5
+ENTRY_HOURS = (9, 10, 11, 12, 13, 14, 15)
 
 # Snapshot of diamondbot.BOOKS["TUNED"] and its entry window. The signal
 # function reads the live constants; tests fail if the bot drifts.
@@ -58,7 +59,10 @@ DIAMOND_ENTRY_TO = 1430
 TPS = (0.10, 0.15, 0.20, 0.30)
 SLS = (0.10, 0.15, 0.20, 0.30, None)
 TIME_STOPS = (5, 10, 20, 30)
-STRIKE_MODES = ("atm", "2itm")
+# atm and 2itm are the original family. 1otm and 2otm are optional strike modes.
+# A run that does not ask for them keeps the original family and N = 2240.
+ORIGINAL_STRIKES = ("atm", "2itm")
+STRIKE_MODES = ("atm", "2itm", "1otm", "2otm")
 
 # id, role, chart minutes, entry window on the signal bar (hhmm, half-open), blurb
 SIGNALS = (
@@ -107,7 +111,11 @@ RESULT_FIELDS = [
     "random_n", "random_hit_rate", "random_mean_net_pct", "random_t",
     "n_skip_entry", "n_skip_stale", "n_skip_spot", "n_days",
     "breakeven_hit_rate", "q_fdr", "bonferroni_05", "beats_random",
-    "selected_top3",
+    "selected_top3", "skips_premium",
+    "hour_9_n", "hour_9_net_pct", "hour_10_n", "hour_10_net_pct",
+    "hour_11_n", "hour_11_net_pct", "hour_12_n", "hour_12_net_pct",
+    "hour_13_n", "hour_13_net_pct", "hour_14_n", "hour_14_net_pct",
+    "hour_15_n", "hour_15_net_pct",
 ]
 
 TRADE_FIELDS = [
@@ -117,14 +125,45 @@ TRADE_FIELDS = [
 ]
 
 
-def search_config_count():
+def family_strike_modes(strikes=None):
+    """Strike modes that enter the Bonferroni family for a run.
+
+    The default family is atm and 2itm, so N stays 2240, including a run that
+    asks for only one of those two. A run that includes 1otm or 2otm uses the
+    strike modes that run actually includes (the full grid of those modes).
+    """
+    if strikes is None:
+        return ORIGINAL_STRIKES
+    chosen = {s for s in strikes}
+    if not chosen or chosen <= set(ORIGINAL_STRIKES):
+        return ORIGINAL_STRIKES
+    return tuple(s for s in STRIKE_MODES if s in chosen)
+
+
+def search_config_count(strikes=None):
     """Bonferroni family: every search signal x strike x exit. Random is the control."""
-    return len(SEARCH_IDS) * len(STRIKE_MODES) * len(TPS) * len(SLS) * len(TIME_STOPS)
+    modes = family_strike_modes(strikes)
+    return len(SEARCH_IDS) * len(modes) * len(TPS) * len(SLS) * len(TIME_STOPS)
 
 
-def iter_configs():
+def family_note(strikes=None):
+    modes = family_strike_modes(strikes)
+    noun = "strike mode" if len(modes) == 1 else "strike modes"
+    note = (
+        f"{len(SEARCH_IDS)} search signals x {len(modes)} {noun} "
+        f"({', '.join(modes)}) x {len(TPS)} targets x {len(SLS)} stops x {len(TIME_STOPS)} time stops"
+    )
+    if set(modes) <= set(ORIGINAL_STRIKES):
+        note += "; atm/2itm runs keep N = 2240 even when the run asks for only one of those two"
+    else:
+        note += "; this run includes 1otm or 2otm, so N is the full grid of the strike modes in the run"
+    return note
+
+
+def iter_configs(strikes=None):
+    modes = ORIGINAL_STRIKES if strikes is None else strikes
     for sig in SIGNAL_IDS:
-        for strike in STRIKE_MODES:
+        for strike in modes:
             for tp in TPS:
                 for sl in SLS:
                     for ts in TIME_STOPS:
@@ -138,7 +177,7 @@ def _fmt_sl(sl):
 def render_predeclared():
     """Frozen text. Written before any OPRA run. main() refuses to compute if the file differs."""
     n_search = search_config_count()
-    n_all = n_search + len(STRIKE_MODES) * len(TPS) * len(SLS) * len(TIME_STOPS)
+    n_all = n_search + len(ORIGINAL_STRIKES) * len(TPS) * len(SLS) * len(TIME_STOPS)
     lines = [
         "SCALP_REAL PREDECLARED 2026-10-24",
         "Written before any OPRA computation. Do not add a config after seeing results.",
@@ -146,7 +185,8 @@ def render_predeclared():
         "This file is a research plan, not trading advice.",
         "",
         "DATA",
-        "- SPY and QQQ, 0DTE, strikes atm and 2itm (workflow input may run a subset; the family below is the full grid).",
+        "- SPY and QQQ, 0DTE. Strike modes are atm, 2itm, 1otm, and 2otm. The workflow default is 2itm,atm.",
+        "  The config list below is that default grid. A run may choose a subset. Bonferroni N follows the rule in SPLIT AND TESTS.",
         "- As many recent completed sessions as the workflow days input asks for (default 60).",
         "- A session needs at least 180 regular-hours 1-minute bars on every symbol. Today is excluded until 16:00 ET.",
         "- Days on which Alpaca returns no OPRA 1-minute bar for any requested contract are dropped before the split.",
@@ -167,12 +207,24 @@ def render_predeclared():
         "- The entry print is the open of the first REAL option bar at that minute or the following minute (within 2 minutes).",
         "- No real print in those two minutes: skip the entry and count it. A forward-filled price is not an entry.",
         "- An option open under 0.05 is skipped.",
+        "- Premium band (SCALP_PREMIUM_MIN and SCALP_PREMIUM_MAX, dollars per share). Empty means no bound on that side.",
+        "  The entry print is the real option open used as the entry. An entry is taken only when that open is inside [min, max].",
+        "  A print outside the band is not a trade: it is skipped and counted as skips_premium.",
+        "  The same band applies to paired random controls and to the reference random book.",
+        "  A control whose entry print falls outside the band is skipped and counted the same way.",
+        "  On a search result row, skips_premium is the signal book's premium skips plus the paired controls skipped for the band.",
+        "  On a random baseline row, skips_premium is that book's own premium skips.",
         "- Exits walk 1-minute bars. A minute with no print may use the lab_fetch_opt close only when that close is at most 5 minutes old.",
         "- A price older than 5 minutes is never an exit. If the time stop or the 15:55 flat falls on a stale minute, the trade is unfilled and counted.",
         "- Same bar: a stop is applied before a target. A stop that gaps fills at the bar open when that open is worse than the stop.",
         "- A target fills at the target price (not at a higher wick).",
         "- One open position per symbol inside each (signal, strike) book. A new signal while the book is in a trade is ignored.",
         "- Calls at the same minute are considered before puts. Flat at the 15:55 bar (session minute 385). No new entry at or after 15:55.",
+        "- Entry clock (SCALP_FIRST_ENTRY and SCALP_LAST_ENTRY, HH:MM ET). Empty means no extra cutoff.",
+        "  Empty SCALP_LAST_ENTRY keeps the existing rule: no new entry at or after 15:55.",
+        "  When SCALP_FIRST_ENTRY is set, no signal entry and no control entry before that time.",
+        "  When SCALP_LAST_ENTRY is set, no signal entry and no control entry at or after that time.",
+        "  The same window applies to paired random controls and to the reference random book.",
         "",
         "SPLIT AND TESTS",
         "- After dead OPRA days are dropped, the last round(25%) of remaining days, at least 1, are held out.",
@@ -181,7 +233,11 @@ def render_predeclared():
         "  then mean net %, then trade count. A config needs at least 5 signal fills and 5 paired fills to be ranked.",
         "- Primary t-stat is day-clustered on the per-trade net percent (sum of within-day deviations, divided by n).",
         "- Bootstrap 95% CI resamples days with replacement (default 2000) and recomputes the per-trade mean. Seed 20261024 plus a fixed per-config salt.",
-        f"- Search family N = {n_search} (every search signal x atm/2itm x 4 targets x 5 stops x 4 time stops).",
+        f"- Search family N = {n_search} when the run uses only atm and 2itm "
+        f"(every search signal x those two strikes x 4 targets x 5 stops x 4 time stops), "
+        "including a run that asks for only one of those two.",
+        "- A run that includes 1otm or 2otm recomputes N from the strike modes in that run "
+        "(the full grid of those modes x the same signals and exits) and prints that N and the Bonferroni bar.",
         "- The random rows are the baseline. They are not in N and they are not ranked for the holdout.",
         "- Bonferroni: two-sided normal p * N < 0.05. FDR: Benjamini-Hochberg on the in-sample paired-difference p-values.",
         "- Break-even hit rate assumes the trade exits at the target or the stop and never by time: p = -net_loss / (net_win - net_loss),",
@@ -232,7 +288,9 @@ def render_predeclared():
         "",
         "STRIKE",
         "- Spot is the underlying open at the fill minute (a missing minute may use a close at most 5 minutes old).",
-        "- atm = round(spot). 2itm call = round(spot) - 2. 2itm put = round(spot) + 2. Expiration is the session date. Symbol from backtest.lab_occ.",
+        "- atm = round(spot). 2itm call = round(spot) - 2. 2itm put = round(spot) + 2.",
+        "- 1otm call = round(spot) + 1. 1otm put = round(spot) - 1. 2otm call = round(spot) + 2. 2otm put = round(spot) - 2.",
+        "- Expiration is the session date. Symbol from backtest.lab_occ.",
         "",
         f"CONFIG COUNT {n_all} rows follow ({n_search} search + {n_all - n_search} random baseline). Columns: signal,strike,tp,sl,time_stop,role",
         "CONFIGS",
@@ -392,7 +450,7 @@ def _empty_opt():
     }
 
 
-def simulate_trade(opt, entry_min, cfg, costs, allow_slip=True):
+def simulate_trade(opt, entry_min, cfg, costs, allow_slip=True, premium=None):
     """Fill one option trade or return a skip status.
 
     cfg is (tp, sl or None, time_stop minutes).
@@ -416,6 +474,8 @@ def simulate_trade(opt, entry_min, cfg, costs, allow_slip=True):
     if ent is None:
         return {"status": "skip_entry"}
     raw = float(opt["open"][ent])
+    if not premium_in_band(raw, premium):
+        return {"status": "skip_premium", "entry_min": ent, "raw_entry": raw}
     debit = raw + half_spread(raw, cent_floor, pct)
     tp_px = raw * (1.0 + tp)
     sl_px = None if sl is None else raw * (1.0 - sl)
@@ -475,9 +535,111 @@ def strike_price(spot, side, mode):
     k = int(np.round(float(spot)))
     if mode == "2itm":
         k = k - 2 * int(side)
+    elif mode == "1otm":
+        k = k + int(side)
+    elif mode == "2otm":
+        k = k + 2 * int(side)
     elif mode != "atm":
         raise ValueError(mode)
     return k if k > 0 else None
+
+
+def premium_in_band(raw, band):
+    """True when `raw` (the entry print, dollars per share) is inside [min, max].
+
+    `band` is None, or (min, max) with either side None meaning that side is open.
+    The comparison is inclusive.
+    """
+    if band is None:
+        return True
+    lo, hi = band
+    if lo is not None and raw < lo:
+        return False
+    if hi is not None and raw > hi:
+        return False
+    return True
+
+
+def parse_clock_et(text, name):
+    """Return (HH:MM label or None, session minute or None). Empty keeps the existing rule."""
+    raw = (text or "").strip()
+    if not raw:
+        return None, None
+    if len(raw) != 5 or raw[2] != ":" or not (raw[:2].isdigit() and raw[3:].isdigit()):
+        sys.exit(f"{name} must be HH:MM ET, or empty")
+    hh, mm = int(raw[:2]), int(raw[3:])
+    if hh > 23 or mm > 59:
+        sys.exit(f"{name} must be HH:MM ET, or empty")
+    return raw, hh * 60 + mm - (9 * 60 + 30)
+
+
+def minute_allowed(minute, window):
+    """True when a new entry may be taken at this session minute.
+
+    `window` is None or (first_session_minute or None, last_session_minute or None).
+    The 15:55 bar is never an entry. A set last minute rejects that minute and later ones.
+    A set first minute rejects anything earlier.
+    """
+    if minute is None or minute < 0 or minute >= FLAT_MIN or minute >= N_MIN:
+        return False
+    if not window:
+        return True
+    first, last = window
+    if first is not None and minute < first:
+        return False
+    if last is not None and minute >= last:
+        return False
+    return True
+
+
+def describe_premium(band):
+    if band is None or (band[0] is None and band[1] is None):
+        return (
+            "Premium band: none. Any real entry print at or above $0.05 can be taken. "
+            "skips_premium stays 0."
+        )
+    lo = "no minimum" if band[0] is None else f"${band[0]:.2f}"
+    hi = "no maximum" if band[1] is None else f"${band[1]:.2f}"
+    return (
+        f"Premium band: the entry print (the real option open) must be within [{lo}, {hi}] dollars per share. "
+        "An entry outside that band is skipped and counted as skips_premium. "
+        "The same band is applied to paired random controls and to the reference random book."
+    )
+
+
+def describe_window(first_label, last_label):
+    if first_label is None and last_label is None:
+        return "Entry cutoff: none beyond the existing rule. No new entry at or after 15:55 ET."
+    parts = []
+    if first_label:
+        parts.append(f"no signal or control entry before {first_label} ET")
+    else:
+        parts.append("no extra first-entry cutoff")
+    if last_label:
+        parts.append(f"no signal or control entry at or after {last_label} ET")
+    else:
+        parts.append("no new entry at or after 15:55 ET")
+    return (
+        "Entry cutoff: " + "; ".join(parts) + ". "
+        "The same clock applies to paired random controls and to the reference random book. Flat at 15:55."
+    )
+
+
+def entry_hour_breakdown(trades):
+    """Mean net % and fill count by the entry print's clock hour. Descriptive only."""
+    buckets = {h: [] for h in ENTRY_HOURS}
+    for t in trades:
+        hh = int(str(t["time"])[:2])
+        if hh in buckets:
+            buckets[hh].append(float(t["net_pct"]))
+    out = {}
+    for h in ENTRY_HOURS:
+        vals = buckets[h]
+        out[h] = {
+            "n": len(vals),
+            "net_pct": float(np.mean(vals)) if vals else float("nan"),
+        }
+    return out
 
 
 def spot_at(und, minute):
@@ -995,17 +1157,24 @@ def complete_days(und, symbols, now=None):
     return days
 
 
-def run_book(events, opt, und, strike, cfg, costs, signal):
-    """One position per symbol. Returns fills, attempts (including skips), and skip counts."""
+def run_book(events, opt, und, strike, cfg, costs, signal, premium=None, entry_window=None):
+    """One position per symbol. Returns fills, attempts (including skips), and skip counts.
+
+    premium is (min, max) dollars per share, either side None. entry_window is
+    (first session minute or None, last session minute or None). Defaults keep
+    the historical book: no premium band, no entry before 15:55 only.
+    """
     busy = {}
     trades = []
     attempts = []
-    skips = {"skip_entry": 0, "skip_stale": 0, "skip_spot": 0}
+    skips = {"skip_entry": 0, "skip_stale": 0, "skip_spot": 0, "skip_premium": 0}
     seq = 0
     bt = _bt()
     ordered = sorted(events, key=lambda e: (e["day"], e["symbol"], e["entry_min"], -e["side"]))
     for ev in ordered:
         key = (ev["day"], ev["symbol"])
+        if not minute_allowed(ev["entry_min"], entry_window):
+            continue
         if ev["entry_min"] <= busy.get(key, -1):
             continue
         seq += 1
@@ -1026,6 +1195,8 @@ def run_book(events, opt, und, strike, cfg, costs, signal):
         saw_contract = False
         spot_ok = False
         for m in range(ev["entry_min"], min(ev["entry_min"] + ENTRY_LOOK, FLAT_MIN)):
+            if not minute_allowed(m, entry_window):
+                continue
             spot = spot_at(und[ev["symbol"]].get(ev["day"]), m)
             if spot is None:
                 continue
@@ -1038,14 +1209,15 @@ def run_book(events, opt, und, strike, cfg, costs, signal):
             if book is None:
                 continue
             saw_contract = True
-            trial = simulate_trade(book, m, cfg, costs, allow_slip=False)
+            trial = simulate_trade(book, m, cfg, costs, allow_slip=False, premium=premium)
             if trial["status"] == "fill":
                 filled = trial
                 filled["contract"] = contract
                 filled["spot"] = spot
                 break
-            if trial["status"] == "skip_stale":
-                # A real entry print existed but the exit could not be priced.
+            if trial["status"] in ("skip_stale", "skip_premium"):
+                # A real entry print existed. A stale exit cannot be priced.
+                # A premium skip is the entry print outside the band; do not slide to a later minute.
                 filled = trial
                 filled["contract"] = contract
                 break
@@ -1091,17 +1263,27 @@ def run_book(events, opt, und, strike, cfg, costs, signal):
     return trades, attempts, skips
 
 
-def simulate_controls(controls, opt, und, cfg, costs, strike):
-    """Price paired controls independently (no second one-position rule)."""
+def simulate_controls(controls, opt, und, cfg, costs, strike, premium=None, entry_window=None):
+    """Price paired controls independently (no second one-position rule).
+
+    Returns (trades, premium_skips). premium_skips records controls whose entry
+    print fell outside the band. A control minute outside the entry window is
+    not entered and is not a premium skip. Defaults match the historical book.
+    """
     bt = _bt()
     trades = []
+    premium_skips = []
     for ev in controls:
         if ev is None:
+            continue
+        if not minute_allowed(ev["entry_min"], entry_window):
             continue
         spot = None
         contract = None
         book = None
         for m in range(ev["entry_min"], min(ev["entry_min"] + ENTRY_LOOK, FLAT_MIN)):
+            if not minute_allowed(m, entry_window):
+                continue
             spot = spot_at(und[ev["symbol"]].get(ev["day"]), m)
             if spot is None:
                 continue
@@ -1112,7 +1294,12 @@ def simulate_controls(controls, opt, und, cfg, costs, strike):
             book = opt.get((ev["day"], contract))
             if book is None:
                 continue
-            trial = simulate_trade(book, m, cfg, costs, allow_slip=False)
+            trial = simulate_trade(book, m, cfg, costs, allow_slip=False, premium=premium)
+            if trial["status"] == "skip_premium":
+                premium_skips.append({"day": ev["day"], "attempt_id": ev.get("attempt_id")})
+                break
+            if trial["status"] == "skip_stale":
+                break
             if trial["status"] == "fill":
                 hh, mm = divmod((9 * 60 + 30) + trial["entry_min"], 60)
                 trades.append({
@@ -1131,7 +1318,7 @@ def simulate_controls(controls, opt, und, cfg, costs, strike):
                     "raw_entry": trial["raw_entry"],
                 })
                 break
-    return trades
+    return trades, premium_skips
 
 
 def contracts_for_events(events, und, strikes):
@@ -1316,6 +1503,10 @@ def render_report(meta, rows, tops):
         f"Exits do not use a print more than 5 minutes old. Flat at 15:55."
     )
     lines.append("")
+    lines.append(meta["premium_line"])
+    lines.append("")
+    lines.append(meta["window_line"])
+    lines.append("")
     lines.append(
         f"Split: {meta['n_is']} in-sample day{'s' if meta['n_is'] != 1 else ''} ({meta['is_first']} to {meta['is_last']}), "
         f"{meta['n_oos']} held-out day{'s' if meta['n_oos'] != 1 else ''} ({meta['oos_first']} to {meta['oos_last']}). "
@@ -1323,7 +1514,7 @@ def render_report(meta, rows, tops):
     )
     lines.append("")
     lines.append(
-        f"Search family N = {meta['n_family']} (the full predeclared grid; a run that asks for one strike still uses this N). "
+        f"Search family N = {meta['n_family']} ({meta['family_note']}). "
         f"Two-sided Bonferroni bar is p < {0.05 / meta['n_family']:.6g} "
         f"(|t| > {meta['t_crit']:.2f} under a normal reference). "
         f"FDR is Benjamini-Hochberg on the finite in-sample paired-difference p-values from this run. "
@@ -1335,18 +1526,23 @@ def render_report(meta, rows, tops):
     lines.append(
         "If a trade could only exit at the target or the stop, the hit rate that zeros expectancy is "
         "p = -net_loss / (net_win - net_loss), after the half-spread and the commission. "
-        "The table uses a $2.00 premium so the grid is comparable. Each results-csv row also has the rate at that config's own median entry open. "
+        "The table uses a $2.00 premium and a $0.60 premium so the grid is comparable. "
+        "Each results-csv row also has the rate at that config's own median entry open. "
         "A time stop makes the true break-even higher than this, because many trades exit before the target."
     )
     lines.append("")
-    lines.append("| Target | Stop | Break-even hit rate at $2 |")
-    lines.append("|---|---|---|")
+    lines.append("| Target | Stop | Break-even hit rate at $2.00 | Break-even hit rate at $0.60 |")
+    lines.append("|---|---|---|---|")
     for tp in TPS:
         for sl in SLS:
-            p = breakeven_hit_rate(tp, sl, 2.0, meta["cent_floor"], meta["pct"], meta["commission"])
+            p2 = breakeven_hit_rate(tp, sl, 2.0, meta["cent_floor"], meta["pct"], meta["commission"])
+            p60 = breakeven_hit_rate(tp, sl, 0.60, meta["cent_floor"], meta["pct"], meta["commission"])
             sl_txt = "none" if sl is None else f"{sl * 100:.0f}%"
-            p_txt = "not defined" if not math.isfinite(p) else f"{p * 100:.1f}%"
-            lines.append(f"| {tp * 100:.0f}% | {sl_txt} | {p_txt} |")
+
+            def _be(p):
+                return "not defined" if not math.isfinite(p) else f"{p * 100:.1f}%"
+
+            lines.append(f"| {tp * 100:.0f}% | {sl_txt} | {_be(p2)} | {_be(p60)} |")
     lines.append("")
     lines.append("## In-sample, best configs by the paired-difference t")
     lines.append("")
@@ -1372,7 +1568,7 @@ def render_report(meta, rows, tops):
             lines.append("No in-sample config produced a paired-difference t. That needs trades on at least two days.")
             lines.append("")
             continue
-        lines.append("| Strike | TP | SL | Time | Trades | /day | Hit | Net % | $/day | Max DD $ | t | vs random net % | t diff | 95% CI | skips entry/stale |")
+        lines.append("| Strike | TP | SL | Time | Trades | /day | Hit | Net % | $/day | Max DD $ | t | vs random net % | t diff | 95% CI | skips entry/stale/premium |")
         lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for r in show:
             ci = f"[{_fmt(r['boot_lo'])}, {_fmt(r['boot_hi'])}]" if math.isfinite(r["boot_lo"]) else ""
@@ -1380,7 +1576,8 @@ def render_report(meta, rows, tops):
                 f"| {r['strike']} | {r['tp'] * 100:.0f}% | {_fmt_sl(r['sl'])} | {r['time_stop']}m | {r['n']} | "
                 f"{_fmt(r['trades_per_day'])} | {_hit(r['hit_rate'])} | "
                 f"{_fmt(r['mean_net_pct'])} | {_fmt(r['usd_per_day'])} | {_fmt(r['max_drawdown_usd'])} | {_fmt(r['t'])} | "
-                f"{_fmt(r['random_mean_net_pct'])} | {_fmt(r['t_diff'])} | {ci} | {r['n_skip_entry']}/{r['n_skip_stale']} |"
+                f"{_fmt(r['random_mean_net_pct'])} | {_fmt(r['t_diff'])} | {ci} | "
+                f"{r['n_skip_entry']}/{r['n_skip_stale']}/{r.get('skips_premium', 0)} |"
             )
         lines.append("")
     lines.append("## Reference random book, in sample")
@@ -1425,6 +1622,37 @@ def render_report(meta, rows, tops):
             f"{_fmt(oos['random_mean_net_pct']) if oos else ''} | {_fmt(oos['t_diff']) if oos else ''} | {ci} |"
         )
     lines.append("")
+    lines.append("## Entry hour")
+    lines.append("")
+    lines.append(
+        "Descriptive only, not used for selection. "
+        "Mean net % and fill count by the clock hour of the entry print (ET), for the top in-sample config of each signal "
+        "and for the reference random book at that same strike and exit. "
+        "This split was not used to rank configs and was not used to choose the holdout. "
+        "The same columns (`hour_9_n`, `hour_9_net_pct`, through hour 15) are on those rows in `results/scalp_real_results.csv`, "
+        "and on every in-sample random baseline row. Other rows leave them blank. A cell is `trades / mean net %`."
+    )
+    lines.append("")
+    hour_table = meta.get("hour_table") or []
+    if not hour_table:
+        lines.append("No ranked in-sample config, so there is no per-signal hour split.")
+    else:
+        head = " | ".join(f"{h} ET" for h in ENTRY_HOURS)
+        lines.append(f"| Book | Signal | Strike | TP | SL | Time | {head} |")
+        lines.append("|" + "|".join(["---"] * (6 + len(ENTRY_HOURS))) + "|")
+        for rec in hour_table:
+            cells = []
+            for h in ENTRY_HOURS:
+                slot = rec["hours"].get(h) or {"n": 0, "net_pct": float("nan")}
+                if slot["n"]:
+                    cells.append(f"{slot['n']} / {_fmt(slot['net_pct'])}")
+                else:
+                    cells.append("0")
+            lines.append(
+                f"| {rec['book']} | {rec['signal']} | {rec['strike']} | {rec['tp'] * 100:.0f}% | "
+                f"{_fmt_sl(rec['sl'])} | {rec['time_stop']}m | " + " | ".join(cells) + " |"
+            )
+    lines.append("")
     lines.append("## How to read a pass")
     lines.append("")
     lines.append(
@@ -1433,7 +1661,10 @@ def render_report(meta, rows, tops):
         "0DTE spreads are often wider than the half-spread assumed here; when they are, the break-even hit rate moves up."
     )
     lines.append("")
-    lines.append(f"Skipped entries with no print within 2 minutes, and exits skipped as stale, are columns in the csv. {meta['skip_note']}")
+    lines.append(
+        "Skipped entries with no print within 2 minutes, exits skipped as stale, and entry prints outside the premium band "
+        f"(skips_premium) are columns in the csv. {meta['skip_note']}"
+    )
     lines.append("")
     return "\n".join(lines)
 
@@ -1462,6 +1693,16 @@ def _write_text(path, text):
 def _env_float(name, default):
     raw = os.getenv(name, "").strip()
     return float(raw) if raw else default
+
+
+def _env_optional_float(name):
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        sys.exit(f"{name} must be a number, or empty")
 
 
 def _env_int(name, default):
@@ -1575,6 +1816,7 @@ def _skips_for(attempts, days):
         "skip_entry": sum(1 for a in att if a["status"] == "skip_entry"),
         "skip_stale": sum(1 for a in att if a["status"] == "skip_stale"),
         "skip_spot": sum(1 for a in att if a["status"] == "skip_spot"),
+        "skip_premium": sum(1 for a in att if a["status"] == "skip_premium"),
     }
 
 
@@ -1603,6 +1845,7 @@ def _make_row(signal, strike, tp, sl, ts, split, role, stats, skips, n_days, cos
         "n_skip_entry": skips.get("skip_entry", 0),
         "n_skip_stale": skips.get("skip_stale", 0),
         "n_skip_spot": skips.get("skip_spot", 0),
+        "skips_premium": skips.get("skip_premium", 0),
         "n_days": n_days,
         "breakeven_hit_rate": be,
         "q_fdr": float("nan"),
@@ -1649,6 +1892,18 @@ def main():
         sys.exit("SCALP_DAYS must be >= 1")
     symbols = [s.strip().upper() for s in os.getenv("SCALP_SYMBOLS", "SPY,QQQ").split(",") if s.strip()]
     strikes = _parse_strikes(os.getenv("SCALP_STRIKES", "2itm,atm"))
+    premium_min = _env_optional_float("SCALP_PREMIUM_MIN")
+    premium_max = _env_optional_float("SCALP_PREMIUM_MAX")
+    if premium_min is not None and premium_min < 0:
+        sys.exit("SCALP_PREMIUM_MIN cannot be negative")
+    if premium_max is not None and premium_max < 0:
+        sys.exit("SCALP_PREMIUM_MAX cannot be negative")
+    if premium_min is not None and premium_max is not None and premium_min > premium_max:
+        sys.exit("SCALP_PREMIUM_MIN cannot be above SCALP_PREMIUM_MAX")
+    premium = None if premium_min is None and premium_max is None else (premium_min, premium_max)
+    first_label, first_min = parse_clock_et(os.getenv("SCALP_FIRST_ENTRY", ""), "SCALP_FIRST_ENTRY")
+    last_label, last_min = parse_clock_et(os.getenv("SCALP_LAST_ENTRY", ""), "SCALP_LAST_ENTRY")
+    entry_window = None if first_min is None and last_min is None else (first_min, last_min)
     cent_floor = _env_float("SCALP_HALF_SPREAD_CENTS", 1.0) / 100.0
     pct = _env_float("SCALP_HALF_SPREAD_PCT", 0.5) / 100.0
     commission = _env_float("SCALP_COMMISSION", 0.65)
@@ -1719,7 +1974,10 @@ def main():
         evs = ref_events if sid == "random" else signal_events[sid]
         for strike in strikes:
             for tp, sl, ts in ((tp, sl, ts) for tp in TPS for sl in SLS for ts in TIME_STOPS):
-                trades, attempts, _skips = run_book(evs, opt, und, strike, (tp, sl, ts), costs, sid)
+                trades, attempts, _skips = run_book(
+                    evs, opt, und, strike, (tp, sl, ts), costs, sid,
+                    premium=premium, entry_window=entry_window,
+                )
                 key = (sid, strike, tp, sl, ts)
                 books[key] = trades
                 attempts_by[key] = attempts
@@ -1739,7 +1997,11 @@ def main():
         for ev in drawn:
             if ev is None:
                 continue
+            if not minute_allowed(ev["entry_min"], entry_window):
+                continue
             for m in range(ev["entry_min"], min(ev["entry_min"] + ENTRY_LOOK, FLAT_MIN)):
+                if not minute_allowed(m, entry_window):
+                    continue
                 spot = spot_at(und[ev["symbol"]].get(ev["day"]), m)
                 if spot is None:
                     continue
@@ -1755,9 +2017,22 @@ def main():
         opt.update(more)
 
     control_trades = {}
+    control_premium_skips = {}
     for key, drawn in controls.items():
         sid, strike, tp, sl, ts = key
-        control_trades[key] = simulate_controls([e for e in drawn if e is not None], opt, und, (tp, sl, ts), costs, strike)
+        filled, prem_skips = simulate_controls(
+            [e for e in drawn if e is not None], opt, und, (tp, sl, ts), costs, strike,
+            premium=premium, entry_window=entry_window,
+        )
+        control_trades[key] = filled
+        control_premium_skips[key] = prem_skips
+
+    def skips_with_controls(key, days):
+        skips = _skips_for(attempts_by[key], days)
+        want = set(days)
+        extra = sum(1 for s in control_premium_skips.get(key, []) if s["day"] in want)
+        skips["skip_premium"] = skips.get("skip_premium", 0) + extra
+        return skips
 
     def split_trades(trades, days):
         want = set(days)
@@ -1774,7 +2049,7 @@ def main():
                 continue
             if not days and split_name == "holdout":
                 continue
-            skips = _skips_for(attempts_by[key], days)
+            skips = skips_with_controls(key, days)
             st = summarize(split_trades(trades, days), days, n_boot, _config_seed(sid, strike, tp, sl, ts, split_name))
             rnd_st = {
                 "random_n": 0, "random_hit_rate": float("nan"),
@@ -1799,7 +2074,7 @@ def main():
                 is_search_rows.append(row)
 
     q = benjamini_hochberg([r["p_diff"] for r in is_search_rows])
-    n_family = search_config_count()
+    n_family = search_config_count(strikes)
     for r, qv in zip(is_search_rows, q):
         r["q_fdr"] = float(qv) if math.isfinite(qv) else float("nan")
         p = r["p_diff"]
@@ -1836,7 +2111,7 @@ def main():
                     "random_mean_net_pct": rnd_full["mean_net_pct"], "random_t": rnd_full["t"],
                 })
                 oos_row = _make_row(r["signal"], r["strike"], r["tp"], r["sl"], r["time_stop"], "holdout", "search",
-                                    stats, _skips_for(attempts_by[key], oos_days), len(oos_days), costs, True)
+                                    stats, skips_with_controls(key, oos_days), len(oos_days), costs, True)
                 rows.append(oos_row)
             else:
                 oos_row = None
@@ -1848,9 +2123,50 @@ def main():
                 trade_dump += _trade_rows(books[ref_key], ref_key[0], ref_key[1], ref_key[2], ref_key[3], ref_key[4],
                                           split_of, "random_ref")
 
+    # Entry-hour columns are descriptive. They are filled for the top in-sample config of each
+    # signal and for every in-sample random baseline row. They are not a rank key.
+    hour_lookup = {}
+    for key, trades in books.items():
+        sid, strike, tp, sl, ts = key
+        if sid != "random":
+            continue
+        hour_lookup[(sid, strike, tp, sl, ts, "in_sample")] = entry_hour_breakdown(split_trades(trades, is_days))
+    hour_table = []
+    for sid in SEARCH_IDS:
+        # The selected top when one qualifies; otherwise the leading in-sample row.
+        # The hour split is not an input to either choice.
+        best = next((rec["is"] for rec in tops if rec["is"]["signal"] == sid), None)
+        if best is None:
+            mine = [r for r in is_search_rows if r["signal"] == sid and math.isfinite(r["t_diff"])]
+            mine.sort(key=lambda r: (r["t_diff"], r["mean_net_pct"] if math.isfinite(r["mean_net_pct"]) else -1e9, r["n"]),
+                      reverse=True)
+            best = mine[0] if mine else None
+        if best is None:
+            continue
+        key = (best["signal"], best["strike"], best["tp"], best["sl"], best["time_stop"])
+        sig_hours = entry_hour_breakdown(split_trades(books[key], is_days))
+        hour_lookup[(*key, "in_sample")] = sig_hours
+        hour_table.append({
+            "book": "signal", "signal": best["signal"], "strike": best["strike"],
+            "tp": best["tp"], "sl": best["sl"], "time_stop": best["time_stop"], "hours": sig_hours,
+        })
+        ref_key = ("random", key[1], key[2], key[3], key[4])
+        ref_hours = hour_lookup.get((*ref_key, "in_sample"))
+        if ref_hours is not None:
+            hour_table.append({
+                "book": "random", "signal": "random", "strike": ref_key[1],
+                "tp": ref_key[2], "sl": ref_key[3], "time_stop": ref_key[4], "hours": ref_hours,
+            })
+
     # FDR / bonferroni stay blank on holdout rows (they were not part of the family correction).
     csv_rows = []
     for r in rows:
+        hour_kwargs = {}
+        breakdown = hour_lookup.get((r["signal"], r["strike"], r["tp"], r["sl"], r["time_stop"], r["split"]))
+        if breakdown:
+            for h, slot in breakdown.items():
+                hour_kwargs[f"hour_{h}_n"] = slot["n"]
+                hour_kwargs[f"hour_{h}_net_pct"] = slot["net_pct"] if slot["n"] else ""
         csv_rows.append(_row_out(
             signal=r["signal"], strike=r["strike"], tp=f"{r['tp']:.2f}", sl=_fmt_sl(r["sl"]),
             time_stop=r["time_stop"], split=r["split"], role=r["role"],
@@ -1863,14 +2179,18 @@ def main():
             n_skip_entry=r["n_skip_entry"], n_skip_stale=r["n_skip_stale"], n_skip_spot=r["n_skip_spot"],
             n_days=r["n_days"], breakeven_hit_rate=r["breakeven_hit_rate"], q_fdr=r["q_fdr"],
             bonferroni_05=r["bonferroni_05"], beats_random=r["beats_random"], selected_top3=r["selected_top3"],
+            skips_premium=r["skips_premium"], **hour_kwargs,
         ))
 
     entry_skips = sum(r["n_skip_entry"] for r in is_search_rows)
     stale_skips = sum(r["n_skip_stale"] for r in is_search_rows)
+    prem_skips = sum(r["skips_premium"] for r in is_search_rows)
     attempts = sum(r["n_attempts"] for r in is_search_rows)
     skip_note = (
         f"Across the in-sample search grid (each exit is its own book, so the same signal is counted once per exit): "
-        f"{entry_skips} entry skips and {stale_skips} stale-exit skips out of {attempts} one-position attempts."
+        f"{entry_skips} entry skips, {stale_skips} stale-exit skips, and {prem_skips} skips_premium "
+        f"out of {attempts} one-position attempts. "
+        "On a search row, skips_premium counts that signal's premium skips plus paired controls outside the band."
     )
     t_crit = norm_ppf(1 - (0.05 / n_family) / 2)
     coverage = (
@@ -1895,6 +2215,10 @@ def main():
         "n_family": n_family,
         "t_crit": t_crit,
         "skip_note": skip_note,
+        "family_note": family_note(strikes),
+        "premium_line": describe_premium(premium),
+        "window_line": describe_window(first_label, last_label),
+        "hour_table": hour_table,
     }
     report = render_report(meta, rows, tops)
     md_path = os.path.join(out_dir, "SCALP_REAL.md")
