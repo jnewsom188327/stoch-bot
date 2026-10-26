@@ -268,4 +268,4 @@ The +15% peak test uses the best bid in the window. Net is that bid against the 
 
 The book flats at 15:55. An entry at 15:45 has ten minutes of path, so the 30-minute and 60-minute windows are that shorter path. A chart event whose entry would fall before 9:35 is not taken, and a run that started then is not re-armed at 9:35.
 
-This file scores 960 setups and 3840 rows after strike and premium band. Bootstrap draws: 1000. Runtime 2.8 minutes. A short sample is not a reason to change the live bot.
+This file scores 960 setups and 3840 rows after strike and premium band. Bootstrap draws: 1000. Runtime 2.4 minutes. A short sample is not a reason to change the live bot.
