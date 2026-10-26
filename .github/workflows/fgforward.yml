@@ -1,0 +1,86 @@
+name: Greed/fear forward test (log only)
+
+# LOG ONLY. Reads SIP bars and option quotes. Does not place orders, including paper orders.
+# GitHub cron is UTC and does not follow US daylight saving time.
+# 55 15 UTC is 11:55 EDT. 55 16 UTC is 11:55 EST.
+# The other line falls outside 11:55-15:50 ET and the script exits quietly.
+# A second start while one is in progress waits, then exits quietly if the window is over.
+on:
+  schedule:
+    - cron: "55 15 * * 1-5"
+    - cron: "55 16 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fgforward
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: python -m pytest -q tests/test_fgforward.py
+      - name: Prepare the results worktree (never main)
+        run: |
+          set -euo pipefail
+          BRANCH=fgforward-results
+          git fetch --depth=1 origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git worktree add --detach /tmp/fgforward-wt "origin/$BRANCH"
+            git -C /tmp/fgforward-wt checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git worktree add -b "$BRANCH" /tmp/fgforward-wt
+          fi
+          HEADBR="$(git -C /tmp/fgforward-wt rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p /tmp/fgforward-wt/results
+      - name: Forward log (read-only market data, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          FG_PUBLISH: "1"
+          FG_RESULTS_BRANCH: fgforward-results
+          FG_OUT: /tmp/fgforward-wt/results
+          FG_GIT: /tmp/fgforward-wt
+          FG_LOCK: /tmp/fgforward.lock
+        run: python fgforward.py
+      - name: Push any results still on disk
+        if: always()
+        run: |
+          set -euo pipefail
+          BRANCH=fgforward-results
+          if [ ! -d /tmp/fgforward-wt ]; then
+            echo "No results worktree"
+            exit 0
+          fi
+          HEADBR="$(git -C /tmp/fgforward-wt rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          git -C /tmp/fgforward-wt config user.name "fgforward"
+          git -C /tmp/fgforward-wt config user.email "fgforward@users.noreply.github.com"
+          git -C /tmp/fgforward-wt add -- results/fgforward_signals.csv results/fgforward_trades.csv results/FGFORWARD.md results/fgforward_state.json || true
+          if git -C /tmp/fgforward-wt diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          git -C /tmp/fgforward-wt commit -m "fgforward log $(date -u +%F)"
+          git -C /tmp/fgforward-wt pull --rebase origin "$BRANCH" || git -C /tmp/fgforward-wt rebase --abort || true
+          git -C /tmp/fgforward-wt push origin "HEAD:${BRANCH}"
