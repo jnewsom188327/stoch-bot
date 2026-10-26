@@ -1,0 +1,68 @@
+//@version=5
+// Research drawing of the greed/fear fade study. Not an order and not a recommendation.
+// Put this on a 1-minute SPY or QQQ chart. The study entered at the next 1-minute open
+// after the signal bar closed, from 9:35 through 15:45 New York time.
+// Exit tested: fix tp15 sl15 t30 d0. Option fills are not on this chart. A percent target or stop
+// has to be managed on the option. A 1-minute delay version was tested separately.
+indicator("FG PERFECT UNPROVEN — greed/fear fade", overlay=true, max_labels_count=500)
+
+gLvl = input.float(95, "Extreme level (greed for puts, fear for calls)")
+fLvl = input.float(20, "Quiet side maximum")
+showExits = input.bool(true, "Show exit marks")
+
+hc = ta.highest(close, 22)
+lc = ta.lowest(close, 22)
+wvf = (hc - low) / hc * 100.0
+wvi = (high - lc) / lc * 100.0
+fear = wvf / ta.highest(wvf, 50) * 100.0
+greed = wvi / ta.highest(wvi, 50) * 100.0
+fearSig = ta.sma(fear, 9)
+greedSig = ta.sma(greed, 9)
+
+basis = ta.sma(close, 20)
+dev = 2.0 * ta.stdev(close, 20)
+tr = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+kc = ta.sma(tr, 20)
+sqOn = (basis - dev > basis - 1.5 * kc) and (basis + dev < basis + 1.5 * kc)
+mid = ((ta.highest(high, 20) + ta.lowest(low, 20)) / 2.0 + basis) / 2.0
+mom = ta.linreg(close - mid, 20, 0)
+momDn = mom < mom[1] and (mom[1] > 0 or mom[1] > mom[2])
+momUp = mom > mom[1] and (mom[1] < 0 or mom[1] < mom[2])
+
+greedExt = greed >= gLvl and fear <= fLvl
+fearExt = fear >= gLvl and greed <= fLvl
+greedDrop = greed[1] >= gLvl and fear[1] <= fLvl and greed < greed[1] and greed[1] >= greed[2]
+fearDrop = fear[1] >= gLvl and greed[1] <= fLvl and fear < fear[1] and fear[1] >= fear[2]
+greedCross = greed[1] >= gLvl and fear[1] <= fLvl and greed[1] >= greedSig[1] and greed < greedSig
+fearCross = fear[1] >= gLvl and greed[1] <= fLvl and fear[1] >= fearSig[1] and fear < fearSig
+putTurn = greedDrop or greedCross
+callTurn = fearDrop or fearCross
+inSession = not na(time(timeframe.period, "0935-1545", "America/New_York"))
+sessionOk = inSession
+putCore = putTurn
+callCore = callTurn
+fast = ta.ema(close, 12)
+slow = ta.ema(close, 26)
+macd = fast - slow
+hist = macd - ta.ema(macd, 9)
+macdDn = hist < hist[1] and (hist[1] > 0 or hist[1] > hist[2])
+macdUp = hist > hist[1] and (hist[1] < 0 or hist[1] < hist[2])
+putCore := putCore and (momDn or macdDn)
+callCore := callCore and (momUp or macdUp)
+putEntry = putCore and sessionOk
+callEntry = callCore and sessionOk
+
+bgcolor(greedExt ? color.new(color.red, 85) : fearExt ? color.new(color.green, 85) : na)
+plotshape(putEntry, title="Put fade", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="PUT")
+plotshape(callEntry, title="Call fade", style=shape.triangleup, location=location.belowbar, color=color.teal, size=size.small, text="CALL")
+plotshape(momDn and greedExt[1], title="Squeeze mom down", style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
+plotshape(momUp and fearExt[1], title="Squeeze mom up", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
+// Option target +15%, stop -15%, time 30 min. The mark is the time stop, not the option fill.
+exitMark = showExits and (putEntry[30] or callEntry[30])
+plotshape(exitMark, title="Time exit", style=shape.xcross, location=location.abovebar, color=color.yellow, size=size.tiny)
+alertcondition(putEntry, title="FG put entry", message="FG PERFECT put fade. Manage the option with fix tp15 sl15 t30 d0. UNPROVEN.")
+alertcondition(callEntry, title="FG call entry", message="FG PERFECT call fade. Manage the option with fix tp15 sl15 t30 d0. UNPROVEN.")
+alertcondition(exitMark, title="FG exit mark", message="FG PERFECT exit mark for fix tp15 sl15 t30 d0. UNPROVEN.")
+
+if barstate.islast
+    label.new(bar_index, high, "FG PERFECT UNPROVEN. Exit fix tp15 sl15 t30 d0. Research only.", style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 20))
