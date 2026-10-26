@@ -1,12 +1,12 @@
-# Edge hunt (2026-10-25 15:26 ET)
+# Edge hunt (2026-10-25 19:45 ET)
 
-**Verdict:** 339 candidate rules. Best real out-of-sample net is +15.7% on pair vix_prior|high + wvf_roll_1m|event|follow (atm, target 20% / stop 10% / 10m). Luck benchmark (best out-of-sample net across 200 shuffles of the daily labels): +15.7%. Median of those per-shuffle bests: +15.4%. Rules expected to look at least this good by luck: 0.52.
+**Verdict:** 447 candidate rules. Best real out-of-sample net is +15.7% on pair vix_prior|high + wvf_roll_1m|event|follow (atm, target 20% / stop 10% / 10m). Luck benchmark (best out-of-sample net across 200 shuffles of the daily labels): +15.7%. Median of those per-shuffle bests: +15.5%. Rules expected to look at least this good by luck: 0.57.
 
 A candidate must do all three: out-of-sample mean net above 0 after costs, mean net above its matched random book, and a positive fold mean in at least 3 of 5 folds. The top 30 below are ranked by out-of-sample net even when they are not candidates.
 
 **Data span:** SPY, QQQ, 170 completed sessions with option prints, 2026-02-23 through 2026-10-23. Warmup bars before 2026-02-23 seed indicators, relative volume, and prior-day stats, and are not scored. VIX: Yahoo ^VIX + Cboe VIX. VIX data span 1990-01-02 through 2026-10-23 (9301 closes). Last date 2026-10-23.. Premium $0.45 to $0.80. Quick mode: no.
 
-Family size: 97128 (2698 setups x 2 strikes x 18 exits). Benjamini-Hochberg uses that full family as N. Primary selection exit: target 15%, stop 20%, 10-minute time stop. The same chosen thresholds are then scored at 10% and 20% targets, stops 10%, 20%, and none, and time stops of 10 and 30 minutes.
+Family size: 162792 (4522 setups x 2 strikes x 18 exits). Benjamini-Hochberg uses that full family as N. Primary selection exit: target 15%, stop 20%, 10-minute time stop. The same chosen thresholds are then scored at 10% and 20% targets, stops 10%, 20%, and none, and time stops of 10 and 30 minutes.
 
 ## Candidates
 
@@ -19,10 +19,13 @@ Family size: 97128 (2698 setups x 2 strikes x 18 exits). Benjamini-Hochberg uses
 | pair vix_chg_5d|low + tod|4|call | 1otm | target 20% / no stop / 30m | +10.4% | 17 | 88% | 3.45 | 3/5 | +2.9% to +14.8% | -3.2% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 20% / stop 20% / 10m | +10.1% | 9 | 89% | 2.57 | 3/5 | +1.8% to +15.0% | -4.6% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 20% / stop 20% / 30m | +10.1% | 9 | 89% | 2.57 | 3/5 | +2.6% to +15.0% | -4.4% | yes |
+| pair div_5m fade + cci_washout_1m_n9_t150 with vix>=16 | atm | target 20% / no stop / 10m | +9.5% | 8 | 88% | 2.00 | 3/5 | -4.8% to +15.1% | -1.8% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 15% / no stop / 10m | +9.5% | 9 | 100% | 31.56 | 4/5 | +8.9% to +10.1% | -7.7% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 15% / no stop / 30m | +9.5% | 9 | 100% | 31.56 | 4/5 | +8.8% to +10.1% | -6.8% | yes |
+| pair sq_release_1m fade + cci_washout_3m_n9_t100 with vix>=16 | 1otm | target 20% / no stop / 10m | +9.0% | 10 | 80% | 2.74 | 3/5 | +2.1% to +14.8% | -5.2% | yes |
 | pair or_size|high + vix_chg_5d|mag|fade | atm | target 20% / no stop / 30m | +9.0% | 12 | 92% | 2.38 | 3/5 | +3.0% to +15.5% | +6.9% | yes |
 | pair vix_chg_5d|low + tod|2|call | 1otm | target 15% / no stop / 30m | +8.8% | 11 | 91% | 10.82 | 3/5 | +6.9% to +10.0% | +4.2% | yes |
+| pair div_3m fade + cci_washout_3m_n36_t100 with vix>=16 | atm | target 20% / no stop / 30m | +8.2% | 20 | 85% | 2.63 | 4/5 | +1.0% to +14.4% | -5.7% | yes |
 | pair gap_vs_range|low + div_5m|event|fade | atm | target 20% / no stop / 30m | +8.2% | 19 | 89% | 1.59 | 3/5 | -3.9% to +14.7% | -5.3% | yes |
 | pair gap_pct|low + div_1m|event|fade | atm | target 15% / no stop / 30m | +8.0% | 23 | 96% | 5.50 | 4/5 | +4.0% to +9.8% | -5.6% | yes |
 | pair prior_range_pct|high + swing_3m|event|fade | atm | target 20% / no stop / 30m | +7.9% | 39 | 87% | 2.87 | 4/5 | +2.2% to +13.2% | -10.1% | yes |
@@ -34,26 +37,23 @@ Family size: 97128 (2698 setups x 2 strikes x 18 exits). Benjamini-Hochberg uses
 | pair vix_chg_5d|high + div_5m|event|fade | atm | target 15% / no stop / 30m | +7.0% | 16 | 94% | 2.77 | 3/5 | +0.4% to +9.8% | -7.6% | yes |
 | pair vix_chg_5d|low + tod|4|call | 1otm | target 15% / no stop / 30m | +6.9% | 17 | 94% | 2.61 | 3/5 | +0.1% to +10.0% | -2.7% | yes |
 | pair gap_vs_range|low + tod|10|put | 1otm | target 20% / no stop / 30m | +6.9% | 83 | 92% | 2.57 | 4/5 | +0.9% to +11.5% | -5.3% | yes |
+| pair wvi_roll_3m fade + cci_washout_3m_n18_t150 with vix>=16 | atm | target 20% / no stop / 30m | +6.7% | 54 | 87% | 2.19 | 5/5 | +0.0% to +12.2% | -4.8% | yes |
 | pair or_size|high + vwap_rvol|event|fade | atm | target 20% / no stop / 30m | +6.6% | 62 | 84% | 2.78 | 5/5 | +2.3% to +11.7% | -0.9% | yes |
 | pair gap_vs_range|low + wvi_roll_3m|event|fade | atm | target 20% / no stop / 30m | +6.4% | 44 | 84% | 2.33 | 4/5 | -0.3% to +11.9% | -5.9% | yes |
 | pair dow|4|gate + tod|9|put | 1otm | target 15% / no stop / 30m | +6.2% | 45 | 96% | 3.04 | 4/5 | +1.6% to +9.3% | -2.8% | yes |
+| pair sq_release_1m fade + cci_washout_1m_n9_t150 with vix>=16 | 1otm | target 20% / no stop / 10m | +6.1% | 11 | 73% | 1.77 | 3/5 | -1.4% to +13.7% | -4.0% | yes |
 | pair gap_vs_range|high + ret_5|low|call | atm | target 20% / no stop / 30m | +6.1% | 47 | 85% | 1.96 | 4/5 | -0.0% to +12.3% | -5.0% | yes |
 | pair vix_chg_5d|low + tod|4|call | 1otm | target 20% / stop 20% / 10m | +6.1% | 17 | 65% | 2.54 | 3/5 | +0.3% to +11.9% | +0.7% | yes |
+| pair div_3m fade + cci_washout_3m_n36_t100 with vix>=16 | atm | target 15% / no stop / 30m | +6.0% | 20 | 90% | 2.59 | 4/5 | +0.8% to +9.8% | -6.1% | yes |
 | pair prior_close_pos|low + ret_15|low|put | atm | target 20% / no stop / 10m | +5.9% | 26 | 88% | 1.40 | 3/5 | -2.2% to +14.4% | -5.6% | yes |
 | pair prior_close_pos|high + macd_zero_3m|event|fade | atm | target 20% / no stop / 10m | +5.9% | 14 | 71% | 1.64 | 3/5 | -1.5% to +14.4% | -3.9% | yes |
+| pair wvi_roll_3m fade + cci_washout_3m_n18_t150 with vix>=16 | atm | target 15% / no stop / 30m | +5.8% | 54 | 93% | 3.26 | 4/5 | +1.9% to +8.8% | -6.0% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 15% / stop 20% / 10m | +5.7% | 9 | 89% | 1.64 | 3/5 | -2.3% to +10.1% | -4.8% | yes |
 | pair vix_chg_5d|high + ret_15|low|put | atm | target 15% / stop 20% / 30m | +5.7% | 9 | 89% | 1.64 | 3/5 | -2.4% to +10.1% | -4.7% | yes |
+| pair div_3m fade + cci_washout_3m_n9_t150 against vix>=16 | atm | target 20% / no stop / 30m | +5.6% | 19 | 84% | 1.31 | 4/5 | -4.1% to +14.2% | -1.9% | yes |
 | pair prior_close_pos|high + tod|2|put | 1otm | target 20% / stop 10% / 10m | +5.5% | 19 | 68% | 1.84 | 3/5 | -0.7% to +12.3% | -4.7% | yes |
-| pair prior_close_pos|high + tod|2|put | 1otm | target 20% / stop 10% / 30m | +5.5% | 19 | 68% | 1.84 | 3/5 | -0.1% to +12.5% | -4.8% | yes |
-| pair vix_chg_5d|low + tod|4|call | 1otm | target 20% / stop 20% / 30m | +5.4% | 17 | 76% | 1.82 | 3/5 | -1.3% to +12.0% | +0.6% | yes |
-| pair gap_pct|low + vwap_atr|low|put | 1otm | target 20% / no stop / 30m | +5.3% | 78 | 85% | 1.78 | 3/5 | -1.6% to +11.1% | -0.6% | yes |
-| pair vix_chg_5d|low + tod|4|call | 1otm | target 20% / no stop / 10m | +5.0% | 17 | 65% | 1.66 | 3/5 | -1.5% to +11.9% | -0.5% | yes |
-| pair dow|4|gate + ret_15|high|put | 1otm | target 15% / no stop / 30m | +5.0% | 97 | 89% | 3.81 | 4/5 | +2.4% to +7.4% | -4.0% | yes |
-| pair dow|2|gate + tod|10|put | 1otm | target 20% / no stop / 30m | +4.9% | 42 | 81% | 1.55 | 4/5 | -2.5% to +10.1% | -3.2% | yes |
-| pair vix_prior|high + wvf_roll_3m|event|fade | 1otm | target 20% / no stop / 10m | +4.9% | 18 | 78% | 2.31 | 3/5 | +1.1% to +15.3% | -7.2% | yes |
-| pair dow|0|gate + vix_chg_5d|mag|fade | atm | target 20% / no stop / 30m | +4.8% | 155 | 81% | 1.62 | 3/5 | -1.8% to +10.3% | +1.7% | yes |
 
-299 more candidates are in the CSV.
+407 more candidates are in the CSV.
 
 ## Top 30 by out-of-sample net
 
@@ -74,23 +74,23 @@ These are the highest out-of-sample means. A 'no' in the candidate column failed
 | pair vix_prior|high + tod|2|put | 1otm | target 20% / stop 20% / 30m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -8.9% | no |
 | pair vix_prior|high + tod|2|put | 1otm | target 20% / no stop / 10m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -6.6% | no |
 | pair vix_prior|high + tod|2|put | 1otm | target 20% / no stop / 30m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | +4.8% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / stop 10% / 10m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -7.0% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / stop 10% / 30m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -7.0% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / stop 20% / 10m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -6.3% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / stop 20% / 30m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -2.8% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / no stop / 10m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -13.6% | no |
+| pair sq_release_1m follow + cci_washout_3m_n9_t150 against vix>=16 | 1otm | target 20% / no stop / 30m | +15.6% | 1 | 100% |  | 1/5 | +15.6% to +15.6% | -7.7% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / stop 10% / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +5.5% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / stop 10% / 30m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +5.5% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / stop 20% / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +2.5% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / stop 20% / 30m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +2.5% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / no stop / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +3.9% | no |
 | pair vix_prior|high + ret_30|high|put | 1otm | target 20% / no stop / 30m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | +11.3% | no |
-| pair vix_prior|high + tod|12|put | 1otm | target 20% / stop 20% / 30m | +15.5% | 2 | 100% |  | 1/5 | +15.5% to +15.5% | +6.8% | no |
-| pair vix_prior|high + tod|12|put | 1otm | target 20% / no stop / 30m | +15.5% | 2 | 100% |  | 1/5 | +15.5% to +15.5% | +4.3% | no |
-| pair vix_prior|high + wvf_1m|high|put | atm | target 20% / stop 20% / 10m | +15.4% | 4 | 100% |  | 1/5 | +15.4% to +15.4% | +0.4% | no |
-| pair vix_prior|high + wvf_1m|high|put | atm | target 20% / stop 20% / 30m | +15.4% | 4 | 100% |  | 1/5 | +15.4% to +15.4% | +0.4% | no |
-| pair vix_prior|high + wvf_1m|high|put | atm | target 20% / no stop / 10m | +15.4% | 4 | 100% |  | 1/5 | +15.4% to +15.4% | -4.2% | no |
-| pair vix_prior|high + wvf_1m|high|put | atm | target 20% / no stop / 30m | +15.4% | 4 | 100% |  | 1/5 | +15.4% to +15.4% | -3.1% | no |
-| pair dow|2|gate + vix_chg_5d|mag|follow | atm | target 20% / stop 10% / 10m | +15.3% | 1 | 100% |  | 1/5 | +15.3% to +15.3% | +9.2% | no |
-| pair dow|2|gate + vix_chg_5d|mag|follow | atm | target 20% / stop 10% / 30m | +15.3% | 1 | 100% |  | 1/5 | +15.3% to +15.3% | +9.2% | no |
-| pair dow|2|gate + vix_chg_5d|mag|follow | atm | target 20% / stop 20% / 10m | +15.3% | 1 | 100% |  | 1/5 | +15.3% to +15.3% | +7.2% | no |
-| pair dow|2|gate + vix_chg_5d|mag|follow | atm | target 20% / stop 20% / 30m | +15.3% | 1 | 100% |  | 1/5 | +15.3% to +15.3% | +7.2% | no |
-| pair dow|2|gate + vix_chg_5d|mag|follow | atm | target 20% / no stop / 10m | +15.3% | 1 | 100% |  | 1/5 | +15.3% to +15.3% | +6.0% | no |
+| pair div_3m fade + cci_washout_3m_n18_t100 with vix>=16 | 1otm | target 20% / stop 10% / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | -6.5% | no |
+| pair div_3m fade + cci_washout_3m_n18_t100 with vix>=16 | 1otm | target 20% / stop 10% / 30m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | -6.5% | no |
+| pair div_3m fade + cci_washout_3m_n18_t100 with vix>=16 | 1otm | target 20% / stop 20% / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | -7.4% | no |
+| pair div_3m fade + cci_washout_3m_n18_t100 with vix>=16 | 1otm | target 20% / stop 20% / 30m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | -5.5% | no |
+| pair div_3m fade + cci_washout_3m_n18_t100 with vix>=16 | 1otm | target 20% / no stop / 10m | +15.5% | 1 | 100% |  | 1/5 | +15.5% to +15.5% | -17.5% | no |
 
 ## What was searched
 
@@ -99,6 +99,40 @@ Singles cover each daily and intraday feature as a high bucket and a low bucket,
 Reversal events, all causal: MACD(12,26,9) histogram zero-cross, shrink, and color flip on 1-minute and 3-minute bars; regular bullish/bearish divergence of price vs MACD histogram on 1-minute, 3-minute, and 5-minute bars; 5-bar-left/5-bar-right swing pivots on 1-minute and 3-minute bars, flagged at the confirmation bar; VWAP stretch in ATR units with relative volume at least 1.5x the same-minute 20-day median; Williams VIX Fix (and the greed mirror) spike then rollover on 1-minute and 3-minute bars; TTM squeeze release with a momentum color flip on 1-minute and 3-minute bars. Follow trades the event's direction. Fade trades against it. A pivot or a divergence is not tradable until the right-side bars have closed.
 
 Costs match scalp_real: half-spread per side is max(1 cents, 0.5% of premium), commission $0.65 per contract per side, one contract. Entry is the next real option open after the signal bar (that minute, or the next minute if it has no print), plus the half-spread. Exit is the bid-side proxy from scalp_real.simulate_trade. Premium band $0.45 to $0.80. Strikes: 1otm, atm. Cooldown 10 minutes per rule per day. Calls win if call and put both fire on the same minute. Walk-forward: sessions split into 6 chronological blocks; the first block is train only; each of the 5 later blocks is an out-of-sample fold trained on every earlier block. Quantile cuts and fixed grids (1.0, 1.5, 2.0 ATR, VIX-fix levels 60, 75, 90) are chosen only on that training prefix, by mean net on the 15%/20%/10-minute exit, with at least the minimum train trade count. Matched random uses the same days, the same strike and premium band, the same exit, and the rule's own entry-clock distribution (a one-minute spike falls back to its 30-minute bucket). Day-clustered t and a day-resampled 95% bootstrap describe the pooled out-of-sample trades. The luck benchmark permutes daily-feature labels across sessions (200 times unless quick or overridden), refits every daily-context rule, and leaves intraday rules as they were.
+
+## CCI washout
+
+CCI washout uses Lambert CCI(27) on typical price (high+low+close)/3 with the 0.015 constant. A low washout is the lowest CCI over the last N bars strictly below -threshold. A high washout is the highest CCI strictly above +threshold. N is 9, 18, and 36 bars of that timeframe (18 is the posted window). Thresholds are 100 and 150. On 3-minute bars, N counts 3-minute bars. Stand-alone follow buys the call after a low-side turn and the put after a high-side turn. A turn is either CCI crossing back through the threshold, or the first up-close (low side) or down-close (high side) of that washout episode. Fade takes the other side. The gate is the washout state, not the turn. Direction-consistent ('with') lets a low washout through to calls and a high washout through to puts. 'against' swaps those. The same setups are scored again on sessions whose prior VIX close is at least 16. Every one of those cells is in the family and in the Benjamini-Hochberg N.
+
+New CCI setups: 1824. New rules (setups × strikes × exits): 65664. They sit inside the family size in the verdict, so Benjamini-Hochberg N includes them.
+
+Best real out-of-sample net with at least 30 trades: +6.7% on pair wvi_roll_3m fade + cci_washout_3m_n18_t150 with vix>=16 (atm, target 20% / no stop / 30m), n=54, folds +9.5% +1.3% +9.0% +15.0% +0.7%.
+
+On this sample the washout gate did not improve the matched base event. It was lower more often than it was higher. Compared 1728 event-plus-gate pairs with the same event, same strike, and the 15%/20%/10-minute exit. Both books traded in 1606. The gated book was higher in 787, lower in 812, tied in 7. 122 pairs had no finite net on one side. Median change in out-of-sample net (gated minus base, where both traded): -0.0%. This count is not a second false-discovery test.
+
+Largest improvements (gated net minus base net):
+
+| Event | Gate | Strike | Base n | Base net | Base folds | Gated n | Gated net | Gated folds |
+|---|---|---|---:|---:|---|---:|---:|---|
+| sq_release_3m follow | cci_washout_3m_n36_t150 with | 1otm | 31 | -4.6% | na -0.8% -9.6% -5.2% -2.1% | 2 | +8.9% | na na na na +8.9% |
+| sq_release_1m follow | cci_washout_3m_n9_t100 with | atm | 54 | -7.5% | na na -13.8% -6.6% -5.7% | 8 | +3.0% | na na na na +3.0% |
+| div_3m fade | cci_washout_1m_n9_t100 against | atm | 154 | -8.6% | -9.6% -7.4% -9.3% -12.6% -2.9% | 11 | +0.2% | na na na na +0.2% |
+| sq_release_1m follow | cci_washout_3m_n9_t150 against | 1otm | 105 | -9.4% | -9.2% -2.8% -15.0% -10.6% -11.1% | 7 | -1.3% | na na na -7.4% +1.2% |
+| div_3m follow | cci_washout_3m_n9_t100 against | 1otm | 218 | -4.8% | -6.2% -5.9% -4.0% -3.0% -4.6% | 5 | +2.1% | na na na na +2.1% |
+
+Largest declines:
+
+| Event | Gate | Strike | Base n | Base net | Base folds | Gated n | Gated net | Gated folds |
+|---|---|---|---:|---:|---|---:|---:|---|
+| div_5m follow | cci_washout_3m_n18_t150 against | 1otm | 123 | -6.6% | -6.3% +1.2% -13.7% -2.3% -9.5% | 3 | -24.8% | na na na na -24.8% |
+| sq_release_1m fade | cci_washout_3m_n9_t150 with | 1otm | 78 | -3.0% | na -4.4% -2.3% -2.1% -3.5% | 2 | -18.2% | na na na na -18.2% |
+| div_5m follow | cci_washout_3m_n9_t100 against | 1otm | 123 | -6.6% | -6.3% +1.2% -13.7% -2.3% -9.5% | 7 | -20.0% | na na na na -20.0% |
+| sq_release_1m follow | cci_washout_1m_n18_t100 with | 1otm | 105 | -9.4% | -9.2% -2.8% -15.0% -10.6% -11.1% | 5 | -22.7% | na na na na -22.7% |
+| sq_release_1m follow | cci_washout_3m_n9_t100 with | 1otm | 105 | -9.4% | -9.2% -2.8% -15.0% -10.6% -11.1% | 16 | -17.5% | na na na -16.0% -22.2% |
+
+Each row is the same reversal event with and without the washout gate. Folds are the held-out block means, in order. 'with' keeps low washouts on calls and high washouts on puts. 'against' swaps them.
+
+Luck benchmark (same 200 shuffles of the daily labels as the verdict): best out-of-sample net +15.7%, median of those per-shuffle bests +15.5%, rules expected to look at least this good by luck 0.57. Washout rules without the vix>=16 gate are intraday, so the shuffle does not move them. The vix>=16 slice is daily-sensitive and is refit inside that benchmark.
 
 ## Limits
 
