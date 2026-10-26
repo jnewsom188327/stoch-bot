@@ -43,6 +43,14 @@ If a run stops, open the log and find the line that starts with `STAGE`. Tap **R
 
 Results land on the branch `fgperfect-results` (never main): `results/FGPERFECT.md`, `results/fgperfect_summary.csv`, `results/fgperfect_trades.csv`, `results/fgperfect_folds.csv`, `results/FGPERFECT.pine`. Read the first screen of the report before the pine. If it says the rule is unproven, the pine is a drawing of the study, not a signal to trade.
 
+## Greed/fear forward test (log only, no orders)
+
+The noon rule from the perfect study (`tf1_turn_mom_g95_f20__tod_1200`, breakeven exits `be_a15_d0` and `be_a10_d0`) is logged forward on real quotes. The job does not place orders, not even Alpaca paper orders. It only reads bars and quotes.
+
+Merge this into `main` first. The weekday schedule runs only from `main`. On your phone: open the repo on GitHub, tap **Actions**, tap **Greed/fear forward test (log only)**. If GitHub shows a button to enable the workflow, tap it once. After that it starts itself on weekdays. One of the two UTC times is 11:55 ET; the other exits quietly. To start a day by hand, tap **Run workflow**, leave the branch on `main`, and do it between 11:55 and 15:50 ET. Do not tap Re-run.
+
+Results land on the branch `fgforward-results` (never main): `results/FGFORWARD.md`, `results/fgforward_signals.csv`, `results/fgforward_trades.csv`. Read the scoreboard. It keeps the warning `need >=30 sessions` until 30 sessions are on disk. Noon-hour rows are the test. Other hours are context.
+
 ## Clean Scan replay (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Clean Scan replay (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run. Leave the inputs at their defaults unless you mean to change the cost model. This does not start the Clean Scan bot and it does not change `cleanbot.py`.
