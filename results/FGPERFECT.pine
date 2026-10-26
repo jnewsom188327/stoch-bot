@@ -2,9 +2,9 @@
 // Research drawing of the greed/fear fade study. Not an order and not a recommendation.
 // Put this on a 1-minute SPY or QQQ chart. The study entered at the next 1-minute open
 // after the signal bar closed, from 9:35 through 15:45 New York time.
-// Exit tested: fix tp15 sl15 t30 d0. Option fills are not on this chart. A percent target or stop
+// Exit tested: be a15 d0. Option fills are not on this chart. A percent target or stop
 // has to be managed on the option. A 1-minute delay version was tested separately.
-indicator("FG PERFECT UNPROVEN — greed/fear fade", overlay=true, max_labels_count=500)
+indicator("FG PERFECT — greed/fear fade", overlay=true, max_labels_count=500)
 
 gLvl = input.float(95, "Extreme level (greed for puts, fear for calls)")
 fLvl = input.float(20, "Quiet side maximum")
@@ -49,6 +49,7 @@ macdDn = hist < hist[1] and (hist[1] > 0 or hist[1] > hist[2])
 macdUp = hist > hist[1] and (hist[1] < 0 or hist[1] < hist[2])
 putCore := putCore and (momDn or macdDn)
 callCore := callCore and (momUp or macdUp)
+sessionOk := not na(time(timeframe.period, "1200-1300", "America/New_York"))
 putEntry = putCore and sessionOk
 callEntry = callCore and sessionOk
 
@@ -57,12 +58,12 @@ plotshape(putEntry, title="Put fade", style=shape.triangledown, location=locatio
 plotshape(callEntry, title="Call fade", style=shape.triangleup, location=location.belowbar, color=color.teal, size=size.small, text="CALL")
 plotshape(momDn and greedExt[1], title="Squeeze mom down", style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny)
 plotshape(momUp and fearExt[1], title="Squeeze mom up", style=shape.circle, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny)
-// Option target +15%, stop -15%, time 30 min. The mark is the time stop, not the option fill.
-exitMark = showExits and (putEntry[30] or callEntry[30])
+// Breakeven stop after +15%. Mark is a reminder, not the fill.
+exitMark = showExits and (putEntry[15] or callEntry[15])
 plotshape(exitMark, title="Time exit", style=shape.xcross, location=location.abovebar, color=color.yellow, size=size.tiny)
-alertcondition(putEntry, title="FG put entry", message="FG PERFECT put fade. Manage the option with fix tp15 sl15 t30 d0. UNPROVEN.")
-alertcondition(callEntry, title="FG call entry", message="FG PERFECT call fade. Manage the option with fix tp15 sl15 t30 d0. UNPROVEN.")
-alertcondition(exitMark, title="FG exit mark", message="FG PERFECT exit mark for fix tp15 sl15 t30 d0. UNPROVEN.")
+alertcondition(putEntry, title="FG put entry", message="FG PERFECT put fade. Manage the option with be a15 d0.")
+alertcondition(callEntry, title="FG call entry", message="FG PERFECT call fade. Manage the option with be a15 d0.")
+alertcondition(exitMark, title="FG exit mark", message="FG PERFECT exit mark for be a15 d0.")
 
 if barstate.islast
-    label.new(bar_index, high, "FG PERFECT UNPROVEN. Exit fix tp15 sl15 t30 d0. Research only.", style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 20))
+    label.new(bar_index, high, "FG PERFECT. Exit be a15 d0. Research only.", style=label.style_label_left, textcolor=color.white, color=color.new(color.black, 20))
