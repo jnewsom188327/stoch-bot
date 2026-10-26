@@ -35,13 +35,34 @@ jobs:
         run: pip install -r requirements.txt pytest
       - name: Unit tests (no market data, no orders)
         run: python -m pytest -q tests/test_fgperfect.py
+      - name: Restore per-book exit grids
+        id: book-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .fgperfect-books
+          # run_id makes the save key unique. The next run misses it and takes the
+          # newest cache with this prefix, which is the previous run's books.
+          key: fgperfect-books-${{ hashFiles('fgperfect.py') }}-d${{ github.event.inputs.days }}-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fgperfect-books-${{ hashFiles('fgperfect.py') }}-d${{ github.event.inputs.days }}-v1-
       - name: Greed/fear fade perfect study on real OPRA prints (data only, no orders)
         env:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           FG_DAYS: ${{ github.event.inputs.days }}
           FG_WORKERS: "4"
-        run: python fgperfect.py
+          FG_BOOK_CACHE: .fgperfect-books
+        run: |
+          mkdir -p .fgperfect-books
+          python fgperfect.py
+      - name: Save per-book exit grids
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .fgperfect-books
+          key: ${{ steps.book-cache.outputs.cache-primary-key }}
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -55,7 +76,7 @@ jobs:
             results/FGPERFECT.pine
           if-no-files-found: warn
       - name: Commit results onto the results branch (never main)
-        if: success()
+        if: always()
         env:
           RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
         run: |
@@ -72,8 +93,18 @@ jobs:
             exit 1
           fi
           mkdir -p /tmp/fgperfect-out
-          cp -f results/FGPERFECT.md results/fgperfect_summary.csv results/fgperfect_trades.csv results/fgperfect_folds.csv results/FGPERFECT.pine /tmp/fgperfect-out/
+          copied=0
+          for f in results/FGPERFECT.md results/fgperfect_summary.csv results/fgperfect_trades.csv results/fgperfect_folds.csv results/FGPERFECT.pine; do
+            if [ -f "$f" ]; then
+              cp -f "$f" /tmp/fgperfect-out/
+              copied=1
+            fi
+          done
           rm -f results/FGPERFECT.md results/fgperfect_summary.csv results/fgperfect_trades.csv results/fgperfect_folds.csv results/FGPERFECT.pine
+          if [ "$copied" -eq 0 ]; then
+            echo "No result files to commit"
+            exit 0
+          fi
           git config user.name "fgperfect"
           git config user.email "fgperfect@users.noreply.github.com"
           git fetch origin "$BRANCH" || true
@@ -88,8 +119,18 @@ jobs:
             exit 1
           fi
           mkdir -p results
-          cp -f /tmp/fgperfect-out/FGPERFECT.md /tmp/fgperfect-out/fgperfect_summary.csv /tmp/fgperfect-out/fgperfect_trades.csv /tmp/fgperfect-out/fgperfect_folds.csv /tmp/fgperfect-out/FGPERFECT.pine results/
-          git add results/FGPERFECT.md results/fgperfect_summary.csv results/fgperfect_trades.csv results/fgperfect_folds.csv results/FGPERFECT.pine
+          for f in /tmp/fgperfect-out/FGPERFECT.md /tmp/fgperfect-out/fgperfect_summary.csv /tmp/fgperfect-out/fgperfect_trades.csv /tmp/fgperfect-out/fgperfect_folds.csv /tmp/fgperfect-out/FGPERFECT.pine; do
+            if [ -f "$f" ]; then
+              cp -f "$f" results/
+            fi
+          done
+          add=()
+          for name in FGPERFECT.md fgperfect_summary.csv fgperfect_trades.csv fgperfect_folds.csv FGPERFECT.pine; do
+            if [ -f "results/$name" ]; then
+              add+=("results/$name")
+            fi
+          done
+          git add "${add[@]}"
           if git diff --cached --quiet; then
             echo "No result changes to commit"
             exit 0

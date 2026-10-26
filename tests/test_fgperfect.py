@@ -282,6 +282,11 @@ def test_workflow_is_manual_and_cannot_push_main():
     assert "results/fgperfect_folds.csv" in text
     assert "results/FGPERFECT.pine" in text
     assert "timeout-minutes: 90" in text
+    assert "actions/cache/restore@v4" in text
+    assert "actions/cache/save@v4" in text
+    assert "FG_BOOK_CACHE: .fgperfect-books" in text
+    commit_at = text.index("Commit results onto the results branch (never main)")
+    assert "if: always()" in text[commit_at:commit_at + 180]
     readme = open("README.md").read()
     assert "Fear-greed fade PERFECT (real option prices)" in readme
     assert "Run workflow" in readme
@@ -290,3 +295,166 @@ def test_workflow_is_manual_and_cannot_push_main():
     for banned in ("submit_order", "TradingClient", "MarketOrderRequest"):
         assert banned not in text
         assert banned not in open("fgperfect.py").read()
+
+
+def _zero_cubes(n_specs, n_days, n_rules):
+    shape = (n_specs, n_days, n_rules)
+    return {
+        "sig_sum": np.zeros(shape, np.float32),
+        "sig_cnt": np.zeros(shape, np.int32),
+        "win_cnt": np.zeros(shape, np.int32),
+        "dol_sum": np.zeros(shape, np.float32),
+        "rnd_sum": np.zeros(shape, np.float32),
+        "rnd_cnt": np.zeros(shape, np.int32),
+        "pair_sum": np.zeros(shape, np.float32),
+        "tp_cnt": np.zeros(shape, np.int32),
+    }
+
+
+def test_pair_p_lines_up_with_spec_and_rule_not_with_the_day_axis():
+    """The failed Actions run indexed q as spec * n_rules + rule.
+
+    Cubes are (spec, day, rule). Unpacking the day axis as if it were the rule
+    axis builds a q shorter than that index. Two specs, three days, four rules
+    is enough: the last slot is 7, and the old length was specs * days = 6.
+    """
+    pair = np.zeros((2, 3, 4), dtype=np.float32)
+    cnt = np.zeros((2, 3, 4), dtype=np.float32)
+    pair[1, 0, 3] = 2.0
+    pair[1, 1, 3] = 0.0
+    cnt[1, 0, 3] = 1.0
+    cnt[1, 1, 3] = 1.0
+    p = fp._pair_p(pair, cnt)
+    assert p.shape == (2 * 4,)
+    assert 1 * 4 + 3 >= 2 * 3
+    assert p[1 * 4 + 3] < 1.0
+    assert p[0] == 1.0
+
+
+def test_book_cache_reloads_the_same_slices_and_a_bad_file_is_recomputed(tmp_path):
+    cubes = _zero_cubes(4, 3, 5)
+    cubes["sig_sum"][0, 1, 2] = np.float32(1.5)
+    cubes["sig_cnt"][2, 0, 4] = 7
+    indices = [0, 2]
+    path = tmp_path / "book.npz"
+    fp._save_book(str(path), indices, cubes)
+    fresh = _zero_cubes(4, 3, 5)
+    assert fp._load_book(str(path), indices, fresh)
+    assert fresh["sig_sum"][0, 1, 2] == np.float32(1.5)
+    assert int(fresh["sig_cnt"][2, 0, 4]) == 7
+    assert fresh["sig_sum"][1, 0, 0] == 0
+    path.write_bytes(b"not a numpy archive")
+    again = _zero_cubes(4, 3, 5)
+    assert fp._load_book(str(path), indices, again) is False
+    assert again["sig_sum"][0, 1, 2] == 0
+    days_a = ["2024-01-02", "2024-01-03"]
+    days_b = ["2024-01-02", "2024-01-04"]
+    spec = fp.entry_specs(False)[0]
+    token_a = fp._book_token(spec.book_key(), (spec.id,), ("r",), days_a, ("SPY",))
+    token_b = fp._book_token(spec.book_key(), (spec.id,), ("r",), days_b, ("SPY",))
+    assert token_a != token_b
+    assert token_a == fp._book_token(spec.book_key(), (spec.id,), ("r",), days_a, ("SPY",))
+
+
+def test_full_grid_post_loop_with_nothing_surviving_writes_every_file(tmp_path):
+    """Same shape as the Actions run: 48 books, 1008 exits, some books with no fills.
+
+    Twelve sessions cannot clear a 60-day train gate, so every fold has no eligible
+    cell and nothing survives. That must still exit 0 and write the report.
+    """
+    specs = fp.entry_specs(gex=False)
+    rules = fp.exit_rules()
+    assert len({s.book_key() for s in specs}) == 48
+    assert len(rules) == 1008
+    n_days = 12
+    cubes = _zero_cubes(len(specs), n_days, len(rules))
+    ref_i = next(i for i, rule in enumerate(rules) if rule.id == fp.REF_RULE)
+    # One book has a few fills, not enough days or fills to be a candidate.
+    # The other 47 books stay at zero, including books whose paths never filled.
+    cubes["sig_cnt"][0, :3, :] = 1
+    cubes["sig_sum"][0, :3, :] = np.float32(0.01)
+    cubes["sig_sum"][0, 0, ref_i] = np.float32(0.20)
+    cubes["sig_sum"][0, 1, ref_i] = np.float32(-0.05)
+    cubes["win_cnt"][0, :3, :] = 1
+    cubes["dol_sum"][0, :3, :] = np.float32(0.4)
+    cubes["rnd_cnt"][0, :3, :] = 1
+    cubes["rnd_sum"][0, :3, :] = np.float32(0.0)
+    cubes["pair_sum"][0, :3, :] = np.float32(0.01)
+    cubes["pair_sum"][0, 0, ref_i] = np.float32(0.20)
+    cubes["pair_sum"][0, 1, ref_i] = np.float32(-0.05)
+    cubes["tp_cnt"][0, :3, ref_i] = 1
+    score_days = [ts.date() for ts in pd.bdate_range("2024-01-02", periods=n_days)]
+    result = fp.score_cubes(
+        specs, rules, score_days, ["SPY", "QQQ"],
+        n_boot=4, n_shuf=2, synthetic=True, smoke=False,
+        ref_i=ref_i, full_family=fp.family_count(False),
+        gex_note="GEX was not scored.", vix_source="synthetic",
+        **cubes,
+    )
+    assert result["failures"] == []
+    assert fp.study_exit_code(result) == 0
+    assert result["choice"] is None
+    assert result["meta"]["gate_passed"] is False
+    assert len(result["q"]) == len(specs) * len(rules)
+    assert len(result["folds"]) == 5
+    assert all(row["select_note"] == "candidate minimum was not met" for row in result["folds"])
+    assert any(row["cell"] for row in result["folds"])
+    fp._finalize_outputs(str(tmp_path), result)
+    report = (tmp_path / "FGPERFECT.md").read_text()
+    assert report.startswith("# Fear-greed fade PERFECT\n")
+    assert fp.GATE_FAIL in report
+    assert "not a market" in report
+    assert "candidate minimum was not met" in report
+    assert "No rule is called a candidate." in report
+    pine = (tmp_path / "FGPERFECT.pine").read_text()
+    assert pine.startswith("//@version=5\n")
+    assert "UNPROVEN" in pine
+    summary = (tmp_path / "fgperfect_summary.csv").read_text().strip().splitlines()
+    assert len(summary) == 1 + len(specs) * len(rules)
+    edelay = [
+        line for line in summary
+        if line.startswith(f"{fp.BASE_ID}__edelay2__{fp.REF_RULE},")
+    ]
+    assert len(edelay) == 1
+    # id, spec, rule, family, exit_family, full_n
+    assert edelay[0].split(",")[5] == "0"
+    assert (tmp_path / "fgperfect_trades.csv").exists()
+    assert (tmp_path / "fgperfect_folds.csv").exists()
+
+
+def test_a_failed_stage_keeps_partial_files_and_names_the_stage(tmp_path, monkeypatch, capsys):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("marginal boom")
+
+    monkeypatch.setattr(fp, "_marginal_sections", boom)
+    specs, rules = fp.smoke_catalog()
+    cubes = _zero_cubes(len(specs), 8, len(rules))
+    ref_i = next(i for i, rule in enumerate(rules) if rule.id == fp.REF_RULE)
+    score_days = [ts.date() for ts in pd.bdate_range("2024-01-02", periods=8)]
+    result = fp.score_cubes(
+        specs, rules, score_days, ["SPY", "QQQ"],
+        n_boot=2, n_shuf=1, synthetic=True, smoke=True, ref_i=ref_i,
+        **cubes,
+    )
+    assert result["failures"]
+    assert result["failures"][0][0] == "marginals"
+    assert "marginal boom" in result["failures"][0][1]
+    assert fp.study_exit_code(result) == 1
+    with pytest.raises(SystemExit) as caught:
+        fp._finalize_outputs(str(tmp_path), result)
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    blob = captured.out + "\n" + captured.err
+    assert "STAGE marginals failed: marginal boom" in blob
+    assert "Traceback (most recent call last)" in blob
+    assert "RuntimeError: marginal boom" in blob
+    stage_lines = [line for line in captured.out.splitlines() if line.startswith("STAGE ")]
+    assert stage_lines[-1] == "STAGE marginals failed: marginal boom"
+    report = (tmp_path / "FGPERFECT.md").read_text()
+    assert "STAGE marginals failed: marginal boom" in report
+    assert fp.GATE_FAIL in report
+    pine = (tmp_path / "FGPERFECT.pine").read_text()
+    assert "UNPROVEN" in pine
+    assert (tmp_path / "fgperfect_summary.csv").exists()
+    assert (tmp_path / "fgperfect_folds.csv").exists()
+    assert (tmp_path / "fgperfect_trades.csv").exists()
