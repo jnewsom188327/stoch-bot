@@ -39,6 +39,8 @@ On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade P
 
 Inputs: `days` (default 120), `results_branch` (default `fgperfect-results`). Leave both as they are. The exit grid, the filters, and the contract choices are already inside the script, so one run is the whole study. It is SPY and QQQ, 9:35–15:45 ET, real option prints, data only. No orders.
 
+If a run stops, open the log and find the line that starts with `STAGE`. Tap **Run workflow** again (not Re-run), same inputs. Books that already finished are reused when the script and `days` match, and whatever report was written is still pushed to `fgperfect-results`. A report that says nothing survived is a finished run.
+
 Results land on the branch `fgperfect-results` (never main): `results/FGPERFECT.md`, `results/fgperfect_summary.csv`, `results/fgperfect_trades.csv`, `results/fgperfect_folds.csv`, `results/FGPERFECT.pine`. Read the first screen of the report before the pine. If it says the rule is unproven, the pine is a drawing of the study, not a signal to trade.
 
 ## Clean Scan replay (research, no orders)

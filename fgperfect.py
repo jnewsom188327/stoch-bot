@@ -12,10 +12,14 @@ that model is a premium floor: half-spread is max(1 cent, 0.5% of the print).
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import os
 import re
+import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -41,6 +45,11 @@ N_SHUFFLE = 20
 BLOCK = 5
 FOCUS_DATES = fg.FOCUS_DATES
 MISSING_KEYS = fg.MISSING_KEYS
+# Bump when a cached book cube would no longer match this script's exits or costs.
+CACHE_VERSION = 1
+BOOK_CUBE_NAMES = (
+    "sig_sum", "sig_cnt", "win_cnt", "dol_sum", "rnd_sum", "rnd_cnt", "pair_sum", "tp_cnt",
+)
 
 # Exit grids.
 TP_GRID = (0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50)
@@ -2284,6 +2293,13 @@ def render_report(meta, ranked, marginals, exit_families, folds, heatmap_lines, 
         "",
         verdict,
         "",
+    ]
+    if meta.get("failures"):
+        parts.append("A stage failed. The sections below are whatever finished. The pine is UNPROVEN unless a rule survived.")
+        parts.append("")
+        parts.extend(f"STAGE {name} failed: {err}" for name, err in meta["failures"])
+        parts.append("")
+    parts += [
         _screen_context(meta, ranked),
         "",
         "## Top 15",
@@ -2552,6 +2568,137 @@ def _empty_bufs(n_days, n_rules):
     )
 
 
+def _stage_log(message):
+    sc._print_scrubbed(message, flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+
+def _run_stage(name, fn, failures):
+    """Run one post-loop stage. A failure is logged with its traceback and recorded.
+
+    The study keeps going so later stages, and the files already in hand, still land.
+    """
+    _stage_log(f"STAGE {name} start")
+    try:
+        return fn()
+    except Exception as exc:
+        traceback.print_exc()
+        sys.stderr.flush()
+        _stage_log(f"STAGE {name} failed: {exc}")
+        failures.append((name, str(exc)))
+        return None
+
+
+def study_exit_code(result):
+    """0 when the study finished, including the case where nothing survived.
+
+    A nonzero code is only for a stage that raised. 'No survivor' is a result.
+    """
+    return 1 if result.get("failures") else 0
+
+
+def _book_token(book_key, spec_ids, rule_ids, day_ids, symbols):
+    payload = {
+        "v": CACHE_VERSION,
+        "book": _jsonable(book_key),
+        "specs": list(spec_ids),
+        "rules": list(rule_ids),
+        "days": list(day_ids),
+        "symbols": list(symbols),
+        "costs": [float(c) for c in COSTS],
+        "ref": REF_RULE,
+        "hard_min": HARD_MIN,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _jsonable(value):
+    if isinstance(value, tuple):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value)
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
+
+
+def _save_book(path, indices, cubes):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".partial.npz"
+    payload = {"indices": np.asarray(list(indices), dtype=np.int32)}
+    for name in BOOK_CUBE_NAMES:
+        payload[name] = np.ascontiguousarray(cubes[name][list(indices)])
+    np.savez_compressed(tmp, **payload)
+    os.replace(tmp, path)
+
+
+def _load_book(path, indices, cubes):
+    """Copy a cached book into `cubes`. A bad file returns False so the book is recomputed."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            saved = np.asarray(z["indices"])
+            want = np.asarray(list(indices), dtype=np.int32)
+            if saved.shape != want.shape or not np.array_equal(saved, want):
+                return False
+            for name in BOOK_CUBE_NAMES:
+                block = z[name]
+                if block.shape != cubes[name][list(indices)].shape:
+                    return False
+                cubes[name][list(indices)] = block
+        return True
+    except Exception as exc:
+        traceback.print_exc()
+        _stage_log(f"book cache unreadable, recomputing: {exc}")
+        return False
+
+
+def _fallback_report(meta, failures):
+    meta = meta or {}
+    choice = meta.get("choice")
+    survived = bool(choice and choice.get("survives"))
+    lines = [
+        "# Fear-greed fade PERFECT",
+        "",
+        "This file is partial. A stage failed. Sections that did not finish are missing.",
+        "",
+    ]
+    for name, err in failures or []:
+        lines.append(f"STAGE {name} failed: {err}")
+    lines.append("")
+    if survived:
+        lines.append(f"The train-chosen rule {choice['id']} had already survived. The csv is the record.")
+    elif "gate_passed" in meta and not meta.get("gate_passed"):
+        lines.append(GATE_FAIL)
+        lines.append("No rule is called a candidate.")
+    lines += ["", "Data only. Research tool, not trading advice. No orders.", ""]
+    return "\n".join(lines)
+
+
+def _write_partial_bundle(out_dir, report_text):
+    """Write every result file we can, with the pine marked UNPROVEN."""
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "FGPERFECT.md"), "w") as f:
+        f.write(report_text if report_text.endswith("\n") else report_text + "\n")
+    _write_csv(os.path.join(out_dir, "fgperfect_summary.csv"), [], SUMMARY_FIELDS)
+    _write_csv(
+        os.path.join(out_dir, "fgperfect_trades.csv"), [],
+        ["rank", "config", "day", "symbol", "clock", "side", "raw", "greed", "fear", "squeeze", "mom", "note"],
+    )
+    _write_csv(
+        os.path.join(out_dir, "fgperfect_folds.csv"), [],
+        ["fold", "cell", "select_note", "train_start", "train_end", "test_start", "test_end",
+         "train_fills", "train_days", "train_mean", "test_fills", "test_mean", "test_random", "test_paired"],
+    )
+    with open(os.path.join(out_dir, "FGPERFECT.pine"), "w") as f:
+        f.write(render_pine(None, None, False))
+
+
 def run_study(frames, symbols, score_days, und, opt=None, synthetic=False, cache_dir=None,
               workers=4, n_boot=1000, n_shuf=N_SHUFFLE, specs=None, rules=None,
               min_fills=MIN_FILLS, min_days=MIN_DAYS, smoke=False):
@@ -2617,109 +2764,298 @@ def run_study(frames, symbols, score_days, und, opt=None, synthetic=False, cache
         groups.setdefault(spec.book_key(), []).append(si)
 
     trade_cache = {}
+    failures = []
+    book_cache = os.getenv("FG_BOOK_CACHE", "").strip()
+    if book_cache:
+        os.makedirs(book_cache, exist_ok=True)
+        try:
+            with open(os.path.join(book_cache, "CACHE_VERSION"), "w") as handle:
+                handle.write(f"{CACHE_VERSION}\n")
+        except OSError as exc:
+            _stage_log(f"book cache directory not writable: {exc}")
+            book_cache = ""
+    cubes = {
+        "sig_sum": sig_sum, "sig_cnt": sig_cnt, "win_cnt": win_cnt, "dol_sum": dol_sum,
+        "rnd_sum": rnd_sum, "rnd_cnt": rnd_cnt, "pair_sum": pair_sum, "tp_cnt": tp_cnt,
+    }
+    rule_ids = tuple(r.id for r in rules)
+    day_ids = tuple(d.isoformat() for d in score_days)
+    if book_cache:
+        _stage_log(f"  book cache {book_cache}")
     for book_i, (book_key, indices) in enumerate(groups.items()):
         spec0 = specs[indices[0]]
-        events = signal_events[spec0.signal_key()]
-        grid = grids_by_gf[(spec0.g, spec0.f)]
-        rows = build_paths(events, und, opt, symbols, score_days, grid, spec0.strike, spec0.dte, spec0.entry_delay, next_of)
-        paths = pack_paths(rows)
-        rand_events = []
-        for ev in events:
-            rnd_m = random_of.get((ev.day_i, ev.sym, ev.minute, ev.side))
-            clone = Event(
-                day_i=ev.day_i, sym=ev.sym, minute=int(rnd_m) if rnd_m is not None else -1, side=ev.side,
-                pin=ev.pin, fear=ev.fear, greed=ev.greed, sq=ev.sq, mom=ev.mom, close=ev.close,
-                atr=ev.atr, vwap=ev.vwap, rvol=ev.rvol, since=ev.since, nth=ev.nth, agree=ev.agree,
+        cache_path = ""
+        if book_cache:
+            token = _book_token(
+                book_key, tuple(specs[i].id for i in indices), rule_ids, day_ids, tuple(symbols),
             )
-            rand_events.append(clone)
-        rand_rows = build_paths(
-            [e for e in rand_events], und, opt, symbols, score_days, grid,
-            spec0.strike, spec0.dte, spec0.entry_delay, next_of,
-        )
-        # build_paths skips minute < 0 via the contract lookup. Align length.
-        if len(rand_rows) != len(rows):
-            rand_rows = [{"ev": e, "filled": False, "minute": -1} for e in rand_events]
-        rpaths = pack_paths(rand_rows)
-        fill, reason, offset = simulate_paths(paths, rules)
-        rfill, rreason, roffset = simulate_paths(rpaths, rules)
-        sc._print_scrubbed(f"  book {book_i + 1}/{len(groups)} fills {int(paths['filled'].sum())} rules {n_rules}")
-        # Previous-signal flag from the reference exit, on this event stream.
-        # Only the base book is used by the prev_win mask. Computing it everywhere is cheap and correct.
-        ask_nets, ask_dol = apply_costs(paths, fill, reason, rules, COSTS, "ask")
-        prev = _prev_codes(events, ask_nets[:, ref_i], offset[:, ref_i], paths["filled"])
-        for si in indices:
-            spec = specs[si]
-            mode = spec.cost
-            nets, dollars = apply_costs(paths, fill, reason, rules, COSTS, mode) if mode != "ask" else (ask_nets, ask_dol)
-            rnets, _rdol = apply_costs(rpaths, rfill, rreason, rules, COSTS, mode)
-            sig_ok = mask_array(spec, events, paths["filled"], paths["raw"], prev)
-            # Premium and spread must also hold for the random fill. Other masks do not.
-            rnd_ok = sig_ok & rpaths["filled"]
-            if spec.band is not None or spec.spread_max is not None:
-                rnd_ok = rnd_ok & mask_array(spec, events, rpaths["filled"], rpaths["raw"], prev)
-            days = np.array([ev.day_i for ev in events], dtype=int)
-            _add_masked(sig_sum[si], sig_cnt[si], win_cnt[si], dol_sum[si], tp_cnt[si], days, nets, dollars, reason, sig_ok)
-            _add_masked(rnd_sum[si], rnd_cnt[si], None, None, None, days, rnets, None, None, rnd_ok)
-            if rnd_ok.any():
-                diff = nets[rnd_ok] - rnets[rnd_ok]
-                finite = np.isfinite(diff).all(axis=1)
-                if finite.any():
-                    take = np.flatnonzero(rnd_ok)[finite]
-                    np.add.at(pair_sum[si], days[take], diff[finite].astype(np.float32))
-        # Keep the base ask book for the trade dump.
-        if spec0.signal_key() == entry_specs(False)[0].signal_key() and spec0.strike == "1otm" and spec0.dte == 0 and spec0.entry_delay == 0:
-            trade_cache[BASE_ID] = (events, paths, fill, reason, offset, ask_nets, "ask")
-        del paths, rpaths, fill, rfill
+            cache_path = os.path.join(book_cache, token + ".npz")
+            if _load_book(cache_path, indices, cubes):
+                _stage_log(f"  book {book_i + 1}/{len(groups)} cache hit rules {n_rules}")
+                continue
+        try:
+            _fill_book(
+                specs, indices, spec0, signal_events, grids_by_gf, und, opt, symbols, score_days,
+                next_of, random_of, rules, ref_i, cubes, trade_cache, book_i + 1, len(groups),
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            sys.stderr.flush()
+            _stage_log(f"STAGE book {book_i + 1} failed: {exc}")
+            failures.append((f"book {book_i + 1}", str(exc)))
+            continue
+        if cache_path:
+            try:
+                _save_book(cache_path, indices, cubes)
+            except Exception as exc:
+                traceback.print_exc()
+                _stage_log(f"book cache save failed: {exc}")
+    return score_cubes(
+        specs, rules, score_days, symbols,
+        sig_sum, sig_cnt, win_cnt, dol_sum, rnd_sum, rnd_cnt, pair_sum, tp_cnt,
+        ref_i=ref_i, trade_cache=trade_cache, signal_events=signal_events,
+        grids_by_gf=grids_by_gf, und=und, opt=opt, next_of=next_of,
+        n_boot=n_boot, n_shuf=n_shuf, min_fills=min_fills, min_days=min_days,
+        synthetic=synthetic, smoke=smoke, gex_note=gex_note, vix_source=vix_source,
+        t0=t0, full_family=family_count(gex=gex_on), failures=failures,
+    )
 
-    flat_p = _pair_p(pair_sum, rnd_cnt)
-    q = eh.fdr_qvalues(flat_p, family_n=len(flat_p))
-    train_idx, test_idx = fg.holdout_split(n_days)
-    ranked, choice, gate_passed = _rank(specs, rules, sig_sum, sig_cnt, win_cnt, dol_sum, rnd_sum, rnd_cnt, pair_sum, q, train_idx, test_idx, n_boot, min_fills, min_days)
-    folds = _folds(specs, rules, sig_sum, sig_cnt, rnd_sum, rnd_cnt, pair_sum, score_days, min_fills, min_days)
-    luck_text = _luck(sig_sum, sig_cnt, train_idx, test_idx, ranked, choice, n_shuf, min_fills, min_days, score_days)
+
+def _fill_book(specs, indices, spec0, signal_events, grids_by_gf, und, opt, symbols, score_days,
+               next_of, random_of, rules, ref_i, cubes, trade_cache, book_n, book_total):
+    events = signal_events[spec0.signal_key()]
+    grid = grids_by_gf[(spec0.g, spec0.f)]
+    rows = build_paths(events, und, opt, symbols, score_days, grid, spec0.strike, spec0.dte, spec0.entry_delay, next_of)
+    paths = pack_paths(rows)
+    rand_events = []
+    for ev in events:
+        rnd_m = random_of.get((ev.day_i, ev.sym, ev.minute, ev.side))
+        clone = Event(
+            day_i=ev.day_i, sym=ev.sym, minute=int(rnd_m) if rnd_m is not None else -1, side=ev.side,
+            pin=ev.pin, fear=ev.fear, greed=ev.greed, sq=ev.sq, mom=ev.mom, close=ev.close,
+            atr=ev.atr, vwap=ev.vwap, rvol=ev.rvol, since=ev.since, nth=ev.nth, agree=ev.agree,
+        )
+        rand_events.append(clone)
+    rand_rows = build_paths(
+        [e for e in rand_events], und, opt, symbols, score_days, grid,
+        spec0.strike, spec0.dte, spec0.entry_delay, next_of,
+    )
+    # build_paths skips minute < 0 via the contract lookup. Align length.
+    if len(rand_rows) != len(rows):
+        rand_rows = [{"ev": e, "filled": False, "minute": -1} for e in rand_events]
+    rpaths = pack_paths(rand_rows)
+    fill, reason, offset = simulate_paths(paths, rules)
+    rfill, rreason, _roffset = simulate_paths(rpaths, rules)
+    _stage_log(f"  book {book_n}/{book_total} fills {int(paths['filled'].sum())} rules {len(rules)}")
+    # Previous-signal flag from the reference exit, on this event stream.
+    # Only the base book is used by the prev_win mask. Computing it everywhere is cheap and correct.
+    ask_nets, ask_dol = apply_costs(paths, fill, reason, rules, COSTS, "ask")
+    prev = _prev_codes(events, ask_nets[:, ref_i], offset[:, ref_i], paths["filled"])
+    sig_sum, sig_cnt = cubes["sig_sum"], cubes["sig_cnt"]
+    win_cnt, dol_sum, tp_cnt = cubes["win_cnt"], cubes["dol_sum"], cubes["tp_cnt"]
+    rnd_sum, rnd_cnt, pair_sum = cubes["rnd_sum"], cubes["rnd_cnt"], cubes["pair_sum"]
+    for si in indices:
+        spec = specs[si]
+        mode = spec.cost
+        nets, dollars = apply_costs(paths, fill, reason, rules, COSTS, mode) if mode != "ask" else (ask_nets, ask_dol)
+        rnets, _rdol = apply_costs(rpaths, rfill, rreason, rules, COSTS, mode)
+        sig_ok = mask_array(spec, events, paths["filled"], paths["raw"], prev)
+        # Premium and spread must also hold for the random fill. Other masks do not.
+        rnd_ok = sig_ok & rpaths["filled"]
+        if spec.band is not None or spec.spread_max is not None:
+            rnd_ok = rnd_ok & mask_array(spec, events, rpaths["filled"], rpaths["raw"], prev)
+        days = np.array([ev.day_i for ev in events], dtype=int)
+        _add_masked(sig_sum[si], sig_cnt[si], win_cnt[si], dol_sum[si], tp_cnt[si], days, nets, dollars, reason, sig_ok)
+        _add_masked(rnd_sum[si], rnd_cnt[si], None, None, None, days, rnets, None, None, rnd_ok)
+        if rnd_ok.any():
+            diff = nets[rnd_ok] - rnets[rnd_ok]
+            finite = np.isfinite(diff).all(axis=1)
+            if finite.any():
+                take = np.flatnonzero(rnd_ok)[finite]
+                np.add.at(pair_sum[si], days[take], diff[finite].astype(np.float32))
+    # Keep the base ask book for the trade dump. A cache hit skips this and the
+    # trade-book stage rebuilds the one book the report actually prints.
+    if spec0.signal_key() == entry_specs(False)[0].signal_key() and spec0.strike == "1otm" and spec0.dte == 0 and spec0.entry_delay == 0:
+        trade_cache[BASE_ID] = (events, paths, fill, reason, offset, ask_nets, "ask")
+
+
+def score_cubes(
+    specs, rules, score_days, symbols,
+    sig_sum, sig_cnt, win_cnt, dol_sum, rnd_sum, rnd_cnt, pair_sum, tp_cnt,
+    *,
+    ref_i, trade_cache=None, signal_events=None, grids_by_gf=None, und=None, opt=None,
+    next_of=None, n_boot=1000, n_shuf=N_SHUFFLE, min_fills=MIN_FILLS, min_days=MIN_DAYS,
+    synthetic=False, smoke=False, gex_note="", vix_source="", t0=None, full_family=None,
+    failures=None,
+):
+    """Held-out rank, walk-forward, FDR, and the report. Each stage is isolated.
+
+    An empty candidate list is a successful score: the report says the bar was not
+    met and the pine stays UNPROVEN. A raised exception is recorded and the rest
+    of the stages still run.
+    """
+    specs = tuple(specs)
+    rules = tuple(rules)
+    if failures is None:
+        failures = []
+    if trade_cache is None:
+        trade_cache = {}
+    s_count = len(specs)
+    n_rules = len(rules)
+    n_days = len(score_days)
+    n_configs = s_count * n_rules
     meta = {
         "symbols": list(symbols),
         "n_sessions": n_days,
-        "n_hold": int(len(test_idx)),
-        "first_day": score_days[0].isoformat(),
-        "last_day": score_days[-1].isoformat(),
+        "n_hold": 0,
+        "first_day": score_days[0].isoformat() if n_days else "",
+        "last_day": score_days[-1].isoformat() if n_days else "",
         "n_specs": s_count,
         "n_rules": n_rules,
-        "n_configs": s_count * n_rules,
-        "full_family": family_count(gex=gex_on),
-        "gate_passed": gate_passed,
-        "choice": choice,
+        "n_configs": n_configs,
+        "full_family": int(full_family if full_family is not None else n_configs),
+        "gate_passed": False,
+        "choice": None,
         "synthetic": bool(synthetic),
         "smoke": bool(smoke),
         "gex_note": gex_note,
         "vix_source": vix_source,
-        "runtime_min": (time.time() - t0) / 60.0,
+        "runtime_min": ((time.time() - t0) / 60.0) if t0 else float("nan"),
         "score_days": list(score_days),
         "rules": rules,
         "specs": specs,
-        "train_idx": train_idx,
-        "test_idx": test_idx,
+        "train_idx": np.array([], dtype=int),
+        "test_idx": np.array([], dtype=int),
         "sig_sum": sig_sum,
         "sig_cnt": sig_cnt,
         "ref_i": ref_i,
+        "failures": failures,
+        "luck_text": "Luck shuffle was not run.",
+        "ref_mean": float("nan"),
+        "ref_random": float("nan"),
+        "ref_q": float("nan"),
+        "ref_tp_rate": float("nan"),
+        "breakeven": float("nan"),
     }
-    _stamp_reference(meta, specs, rules, sig_sum, sig_cnt, rnd_sum, rnd_cnt, tp_cnt, q, ref_i)
-    meta["notes"] = _notes(meta)
-    meta["luck_text"] = luck_text
-    marginals = _marginal_sections(meta, specs, rules, sig_sum, sig_cnt, win_cnt, ref_i)
-    exit_table = _exit_family_table(meta, specs, rules, sig_sum, sig_cnt)
-    heatmap = _heatmap_section(meta, choice, rules, sig_sum, sig_cnt, train_idx, test_idx)
-    _ensure_trade_books(
-        trade_cache, choice, ranked, specs, rules, signal_events, grids_by_gf,
-        und, opt, symbols, score_days, next_of,
+    result = {
+        "report": "", "ranked": [], "folds": [], "meta": meta,
+        "trades": [], "choice": None, "q": None, "failures": failures,
+    }
+
+    def do_pair():
+        flat_p = _pair_p(pair_sum, rnd_cnt)
+        if len(flat_p) != n_configs:
+            raise RuntimeError(f"paired p has length {len(flat_p)}, expected {n_configs} (specs × rules)")
+        qvals = eh.fdr_qvalues(flat_p, family_n=len(flat_p))
+        if len(qvals) != n_configs:
+            raise RuntimeError(f"q has length {len(qvals)}, expected {n_configs}")
+        result["q"] = qvals
+        return qvals
+
+    q = _run_stage("paired-p", do_pair, failures)
+    if q is None:
+        q = np.full(n_configs, np.nan)
+        result["q"] = q
+
+    split = _run_stage("held-out split", lambda: fg.holdout_split(n_days), failures)
+    if split is None:
+        train_idx = np.arange(0, max(n_days - 1, 0))
+        test_idx = np.arange(max(n_days - 1, 0), n_days)
+    else:
+        train_idx, test_idx = split
+    meta["train_idx"] = train_idx
+    meta["test_idx"] = test_idx
+    meta["n_hold"] = int(len(test_idx))
+
+    def do_rank():
+        return _rank(
+            specs, rules, sig_sum, sig_cnt, win_cnt, dol_sum, rnd_sum, rnd_cnt, pair_sum, q,
+            train_idx, test_idx, n_boot, min_fills, min_days,
+        )
+
+    packed = _run_stage("held-out rank", do_rank, failures)
+    if packed is None:
+        ranked, choice, gate_passed = [], None, False
+    else:
+        ranked, choice, gate_passed = packed
+    meta["gate_passed"] = bool(gate_passed)
+    meta["choice"] = choice
+    result["ranked"] = ranked
+    result["choice"] = choice
+
+    folds = _run_stage(
+        "walk-forward",
+        lambda: _folds(specs, rules, sig_sum, sig_cnt, rnd_sum, rnd_cnt, pair_sum, score_days, min_fills, min_days),
+        failures,
     )
-    focus = _focus_section(meta, choice, score_days, symbols, trade_cache, rules)
-    report = render_report(meta, ranked, marginals, exit_table, folds, heatmap, focus)
-    trades = _trade_rows(ranked[:3] or ([choice] if choice else []), trade_cache, rules, symbols, score_days, meta)
-    return {
-        "report": report, "ranked": ranked, "folds": folds, "meta": meta,
-        "trades": trades, "choice": choice, "q": q,
-    }
+    result["folds"] = folds if folds is not None else []
+
+    luck = _run_stage(
+        "luck",
+        lambda: _luck(sig_sum, sig_cnt, train_idx, test_idx, ranked, choice, n_shuf, min_fills, min_days, score_days),
+        failures,
+    )
+    if luck is not None:
+        meta["luck_text"] = luck
+
+    def do_reference():
+        _stamp_reference(meta, specs, rules, sig_sum, sig_cnt, rnd_sum, rnd_cnt, tp_cnt, q, ref_i)
+
+    _run_stage("reference", do_reference, failures)
+
+    marginals = _run_stage(
+        "marginals",
+        lambda: _marginal_sections(meta, specs, rules, sig_sum, sig_cnt, win_cnt, ref_i),
+        failures,
+    )
+    if not marginals:
+        marginals = ["Marginals were not written because that stage failed."]
+
+    exit_table = _run_stage(
+        "exit families",
+        lambda: _exit_family_table(meta, specs, rules, sig_sum, sig_cnt),
+        failures,
+    )
+    if not exit_table:
+        exit_table = "Exit families were not written because that stage failed."
+
+    heatmap = _run_stage(
+        "stability",
+        lambda: _heatmap_section(meta, choice, rules, sig_sum, sig_cnt, train_idx, test_idx),
+        failures,
+    )
+    if not heatmap:
+        heatmap = "Stability was not written because that stage failed."
+
+    def do_trades():
+        if und is None or signal_events is None or grids_by_gf is None:
+            return None
+        _ensure_trade_books(
+            trade_cache, choice, ranked, specs, rules, signal_events, grids_by_gf,
+            und, opt, symbols, score_days, next_of,
+        )
+        return True
+
+    _run_stage("trade books", do_trades, failures)
+
+    focus = _run_stage(
+        "focus week",
+        lambda: _focus_section(meta, choice, score_days, symbols, trade_cache, rules),
+        failures,
+    )
+    if not focus:
+        focus = "The focus week was not written because that stage failed."
+
+    def do_report():
+        meta["notes"] = _notes(meta)
+        top = ranked[:3] or ([choice] if choice else [])
+        result["trades"] = _trade_rows(top, trade_cache, rules, symbols, score_days, meta)
+        result["report"] = render_report(meta, ranked, marginals, exit_table, result["folds"], heatmap, focus)
+
+    _run_stage("report", do_report, failures)
+    if not result["report"]:
+        result["report"] = _fallback_report(meta, failures)
+    return result
 
 
 def _download(signal_events, random_of, und, symbols, score_days, specs, next_of, synthetic, cache_dir, workers):
@@ -2780,7 +3116,8 @@ def _add_masked(buf_sum, buf_cnt, buf_win, buf_dol, buf_tp, days, nets, dollars,
 
 
 def _pair_p(pair_sum, rnd_cnt):
-    s, r, d = pair_sum.shape
+    """One clustered p per (spec, rule). Cubes are (spec, day, rule)."""
+    s, d, r = pair_sum.shape
     sums = np.transpose(pair_sum, (0, 2, 1)).reshape(s * r, d)
     cnts = np.transpose(rnd_cnt, (0, 2, 1)).reshape(s * r, d)
     return clustered_matrix(sums, cnts)
@@ -3218,8 +3555,14 @@ def _summary_rows(ranked, meta, sig_sum, sig_cnt, win_cnt, dol_sum, q, specs, ru
                 "spec": spec.id, "rule": rule.id, "family": spec.family, "exit_family": rule.family,
                 "full_n": n, "full_days": int(full_d[si, ri]), "full_mean": mean,
                 "full_per_1000": mean * 10.0 if mean == mean else "",
-                "q": float(q[si * len(rules) + ri]) if q is not None else "",
             }
+            slot = si * len(rules) + ri
+            if q is None:
+                row["q"] = ""
+            elif slot >= len(q):
+                raise RuntimeError(f"q length {len(q)} has no slot for spec {si} rule {ri} (need {len(specs) * len(rules)})")
+            else:
+                row["q"] = float(q[slot])
             extra = ranked_by.get((si, ri))
             if extra:
                 for key in hold_keys:
@@ -3330,21 +3673,54 @@ def main():
         raise SystemExit("Not enough completed sessions.")
     score_days = all_days[-days_n:]
     sc._print_scrubbed(f"  sessions {score_days[0]} .. {score_days[-1]} n {len(score_days)}")
-    result = run_study(
-        frames, symbols, score_days, und, synthetic=synthetic, cache_dir=cache_dir,
-        workers=workers, n_boot=n_boot, n_shuf=n_shuf, specs=specs, rules=rules, smoke=smoke,
-    )
+    try:
+        result = run_study(
+            frames, symbols, score_days, und, synthetic=synthetic, cache_dir=cache_dir,
+            workers=workers, n_boot=n_boot, n_shuf=n_shuf, specs=specs, rules=rules, smoke=smoke,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        sys.stderr.flush()
+        _stage_log(f"STAGE study failed: {exc}")
+        try:
+            _write_partial_bundle(out_dir, _fallback_report({}, [("study", str(exc))]))
+        except Exception:
+            traceback.print_exc()
+        _stage_log(f"STAGE study failed: {exc}")
+        raise SystemExit(1) from exc
     elapsed = (time.time() - t0) / 60.0
     result["meta"]["runtime_min"] = elapsed
-    result["report"] = re.sub(
-        r"Runtime [0-9.]+ minutes\.",
-        f"Runtime {elapsed:.1f} minutes.",
-        result["report"],
-        count=1,
-    )
-    write_outputs(out_dir, result)
-    sc._print_scrubbed(f"  wrote {report_path}")
+    if result.get("report"):
+        result["report"] = re.sub(
+            r"Runtime [0-9.]+ minutes\.",
+            f"Runtime {elapsed:.1f} minutes.",
+            result["report"],
+            count=1,
+        )
+    _finalize_outputs(out_dir, result)
     return result
+
+
+def _finalize_outputs(out_dir, result):
+    """Write every file we have. Exit 1 only when a stage raised, after the files exist."""
+    try:
+        _stage_log("STAGE write outputs start")
+        write_outputs(out_dir, result)
+    except Exception as exc:
+        traceback.print_exc()
+        sys.stderr.flush()
+        _stage_log(f"STAGE write outputs failed: {exc}")
+        result.setdefault("failures", []).append(("write outputs", str(exc)))
+        report = result.get("report") or _fallback_report(result.get("meta") or {}, result.get("failures"))
+        try:
+            _write_partial_bundle(out_dir, report)
+        except Exception:
+            traceback.print_exc()
+    if study_exit_code(result):
+        name, err = result["failures"][-1]
+        _stage_log(f"STAGE {name} failed: {err}")
+        raise SystemExit(1)
+    _stage_log(f"  wrote {os.path.join(out_dir, 'FGPERFECT.md')}")
 
 
 if __name__ == "__main__":
