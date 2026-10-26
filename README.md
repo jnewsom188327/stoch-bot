@@ -25,6 +25,14 @@ Results land on the branch `edge-hunt-results` (never main): `results/EDGE_HUNT.
 
 The `quick` input (30 sessions) is only a smoke test. The real run uses the `days` input (default 170). Data only. No orders. The option download is the long part. `only_cci` shortens the search. It does not shrink the download.
 
+## Fear-greed fade (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
+
+Inputs: `days` (default 120), `tfs` (default `1,3,5`), `results_branch` (default `fgfade-results`). The run is SPY and QQQ, regular hours 9:35–15:45 ET. It scores the greed/fear extreme fade and the TTM squeeze case where greed, fear, and squeeze momentum all turn. Data only. No orders.
+
+Results land on the branch `fgfade-results` (never main): `results/FGFADE.md`, `results/fgfade_summary.csv`, `results/fgfade_trades.csv`, `results/fgfade_folds.csv`.
+
 ## Clean Scan replay (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Clean Scan replay (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run. Leave the inputs at their defaults unless you mean to change the cost model. This does not start the Clean Scan bot and it does not change `cleanbot.py`.
