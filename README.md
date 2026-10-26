@@ -33,6 +33,14 @@ Inputs: `days` (default 120), `tfs` (default `1,3,5`), `results_branch` (default
 
 Results land on the branch `fgfade-results` (never main): `results/FGFADE.md`, `results/fgfade_summary.csv`, `results/fgfade_trades.csv`, `results/fgfade_folds.csv`.
 
+## Fear-greed fade PERFECT (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade PERFECT (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
+
+Inputs: `days` (default 120), `results_branch` (default `fgperfect-results`). Leave both as they are. The exit grid, the filters, and the contract choices are already inside the script, so one run is the whole study. It is SPY and QQQ, 9:35–15:45 ET, real option prints, data only. No orders.
+
+Results land on the branch `fgperfect-results` (never main): `results/FGPERFECT.md`, `results/fgperfect_summary.csv`, `results/fgperfect_trades.csv`, `results/fgperfect_folds.csv`, `results/FGPERFECT.pine`. Read the first screen of the report before the pine. If it says the rule is unproven, the pine is a drawing of the study, not a signal to trade.
+
 ## Clean Scan replay (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Clean Scan replay (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run. Leave the inputs at their defaults unless you mean to change the cost model. This does not start the Clean Scan bot and it does not change `cleanbot.py`.
