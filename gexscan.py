@@ -729,9 +729,10 @@ def run_loop(tc, dc, oc):
             sleep(min(60, (datetime(t.year, t.month, t.day, 9, 35, 5, tzinfo=ET) - t).total_seconds()))
             continue
         if hhmm(t) <= SCAN_TO:
+            nf = len(state.get("fires", []))
             text = one_scan(tc, dc, oc, state, t) or text
             n += 1
-            if n % PUSH_EVERY == 0:
+            if n % PUSH_EVERY == 0 or len(state.get("fires", [])) > nf:      # a new FIRE goes out right away
                 push(f"gex scan {t:%Y-%m-%d %H:%M}")
         t = now_et()
         nxt = t.replace(second=20, microsecond=0) + timedelta(minutes=SCAN_MIN - t.minute % SCAN_MIN)
