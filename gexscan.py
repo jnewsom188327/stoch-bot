@@ -8,9 +8,11 @@ FOR EVERY TICKER, EVERY SCAN:
            10% and expirations within 30 days. Gives: NET GEX ($ per 1% move), the GAMMA FLIP (price where net GEX crosses 0),
            the CALL WALL (biggest call gamma strike) and PUT WALL (biggest put gamma strike), and how much of it is 0DTE.
            Positive gamma = dealers sell rips / buy dips (moves get pinned). Negative gamma = dealers chase (moves run).
-  FLOW   : every option trade near the money (within 5%, 0-7 DTE) since the last scan. Each print is tagged BUY (at / near
-           the ask), SELL (at / near the bid) or MID, from the current quote. Bullish $ = calls bought + puts sold,
-           bearish $ = puts bought + calls sold. BIG PRINTS = premium over $100k (SPY / QQQ), $50k (IWM), $25k (stocks).
+  FLOW   : REAL TIME from the option chain: contracts traded since the last scan (today's volume change) x the last price,
+           near the money (within 5%, 0-7 DTE), tagged BUY (last trade at / near the ask) or SELL (at / near the bid).
+           Bullish $ = calls bought + puts sold, bearish $ = puts bought + calls sold.
+           BIG PRINTS = single trades over $100k (SPY / QQQ), $50k (IWM), $25k (stocks) from the option trades feed - on the
+           free Alpaca plan that feed is 16 minutes behind, so big prints show 16 minutes late (the board says so).
            UNUSUAL = contracts that traded more than their open interest today (500+ contracts).
   PICK   : for every ticker with a bias, the best contract for the move: calls or puts, 0-7 DTE, ask $0.40-$0.80, delta 0.20+,
            spread under 20%, 50+ open interest or volume. Target = the next GEX level that way (walls / flip) if it is in
@@ -80,6 +82,7 @@ ET = ZoneInfo("America/New_York")
 KEY = os.getenv("ALPACA_KEY", "").strip()
 SECRET = os.getenv("ALPACA_SECRET", "").strip()
 FLOW_DELAY = [0]             # minutes the flow runs behind (set to 16 if the plan blocks recent option trades)
+VOL_SEEN = {}                # today's volume per contract at the last scan (real-time flow = the change)
 ERRS = {}                    # data problems this scan (shown on the board so they can be fixed without the job log)
 
 
@@ -381,7 +384,7 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     except Exception as e:  # noqa: BLE001
         note_err(f"{sym} option chain", e)
         chain = {}
-    rows, quotes, vol_today, crow = [], {}, {}, []
+    rows, quotes, vol_today, crow, last_px = [], {}, {}, [], {}
     for c, s in chain.items():
         try:
             _, exp, cp, k = occ_parse(c)
@@ -389,6 +392,8 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
             continue
         q = s.get("latestQuote") or {}
         quotes[c] = (float(q.get("bp", 0) or 0), float(q.get("ap", 0) or 0))
+        lt = s.get("latestTrade") or {}
+        last_px[c] = float(lt.get("p", 0) or 0)
         db = s.get("dailyBar") or {}
         vol_today[c] = float(db.get("v", 0) or 0)
         gm = s.get("greeks") or {}
@@ -404,17 +409,33 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     end = datetime.now(timezone.utc) - timedelta(minutes=delay_min)
     start = datetime.fromisoformat(day["last_end"]) if day.get("last_end") else end - timedelta(minutes=SCAN_MIN)
     start = max(start, end - timedelta(minutes=30))
+    # REAL-TIME flow: contracts traded since the last scan (today's volume now minus last scan's), x the last price,
+    # tagged BUY / SELL by where the last trade sat in the quote. Exact prints (big prints) come from the trades feed.
     tot, prints = dict(cb=0.0, cs=0.0, pb=0.0, ps=0.0), []
+    pv = VOL_SEEN.setdefault(sym, {})
+    for c in near:
+        v = vol_today.get(c, 0.0)
+        dv = v - pv[c] if c in pv else 0.0
+        pv[c] = v
+        px = last_px.get(c) or sum(quotes.get(c, (0.0, 0.0))) / 2
+        if dv <= 0 or px <= 0:
+            continue
+        cp = occ_parse(c)[2]
+        sd = side_of(px, *quotes.get(c, (0.0, 0.0)))
+        if sd == "BUY":
+            tot["cb" if cp == 1 else "pb"] += dv * px * 100
+        elif sd == "SELL":
+            tot["cs" if cp == 1 else "ps"] += dv * px * 100
     if near and end > start:
         try:
             trades = fetch_trades(oc, near, start, end)
         except Exception as e:  # noqa: BLE001
             m_ = str(e).lower()
-            if delay_min == 0 and any(w in m_ for w in ("subscription", "recent", "permit", "403", "forbidden")):
+            if delay_min == 0 and any(w in m_ for w in ("subscription", "recent", "permit", "403", "forbidden", "opra", "not signed")):
                 raise                                     # one_scan switches flow to 16 minutes behind and retries
             note_err(f"{sym} option trades", e)
             trades = {}
-        tot, prints = flow_of(sym, trades, quotes, oi, vol_today, t)
+        _, prints = flow_of(sym, trades, quotes, oi, vol_today, t)
     day["last_end"] = end.isoformat()
     for k_ in tot:
         day[k_] = day.get(k_, 0.0) + tot[k_]
@@ -496,7 +517,7 @@ def pick_txt(contract, ask, delta, juice, target):
 def write_board(rows, prints, t, delay, state=None):
     rows = sorted(rows, key=lambda r: -r["score"])
     L = [f"# GEX + FLOW SCAN - {t:%a %b %d, %I:%M %p} ET",
-         f"Log only, no orders. Options feed: {FEED}." + (f" Flow runs {delay} min behind (plan limit)." if delay else "")
+         f"Log only, no orders. Options feed: {FEED}. Flow = real time (volume change x price)." + (f" Big prints run {delay} min behind (free plan limit on option trades)." if delay else "")
          + f" FIRE = score {FIRE_MIN}+ with a bias: the bot picks the {PICK_MIN:.2f}-{PICK_MAX:.2f} contract with the most juice "
          "for the move and follows its real bid for 60 minutes. Score and fires are being graded, not proven.", ""]
     fires = (state or {}).get("fires", [])
@@ -670,7 +691,7 @@ def one_scan(tc, dc, oc, state, t):
             r, p, _ = scan_ticker(sym, tc, oc, bars, state["tickers"], t, delay)
         except Exception as e:  # noqa: BLE001
             msg = str(e).lower()
-            if delay == 0 and any(w in msg for w in ("subscription", "recent", "permit", "403", "forbidden")):
+            if delay == 0 and any(w in msg for w in ("subscription", "recent", "permit", "403", "forbidden", "opra", "not signed")):
                 log(f"{sym}: recent option trades not allowed on this plan - flow switches to 16 minutes behind")
                 state["flow_delay"] = 16
                 try:
