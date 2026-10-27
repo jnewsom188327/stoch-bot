@@ -47,8 +47,9 @@ import numpy as np
 import pandas as pd
 
 # ===== SETTINGS (edit here) =====
-SYMBOLS = ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMD", "META", "AMZN",
-           "MSFT", "GOOGL", "NFLX", "AVGO", "PLTR", "COIN"]
+SYMBOLS = ["SPY", "QQQ", "IWM", "SMH", "NVDA", "TSLA", "AAPL", "AMD", "META", "AMZN",
+           "MSFT", "GOOGL", "NFLX", "AVGO", "PLTR", "COIN", "DELL", "SMCI", "MU", "MSTR",
+           "ORCL", "HOOD", "ARM", "UBER", "CRM", "SHOP", "BABA"]
 MAX_DTE = 30                 # expirations used for GEX
 STRIKE_PCT = 0.10            # strikes within this % of the price (GEX)
 FLOW_DTE = 7                 # expirations watched for flow
@@ -501,9 +502,22 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
 def append_csv(path, rows):
     if not rows:
         return
+    cols = list(rows[0].keys())
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            old_cols = next(csv.reader(f), [])
+        if old_cols != cols:                      # columns changed (new version): rewrite the file with every column
+            with open(path, newline="") as f:
+                old = list(csv.DictReader(f))
+            cols = old_cols + [k for k in cols if k not in old_cols]
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=cols, restval="", extrasaction="ignore")
+                w.writeheader()
+                for r in old:
+                    w.writerow({k: v for k, v in r.items() if k in cols})
     new = not os.path.exists(path)
     with open(path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=cols, restval="", extrasaction="ignore")
         if new:
             w.writeheader()
         for r in rows:
