@@ -68,7 +68,7 @@ FIRES = "gex_fires.csv"
 # ===== the contract picker + FIRES =====
 PICK_MIN, PICK_MAX = 0.40, 0.80   # option price (the ask) must be in this range
 PICK_DTE = 7                 # expirations the picker may use
-PICK_SPREAD = 0.20           # bid / ask spread at most this share of the mid
+PICK_SPREAD = 0.30           # bid / ask spread at most this share of the mid (free 'indicative' quotes run wider)
 PICK_LIQ = 50                # open interest OR today's volume at least this
 PICK_DELTA = 0.20            # delta at least this (no lottery tickets that need a miracle)
 PICK_ATR = 2.5               # no GEX level close enough? the target = 2.5 x the 5-minute ATR (about a 30-minute move)
@@ -82,6 +82,7 @@ ET = ZoneInfo("America/New_York")
 KEY = os.getenv("ALPACA_KEY", "").strip()
 SECRET = os.getenv("ALPACA_SECRET", "").strip()
 FLOW_DELAY = [0]             # minutes the flow runs behind (set to 16 if the plan blocks recent option trades)
+PICK_WHY = [""]              # why the last pick found what it found (shown when no contract qualifies)
 VOL_SEEN = {}                # today's volume per contract at the last scan (real-time flow = the change)
 ERRS = {}                    # data problems this scan (shown on the board so they can be fixed without the job log)
 
@@ -342,21 +343,33 @@ def pick_contract(crow, spot, bias, target):
     (value at the target = mid + delta x move + 1/2 gamma x move^2 + 30 minutes of time decay, sold at the bid)"""
     mv = target - spot
     best = None
+    why = dict(side=0, price=0, delta=0, spread=0, liq=0)
     for o in crow:
-        if o["cp"] != bias or o["dte"] > PICK_DTE or abs(o["delta"]) < PICK_DELTA:
+        if o["cp"] != bias or o["dte"] > PICK_DTE:
             continue
+        why["side"] += 1
         bid, ask = o["bid"], o["ask"]
         if not (PICK_MIN <= ask <= PICK_MAX) or bid <= 0 or ask < bid:
             continue
-        mid = (bid + ask) / 2
-        if (ask - bid) / mid > PICK_SPREAD or (o["oi"] < PICK_LIQ and o["vol"] < PICK_LIQ):
+        why["price"] += 1
+        if abs(o["delta"]) < PICK_DELTA:
             continue
+        why["delta"] += 1
+        mid = (bid + ask) / 2
+        if (ask - bid) / mid > PICK_SPREAD:
+            continue
+        why["spread"] += 1
+        if o["oi"] < PICK_LIQ and o["vol"] < PICK_LIQ:
+            continue
+        why["liq"] += 1
         est = mid + o["delta"] * mv + 0.5 * o["gamma"] * mv * mv + o["theta"] * PICK_HOLD / 390
         est = max(est, max(0.0, (target - o["K"]) if bias == 1 else (o["K"] - target)))
         sell = max(est - (ask - bid) / 2, 0.0)
         juice = sell / ask - 1
         if best is None or juice > best["juice"] or (juice == best["juice"] and o["vol"] > best["vol"]):
             best = dict(o, est=sell, juice=juice)
+    PICK_WHY[0] = (f"{why['side']} {'calls' if bias == 1 else 'puts'} 0-{PICK_DTE}DTE > {why['price']} priced {PICK_MIN:.2f}-{PICK_MAX:.2f} > "
+                   f"{why['delta']} delta {PICK_DELTA}+ > {why['spread']} spread ok > {why['liq']} liquid")
     return best
 
 
@@ -395,7 +408,8 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
         lt = s.get("latestTrade") or {}
         last_px[c] = float(lt.get("p", 0) or 0)
         db = s.get("dailyBar") or {}
-        vol_today[c] = float(db.get("v", 0) or 0)
+        # only TODAY's bar counts (early in the day the free feed still shows yesterday's bar)
+        vol_today[c] = float(db.get("v", 0) or 0) if str(db.get("t", ""))[:10] == today.isoformat() else 0.0
         gm = s.get("greeks") or {}
         rows.append(dict(cp=cp, K=k, exp=exp, iv=float(s.get("impliedVolatility") or 0), gamma=float(gm.get("gamma") or 0),
                          oi=float(oi.get(c, 0))))
@@ -472,9 +486,11 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     atr5 = float(pd.concat([hl, (d["high"] - lc_).abs(), (d["low"] - lc_).abs()], axis=1).max(axis=1).ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
     r["atr5"] = round(atr5, 3)
     pk, tg, tk = None, np.nan, ""
+    PICK_WHY[0] = ""
     if r["bias"] != 0:
         tg, tk = target_of(r, r["bias"], atr5)
         pk = pick_contract(crow, spot, r["bias"], tg)
+    r["pick_why"] = PICK_WHY[0]
     r.update(target=round(tg, 2) if np.isfinite(tg) else np.nan, target_kind=tk, pick=pk["contract"] if pk else "",
              pick_bid=pk["bid"] if pk else np.nan, pick_ask=pk["ask"] if pk else np.nan, pick_delta=round(pk["delta"], 2) if pk else np.nan,
              pick_est=round(pk["est"], 2) if pk else np.nan, pick_juice=round(pk["juice"] * 100, 1) if pk else np.nan)
@@ -540,7 +556,7 @@ def write_board(rows, prints, t, delay, state=None):
         bias = "CALLS" if r["bias"] == 1 else "PUTS" if r["bias"] == -1 else "-"
         tr = ("LONG" if r["trend"] == 1 else "SHORT" if r["trend"] == -1 else "out") + f" (clean {r['clean']:.0f}, ADX {r['adx']:.0f}, RVol {r['rvol']:.1f})"
         big = f"{money(r['big_bull_15'])} bull / {money(-r['big_bear_15'])} bear" if r["big_bull_15"] or r["big_bear_15"] else "-"
-        pk = pick_txt(r["pick"], r["pick_ask"], r["pick_delta"], r["pick_juice"], r["target"]) if r["pick"] else ("no contract in range" if r["bias"] else "-")
+        pk = pick_txt(r["pick"], r["pick_ask"], r["pick_delta"], r["pick_juice"], r["target"]) if r["pick"] else (f"none: {r['pick_why']}" if r["bias"] else "-")
         L.append(f"| {i} | **{r['sym']}** | {r['price']:,.2f} | {r['setup']} | **{bias}** | {r['score']} | {pk} | {gam} | {lvl(r['flip'])} | "
                  f"{lvl(r['call_wall'])} | {lvl(r['put_wall'])} | {money(r['flow_net_day'])} | {big} | {tr} |")
     bp = [p for p in prints if p["kind"] == "BIG PRINT"]
