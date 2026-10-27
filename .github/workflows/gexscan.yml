@@ -1,0 +1,53 @@
+name: GEX scan
+
+on:
+  schedule:
+    - cron: "25 13 * * 1-5"
+    - cron: "25 14 * * 1-5"
+    - cron: "25 17 * * 1-5"
+    - cron: "25 18 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = one scan now, run = scan all day"
+        default: "run"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gexscan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the latest board + logs
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Git identity (the scan pushes its board every 10 minutes)
+        run: |
+          git config user.name "gexscan"
+          git config user.email "gexscan@users.noreply.github.com"
+      - name: Run GEX + flow scan (log only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          MODE: ${{ github.event.inputs.mode || 'run' }}
+        run: python gexscan.py
+      - name: Save board + logs
+        if: always()
+        run: |
+          for f in gex_board.md gex_log.csv gex_prints.csv gex_fires.csv gex_state.json; do if [ -f "$f" ]; then git add "$f"; fi; done
+          if ! git diff --cached --quiet; then
+            git commit -m "gex scan $(date -u +%F)"
+            git pull --rebase origin main || true
+            git push || true
+          fi
