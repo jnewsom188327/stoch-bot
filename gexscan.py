@@ -80,6 +80,15 @@ ET = ZoneInfo("America/New_York")
 KEY = os.getenv("ALPACA_KEY", "").strip()
 SECRET = os.getenv("ALPACA_SECRET", "").strip()
 FLOW_DELAY = [0]             # minutes the flow runs behind (set to 16 if the plan blocks recent option trades)
+ERRS = {}                    # data problems this scan (shown on the board so they can be fixed without the job log)
+
+
+def note_err(where, e):
+    import traceback
+    msg = f"{type(e).__name__}: {str(e)[:400]}"
+    if where not in ERRS:
+        log(f"PROBLEM {where}: {msg}\n{traceback.format_exc()[-1500:]}")
+    ERRS[where] = msg
 
 
 def now_et():
@@ -360,10 +369,18 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     lo, hi = spot * (1 - STRIKE_PCT), spot * (1 + STRIKE_PCT)
     day = st_day.setdefault(sym, {})
     if day.get("oi_date") != today.isoformat() or not day.get("oi"):
-        day["oi"] = fetch_oi(tc, sym, lo, hi, today)
-        day["oi_date"] = today.isoformat()
+        try:
+            day["oi"] = fetch_oi(tc, sym, lo, hi, today)
+            day["oi_date"] = today.isoformat()
+        except Exception as e:  # noqa: BLE001
+            note_err(f"{sym} open interest", e)
+            day["oi"] = {}
     oi = day["oi"]
-    chain = fetch_chain(oc, sym, lo, hi, today)
+    try:
+        chain = fetch_chain(oc, sym, lo, hi, today)
+    except Exception as e:  # noqa: BLE001
+        note_err(f"{sym} option chain", e)
+        chain = {}
     rows, quotes, vol_today, crow = [], {}, {}, []
     for c, s in chain.items():
         try:
@@ -389,7 +406,14 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     start = max(start, end - timedelta(minutes=30))
     tot, prints = dict(cb=0.0, cs=0.0, pb=0.0, ps=0.0), []
     if near and end > start:
-        trades = fetch_trades(oc, near, start, end)
+        try:
+            trades = fetch_trades(oc, near, start, end)
+        except Exception as e:  # noqa: BLE001
+            m_ = str(e).lower()
+            if delay_min == 0 and any(w in m_ for w in ("subscription", "recent", "permit", "403", "forbidden")):
+                raise                                     # one_scan switches flow to 16 minutes behind and retries
+            note_err(f"{sym} option trades", e)
+            trades = {}
         tot, prints = flow_of(sym, trades, quotes, oi, vol_today, t)
     day["last_end"] = end.isoformat()
     for k_ in tot:
@@ -508,6 +532,10 @@ def write_board(rows, prints, t, delay, state=None):
         L += ["", f"## New unusual volume (traded more than open interest, {UNUSUAL_MIN}+)"]
         for p in uv[:15]:
             L.append(f"- **{p['sym']}** {p['type']} {lvl(p['strike'])} {p['exp']} ({p['dte']}DTE): {p['vol_today']:,} traded vs OI {p['oi']:,}")
+    if ERRS:
+        L += ["", f"## Data problems this scan ({len(ERRS)})"] + [f"- {k}: `{v}`" for k, v in list(ERRS.items())[:20]]
+    if not rows:
+        L += ["", "No ticker could be scanned - see Data problems."]
     L += ["", "**How to read it:** POS gamma = dealers pin price (fade the walls). NEG gamma = dealers chase (moves run). "
           "Flip = where gamma turns from one to the other. Call wall / put wall = the strikes with the most call / put gamma "
           "(magnets and lids). Flow today = bullish $ (calls bought + puts sold) minus bearish $ (puts bought + calls sold), "
@@ -629,7 +657,12 @@ def track_fires(oc, state, t):
 
 # ===== loop =====
 def one_scan(tc, dc, oc, state, t):
-    bars = fetch_bars(dc)
+    ERRS.clear()
+    try:
+        bars = fetch_bars(dc)
+    except Exception as e:  # noqa: BLE001
+        note_err("stock candles", e)
+        bars = {}
     rows, prints = [], []
     for sym in SYMBOLS:
         delay = state.get("flow_delay", 0)
@@ -637,16 +670,16 @@ def one_scan(tc, dc, oc, state, t):
             r, p, _ = scan_ticker(sym, tc, oc, bars, state["tickers"], t, delay)
         except Exception as e:  # noqa: BLE001
             msg = str(e).lower()
-            if delay == 0 and ("subscription" in msg or "recent" in msg or "403" in msg):
+            if delay == 0 and any(w in msg for w in ("subscription", "recent", "permit", "403", "forbidden")):
                 log(f"{sym}: recent option trades not allowed on this plan - flow switches to 16 minutes behind")
                 state["flow_delay"] = 16
                 try:
                     r, p, _ = scan_ticker(sym, tc, oc, bars, state["tickers"], t, 16)
                 except Exception as e2:  # noqa: BLE001
-                    log(f"{sym}: scan failed: {str(e2)[:200]}")
+                    note_err(f"{sym} scan", e2)
                     continue
             else:
-                log(f"{sym}: scan failed: {str(e)[:200]}")
+                note_err(f"{sym} scan", e)
                 continue
         if r:
             rows.append(r)
@@ -655,7 +688,7 @@ def one_scan(tc, dc, oc, state, t):
     append_csv(PRINTS, prints)
     fire_check(rows, bars, state, t)
     save_state(state)
-    text = write_board(rows, prints, t, state.get("flow_delay", 0), state) if rows else ""
+    text = write_board(rows, prints, t, state.get("flow_delay", 0), state)
     top = sorted(rows, key=lambda r: -r["score"])[:3]
     log(f"scan done: {len(rows)} tickers, {len(prints)} prints | top: " + ", ".join(f"{r['sym']} {r['score']} {r['setup']}" for r in top))
     return text
