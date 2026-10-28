@@ -1,0 +1,42 @@
+name: Futures flush-flip study
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYY-MM-DD)"
+        default: "2020-01-01"
+
+permissions:
+  contents: write
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install yfinance || true
+      - name: Run the study (data only - no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          FLUSH_START: ${{ github.event.inputs.start }}
+        run: python futures_flush.py
+      - name: Save results
+        if: always()
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          for f in results/futures_flush.md results/futures_flush_events.csv.gz; do if [ -f "$f" ]; then git add "$f"; fi; done
+          if ! git diff --cached --quiet; then
+            git commit -m "futures flush study $(date -u +%F)"
+            git pull --rebase origin main || true
+            git push || true
+          fi
