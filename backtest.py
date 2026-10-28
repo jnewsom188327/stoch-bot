@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "edge").strip().lower() or "edge"
+MODE = os.getenv("MODE", "peak").strip().lower() or "peak"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -14629,5 +14629,247 @@ def edge_main():
             f.write(text + "\n")
 
 
+# ================================================================ PEAK REPLAY (MODE=peak)
+# Every paper-bot trade (flip, clean, fear, fg, original, diamond) replayed on REAL 1-minute option bars.
+#  1) ENTRY vs PEAK: how high each trade really went while it was open, and how much of that the bot kept.
+#  2) WHAT IF: the bot's own exits stay exactly as they were - each rule can only make it get out EARLIER:
+#     BE@X  = once the option trades X% over the entry, the stop moves to the entry price (breakeven).
+#     TP@X  = sell everything the first time the option trades X% over the entry.
+#     BE+TP = both.
+#  Fair-play rules: bars are checked from the minute AFTER the entry minute to the minute BEFORE the bot's exit;
+#  breakeven arms on one bar and can only fire from the next one; if a bar touches both the stop and the target the
+#  stop wins; stops fill $0.02 under the entry (or at the bar open if it gapped lower); targets need a trade 1 cent
+#  through. Fear Snap trades that averaged down are kept as they were (two entry prices). DATA ONLY.
+PK_ARM = [10, 15, 20]
+PK_TP = [20, 30, 40, 50]
+PK_COMBO = [(10, 30), (10, 40), (15, 40)]
+PK_SLIP = 0.02
+
+
+def pk_ts(day, t):
+    t = str(t).strip()
+    if not t or t == "nan":
+        return None
+    return pd.Timestamp(f"{day} {t if t.count(':') == 2 else t + ':00'}", tz=NY)
+
+
+def pk_legs():
+    """every closed leg in the bot logs -> one row: bot, pos (position id), day, contract, t_in, t_out, px_in, px_out, qty, pnl"""
+    rows = []
+
+    def add(bot, pos, day, con, ti, to, pin, pout, q, pnl):
+        a, b = pk_ts(day, ti), pk_ts(day, to)
+        if a is None or b is None or not (pin > 0) or not (q > 0):
+            return
+        rows.append(dict(bot=bot, pos=f"{bot}|{pos}", day=str(day), contract=con, t_in=a, t_out=b,
+                         px_in=float(pin), px_out=float(pout), qty=int(q), pnl=float(pnl)))
+
+    def rd(f):
+        return pd.read_csv(f) if os.path.exists(f) else pd.DataFrame()
+
+    d = rd("trades.csv")
+    for r in d.itertuples():
+        add("Original bot", f"{r.date}|{r.symbol}|{r.entry_time}", r.date, r.symbol, r.entry_time, r.exit_time,
+            r.entry_fill, r.exit_fill, r.qty, r.pnl_usd)
+    d = rd("flip_trades.csv")
+    for r in d.itertuples():
+        add("Trend Flip", f"{r.date}|{r.chart}|{r.contract}|{r.entry_time}", r.date, r.contract, r.entry_time, r.exit_time,
+            r.entry_fill, r.exit_fill, int(str(r.leg)[0]), r.pnl_usd)
+    d = rd("clean_trades.csv")
+    for r in d.itertuples():
+        add(f"Clean Scan {r.version}", f"{r.date}|{r.contract}|{r.entry_time}", r.date, r.contract, r.entry_time, r.exit_time,
+            r.entry_fill, r.exit_fill, int(str(r.sold)[0]), r.pnl_usd)
+    d = rd("fg_trades.csv")
+    for r in d.itertuples():
+        add("FG Flow", f"{r.date}|{r.contract}|{r.entry_time}", r.date, r.contract, r.entry_time, r.exit_time,
+            r.opt_entry, r.opt_exit, r.contracts, r.pnl_usd)
+    # Fear Snap: rebuild the legs from the real fills (each SELL = one leg); averaged-down positions are kept as they were
+    f = rd("fear_fills.csv")
+    if len(f):
+        for (day, con), g in f.groupby(["date", "contract"], sort=False):
+            g = g.sort_values("time")
+            held, cost, buys, first_t, n = 0, 0.0, 0, None, 0
+            for r in g.itertuples():
+                if r.action == "BUY":
+                    if held == 0:
+                        first_t, cost, buys, n = r.time, 0.0, 0, n + 1
+                    held += r.qty
+                    cost += r.qty * r.price
+                    buys += 1
+                elif held > 0:
+                    q = min(r.qty, held)
+                    avg = cost / held
+                    bot = "Fear Snap" if buys == 1 else "Fear Snap (averaged, kept as is)"
+                    add(bot, f"{day}|{con}|{n}", day, con, first_t, r.time, avg, r.price, q, (r.price - avg) * 100 * q)
+                    cost -= avg * q
+                    held -= q
+    d = rd("diamond_trades.csv")
+    if len(d):
+        d = d[d["contracts"] > 0]
+        for r in d.itertuples():
+            fam = r.plan.split()[0]
+            fam = {"Q1": "Q-scale", "Q2": "Q-scale", "Q3": "Q-scale"}.get(fam, fam)
+            fam = "D-scale 1DTE" if fam.startswith("D") else fam
+            add(f"Diamond {r.book} {fam}", f"{r.date}|{r.ticker}|{r.tf}|{r.entry_time}", r.date, r.contract,
+                r.entry_time, r.exit_time, r.opt_entry, r.opt_exit, r.contracts, r.pnl_usd)
+    return pd.DataFrame(rows)
+
+
+def pk_fetch(oc, contracts, day):
+    """1-minute OHLC bars for each contract on `day`, 9:30-16:00 ET -> {contract: DataFrame}"""
+    from alpaca.data.requests import OptionBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    start = pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30)
+    end = start + pd.Timedelta(minutes=391)
+    out = {}
+    cl = sorted(contracts)
+    for k0 in range(0, len(cl), 60):
+        chunk = cl[k0:k0 + 60]
+        df = None
+        for attempt in range(4):
+            try:
+                df = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
+                                                          start=start.tz_convert("UTC").to_pydatetime(),
+                                                          end=end.tz_convert("UTC").to_pydatetime())).df
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  option bars {day} failed ({attempt + 1}/4): {str(e)[:200]}", flush=True)
+                time.sleep(5 * (attempt + 1))
+        if df is None or not len(df) or not isinstance(df.index, pd.MultiIndex):
+            continue
+        for sym_, g in df.groupby(level=0):
+            g = g.droplevel(0)
+            g.index = g.index.tz_convert(NY)
+            out[sym_] = g[["open", "high", "low", "close"]].astype(float).sort_index()
+    return out
+
+
+def pk_fake(legs_day):
+    """TEST=1: random option bars that start at each entry price (only checks the code runs)"""
+    rng = np.random.default_rng(3)
+    out = {}
+    for con, g in legs_day.groupby("contract"):
+        day = g["day"].iloc[0]
+        idx = pd.date_range(pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30), periods=390, freq="1min")
+        p0 = g["px_in"].iloc[0]
+        c = p0 * np.exp(np.cumsum(rng.normal(0, 0.03, 390)))
+        o = np.r_[p0, c[:-1]]
+        out[con] = pd.DataFrame({"open": o, "high": np.maximum(o, c) * 1.02, "low": np.minimum(o, c) * 0.98, "close": c}, index=idx)
+    return out
+
+
+def pk_rule(b, pin, arm=None, tp=None):
+    """walk the bars; return the new exit price, or None if the rule never fired (the bot's own exit stands)"""
+    armed = False
+    stop = pin - PK_SLIP
+    for o, h, lo in zip(b["open"].to_numpy(), b["high"].to_numpy(), b["low"].to_numpy()):
+        if armed and lo <= pin:
+            return min(stop, o)
+        if tp is not None and h >= pin * (1 + tp / 100) + 0.01:
+            return max(pin * (1 + tp / 100), o)
+        if arm is not None and h >= pin * (1 + arm / 100):
+            armed = True
+    return None
+
+
+def peak_main():
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    legs = pk_legs()
+    if not len(legs):
+        sys.exit("No bot trade logs found next to backtest.py.")
+    print(f"PEAK REPLAY: {len(legs)} legs, {legs['pos'].nunique()} trades, {legs['day'].nunique()} days", flush=True)
+    oc = None
+    if not test:
+        from alpaca.data.historical import OptionHistoricalDataClient
+        oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+    rules = [f"BE@{a}" for a in PK_ARM] + [f"TP@{t}" for t in PK_TP] + [f"BE@{a}+TP@{t}" for a, t in PK_COMBO]
+    rec = []
+    for day, gd in legs.groupby("day"):
+        bars = pk_fake(gd) if test else pk_fetch(oc, set(gd["contract"]), day)
+        print(f"  {day}: {len(gd)} legs, bars for {len(bars)}/{gd['contract'].nunique()} contracts", flush=True)
+        for r in gd.itertuples():
+            row = r._asdict()
+            row.pop("Index", None)
+            b = bars.get(r.contract)
+            if b is None or not len(b):
+                row["has_bars"] = False
+                rec.append(row)
+                continue
+            win = b[(b.index > r.t_in.floor("min")) & (b.index < r.t_out.floor("min"))]
+            after = b[(b.index > r.t_out.floor("min")) & (b.index <= r.t_out + pd.Timedelta(minutes=30))]
+            row["has_bars"] = True
+            row["peak_pct"] = 100 * (win["high"].max() / r.px_in - 1) if len(win) else 100 * (max(r.px_out, r.px_in) / r.px_in - 1)
+            row["low_pct"] = 100 * (win["low"].min() / r.px_in - 1) if len(win) else 100 * (min(r.px_out, r.px_in) / r.px_in - 1)
+            row["after30_pct"] = 100 * (after["high"].max() / r.px_in - 1) if len(after) else np.nan
+            row["exit_pct"] = 100 * (r.px_out / r.px_in - 1)
+            keep = r.bot.endswith("kept as is)")
+            for name in rules:
+                arm = int(name.split("BE@")[1].split("+")[0]) if "BE@" in name else None
+                tp = int(name.split("TP@")[1]) if "TP@" in name else None
+                px = None if keep else pk_rule(win, r.px_in, arm, tp)
+                row[name] = r.pnl if px is None else (px - r.px_in) * 100 * r.qty
+                row[name + "_hit"] = px is not None
+            rec.append(row)
+    L = pd.DataFrame(rec)
+    L.drop(columns=["t_in", "t_out"]).assign(t_in=L["t_in"].astype(str), t_out=L["t_out"].astype(str)).to_csv(
+        f"{OUT}/peak_legs.csv", index=False)
+    ok = L[L["has_bars"]].copy()
+    miss = L[~L["has_bars"]]
+    # one row per TRADE (position): cost-weighted exit, true peak
+    ok["cost"] = ok["px_in"] * 100 * ok["qty"]
+    agg = {"pnl": "sum", "cost": "sum", "peak_pct": "max", "low_pct": "min", "after30_pct": "max", "bot": "first"}
+    agg.update({k: "sum" for k in rules})
+    agg.update({k + "_hit": "max" for k in rules})
+    P = ok.groupby("pos").agg(agg)
+    P["exit_pct"] = 100 * P["pnl"] / P["cost"]
+    bots = [b for b in P.groupby("bot")["pnl"].count().sort_values(ascending=False).index]
+    md = [f"# PEAK REPLAY - entry vs peak on real 1-minute option bars - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"{len(P)} trades from the paper bots ({ok['day'].min()} to {ok['day'].max()}). "
+          f"{len(miss)} legs had no option bars and are left out.", "",
+          "## 1) Entry vs peak - how high it really went while the bot held it",
+          "| Bot | Trades | Got +10% | Got +20% | Got +10% then closed RED | Avg true peak | Avg exit | Kept of the peak | "
+          "Higher within 30 min AFTER the exit |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for bot in bots:
+        g = P[P["bot"] == bot]
+        g10 = g[g["peak_pct"] >= 10]
+        kept = g10["exit_pct"].mean() / g10["peak_pct"].mean() if len(g10) else np.nan
+        later = (g["after30_pct"] > g["peak_pct"]).mean()
+        md.append(f"| {bot} | {len(g)} | {(g['peak_pct'] >= 10).mean():.0%} | {(g['peak_pct'] >= 20).mean():.0%} | "
+                  f"{int((g10['exit_pct'] < 0).sum())} | {g['peak_pct'].mean():+.0f}% | {g['exit_pct'].mean():+.0f}% | "
+                  f"{kept:.0%} | {later:.0%} |")
+    md += ["", "## 2) What if - $ result of each rule added on top of the bot's own exits (best rule in bold)",
+           "| Bot | Actual | " + " | ".join(rules) + " |", "|---|---|" + "---|" * len(rules)]
+    best = []
+    for bot in bots:
+        g = P[P["bot"] == bot]
+        vals = {k: g[k].sum() for k in rules}
+        bk = max(vals, key=vals.get)
+        best.append((bot, g["pnl"].sum(), bk, vals[bk], int(g[bk + "_hit"].sum()), len(g)))
+        cells = [(f"**{v:+,.0f}**" if k == bk and v > g["pnl"].sum() else f"{v:+,.0f}") for k, v in vals.items()]
+        md.append(f"| {bot} | {g['pnl'].sum():+,.0f} | " + " | ".join(cells) + " |")
+    md += ["", "## 3) Best rule per bot", "| Bot | Actual | Best rule | With it | Trades it changed |", "|---|---|---|---|---|"]
+    for bot, act, bk, bv, hits, n in best:
+        md.append(f"| {bot} | {act:+,.0f} | {bk if bv > act else 'none beats actual'} | {max(bv, act):+,.0f} | "
+                  f"{hits if bv > act else 0} of {n} |")
+    allr = {k: P[k].sum() for k in rules}
+    md += ["", f"**All bots together:** actual {P['pnl'].sum():+,.0f} | " +
+           " | ".join(f"{k} {v:+,.0f}" for k, v in allr.items()),
+           "", "**Read with care:** this is about 6 trading days of paper trades - a rule that wins here can still be luck. "
+           "Breakeven stops are scored worst case inside each minute, but a quick dip under the entry that the bot rode out "
+           "WILL stop the trade out here, so the cost of shake-outs is in these numbers. Legs: results/peak_legs.csv"]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/peak_{stamp}.md", f"{OUT}/peak_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    main()
+    peak_main() if MODE == "peak" else main()
