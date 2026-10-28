@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "blueprint").strip().lower() or "blueprint"
+MODE = os.getenv("MODE", "mag7").strip().lower() or "mag7"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -16390,7 +16390,6 @@ def visual_main():
             fh.write(text + "\n")
 
 
-
 # ================================================================ THE BLUEPRINT, TESTED (MODE=blueprint)
 # From the "What to Circle" study deck. The base rule (held 7/7 years): your Vix Fix pane breaks off 100 with the OTHER side 60+
 # on the break candle (first break) -> fear break LONG, greed break SHORT, next candle's open, 20-candle hold.
@@ -16445,7 +16444,7 @@ def bp_sim(ind, dend, sig, d, stop_px, use_vwap):
     return d * (c[last] - p0) / A, last - e + 1
 
 
-def bp_chart(df, ind, sym, tf, rng):
+def bp_chart(df, ind, sym, tf, rng, keep=None):
     ev, F, G, color, ef, dend = vs_events(df, ind)
     mom, sq, _ = cl_ttm(df)
     mom = np.asarray(mom, dtype=float)
@@ -16469,7 +16468,7 @@ def bp_chart(df, ind, sym, tf, rng):
         sqx[i] = (i - s0, np.sign(d * (c[s0] - vw[s0])), np.sign(d * (c[i] - vw[i])))
     rows = []
     for setup, i, d in ev:
-        if setup not in BP_SETUPS:
+        if setup not in (keep or BP_SETUPS):
             continue
         if i + 1 >= n or not (a[i] > 0) or dend[i + 1] < i + 1:
             continue
@@ -16482,7 +16481,7 @@ def bp_chart(df, ind, sym, tf, rng):
                    ("red", 1): "AGAINST you", ("red", -1): "WITH you", ("dark blue", -1): "TURNING your way",
                    ("yellow", -1): "TURNING away", ("cyan", -1): "AGAINST you"}[(raw, d)]
         X, Y = (F, G) if d == 1 else (G, F)      # X = the side that maxed for a reversal (fear for longs)
-        r = dict(setup=setup, sig=i, sym=sym, tf=tf, d=d, vwx=d * (c[i] - vw[i]) / a[i], ttm=raw, ttmrel=rel,
+        r = dict(setup=setup, sig=i, sym=sym, tf=tf, d=d, vwx=d * (c[i] - vw[i]) / a[i], ttm=raw, ttmrel=rel, px=o[i + 1], atr=a[i],
                  line=int(color[i]) * d if np.isfinite(color[i]) else 0, hm=hm[i], me=X[i], oth=Y[i],
                  sqlen=np.nan, sqst=np.nan, sqen=np.nan)
         if setup == "SQ_REL":
@@ -16787,8 +16786,224 @@ def blueprint_main():
             fh.write(text + "\n")
 
 
+# ================================================================ THE 1m RULES ON THE MAGNIFICENT 7 (MODE=mag7)
+# Out-of-sample by TICKER: the rules below were picked on SPY + QQQ only (MODE=other / blueprint). Nothing is re-tuned here.
+# Same scoring: ATR vs random entries the same way on the same ticker and period, day-clustered t, 2020-23 vs 2024-now.
+# Tickers come from M7_SYMBOLS (the workflow's "symbols" box is ignored), 1m only. DATA ONLY.
+M7_SYMS = [s.strip().upper() for s in os.getenv("M7_SYMBOLS", "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA").split(",") if s.strip()]
+M7_INDEX = {"SPY", "QQQ"}
+M7_TTM_OK = ["WITH you", "TURNING your way"]
+M7_RULES = [  # key, name, setup, extra filter on the event table
+    ("R1", "Whipsaw base (100 break, other side 60+)", "VF_WHIP", lambda g: g.index == g.index),
+    ("R2", "THE RULE: whipsaw + TTM with you / turning your way", "VF_WHIP", lambda g: g["TTM"].isin(M7_TTM_OK)),
+    ("R3", "Failed pop short (red line, greed 60-90, fear 10-30)", "TL_FAILPOP", lambda g: g.index == g.index),
+    ("R4", "Failed pop, skip TTM yellow", "TL_FAILPOP", lambda g: g["TTM"] != "TURNING away"),
+    ("R5", "Lead: whipsaw within 1 ATR of VWAP", "VF_WHIP", lambda g: g["vwx"].abs() < 1),
+    ("R6", "Lead: THE RULE + within 1 ATR of VWAP", "VF_WHIP", lambda g: g["TTM"].isin(M7_TTM_OK) & (g["vwx"].abs() < 1)),
+    ("C0", "Control: every 100 break", "VF_ALL", lambda g: g.index == g.index),
+]
+
+
+def m7_score(g, col="a_k20"):
+    out = {}
+    for p in ("tr", "te"):
+        x = g[g["per"] == p]
+        y = x[col].dropna()
+        if len(y) < 30:
+            out[p] = (np.nan, np.nan, len(y))
+            continue
+        m = y.mean()
+        cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+        se = np.sqrt((cs ** 2).sum()) / len(y)
+        out[p] = (m, m / se if se > 0 and len(cs) > 2 else np.nan, len(y))
+    return out
+
+
+def m7_f(s, p, t=True):
+    m, tt, _ = s[p]
+    if np.isnan(m):
+        return "-"
+    return f"{m:+.2f} ({tt:.1f})" if t and not np.isnan(tt) else f"{m:+.2f}"
+
+
+def m7_real(g, min_pos):
+    s = m7_score(g)
+    if any(np.isnan(s[p][0]) for p in ("tr", "te")):
+        return False
+    ys = g.groupby("year")["a_k20"].mean()
+    sy = g.groupby("sym")["a_k20"].mean()
+    return (s["tr"][0] >= 0.05 and s["te"][0] >= 0.05 and s["tr"][1] >= 2 and s["te"][1] >= 2 and (sy > 0).sum() >= min_pos
+            and (ys < 0).sum() <= 1 and len(g) >= 200)
+
+
+def mag7_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("M7_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(41)
+    keep = {"VF_WHIP", "VF_ALL", "TL_FAILPOP"}
+    EV, BS, bad = [], [], []
+    for sym in M7_SYMS:
+        print(f"\n=== {sym} ===", flush=True)
+        try:
+            df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        except SystemExit as ex:      # one bad ticker should not kill the whole run
+            print(f"  {sym} skipped: {str(ex)[:200]}", flush=True)
+            bad.append(sym)
+            continue
+        df = to_tf(df1, rth_only=False, mins=1)
+        del df1
+        ind = indicators(df, 13, 34, True)
+        E, B = bp_chart(df, ind, sym, 1, rng, keep=keep)
+        EV.append(E)
+        BS.append(B)
+        print(f"  {sym} 1m: {len(E)} events ({time.time() - t0:.0f}s)", flush=True)
+        del df, ind
+    E = pd.concat(EV, ignore_index=True)
+    B = pd.concat(BS, ignore_index=True)
+    base = B.groupby(["sym", "tf", "d", "per"])[["k20", "clean"]].mean()
+    adj = E[["sym", "tf", "d", "per"]].join(base, on=["sym", "tf", "d", "per"])
+    E["a_k20"] = E["k20"] - adj["k20"]
+    E["a_clean"] = E["clean"] - adj["clean"]
+    E = bp_label(E)
+    syms = [s for s in M7_SYMS if s in set(E["sym"])]
+    stocks = [s for s in syms if s not in M7_INDEX]
+    yrs = sorted(E["year"].unique())
+    G = {}
+    for key, nm, setup, flt in M7_RULES:
+        g = E[E["setup"] == setup]
+        G[key] = g[np.asarray(flt(g), dtype=bool)]
+
+    HEAD = ("| Group | Trades | vs random 2020-23 (t) | **vs random 2024-now (t)** | Raw avg ATR | Green % | +1 ATR before -1, pts vs random "
+            "| 2026 raw avg ATR (trades) | Years + | Tickers + | |\n|---|---|---|---|---|---|---|---|---|---|---|")
+
+    def row(name, g, min_pos):
+        if not len(g):
+            return f"| {name} | 0 | - | - | - | - | - | - | - | - | |"
+        s = m7_score(g)
+        ys = g.groupby("year")["a_k20"].mean()
+        sy = g.groupby("sym")["a_k20"].mean()
+        y26 = g[g["year"] == 2026]["k20"]
+        c26 = f"{y26.mean():+.2f} ({len(y26)})" if len(y26) >= 10 else f"- ({len(y26)})"
+        return (f"| {name} | {len(g)} | {m7_f(s, 'tr')} | **{m7_f(s, 'te')}** | {g['k20'].mean():+.3f} | {100 * (g['k20'] > 0).mean():.0f}% | "
+                f"{100 * g['a_clean'].mean():+.1f} | {c26} | {int((ys > 0).sum())}/{len(ys)} | {int((sy > 0).sum())}/{len(sy)} | "
+                f"{'✅' if m7_real(g, min_pos) else ''} |")
+
+    md = [f"# THE 1m RULES ON THE MAGNIFICENT 7 - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, 1m, {', '.join(syms)}" + (f" (skipped: {', '.join(bad)})" if bad else "") +
+          f". DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Out-of-sample by ticker:** every rule was picked on SPY + QQQ only. The 7 stocks never helped choose anything, so if a "
+          "rule works on them it is not a curve fit. **Trade** = signal candle's close (9:35-15:30), entry = next open, exit = the "
+          "close 20 candles later (or 15:55). **vs random** = ATR result minus random entries the SAME way on the same ticker and "
+          "period (0 = no edge). **t** = edge / noise by day (2+ = unlikely luck). **✅ (pooled)** = +0.05 ATR in BOTH 2020-23 and "
+          "2024-now with t 2+ in both, at least 5 of the 7 stocks positive, every year but one, 200+ trades.", ""]
+    # ---- 1) the scoreboard
+    keys = [k for k, *_ in M7_RULES]
+    md += ["## 1) Scoreboard - edge vs random, 2020-23 / **2024-now** (trades)",
+           "| Ticker | " + " | ".join(f"{k}" for k in keys) + " |", "|---|" + "---|" * len(keys)]
+    for sym in syms:
+        cells = []
+        for k in keys:
+            g = G[k][G[k]["sym"] == sym]
+            s = m7_score(g)
+            cells.append(f"{m7_f(s, 'tr', False)} / **{m7_f(s, 'te', False)}** ({len(g)})")
+        md.append(f"| {sym}{' (picked here)' if sym in M7_INDEX else ''} | " + " | ".join(cells) + " |")
+    md += ["", "| Key | Rule |", "|---|---|"] + [f"| {k} | {nm} |" for k, nm, *_ in M7_RULES]
+    # ---- 2) pooled
+    md += ["", f"## 2) The 7 stocks pooled ({', '.join(stocks)}) - the real out-of-sample test", HEAD]
+    for k, nm, *_ in M7_RULES:
+        md.append(row(f"{k} {nm}", G[k][G[k]["sym"].isin(stocks)], 5))
+    md += ["", "### For comparison: SPY + QQQ (where the rules were picked)", HEAD]
+    for k, nm, *_ in M7_RULES:
+        md.append(row(f"{k} {nm}", G[k][G[k]["sym"].isin(M7_INDEX)], 2))
+    # ---- 3) per ticker, the full rows for the two main rules
+    for k in ("R2", "R4"):
+        nm = dict((a, b) for a, b, *_ in M7_RULES)[k]
+        md += ["", f"## 3) {k} {nm} - every ticker", HEAD]
+        for sym in syms:
+            md.append(row(sym, G[k][G[k]["sym"] == sym], 1))
+        md += ["", f"### {k} - every year (raw ATR / vs random, trades)",
+               "| Ticker | " + " | ".join(str(y) for y in yrs) + " |", "|---|" + "---|" * len(yrs)]
+        for sym in syms + ["7 STOCKS"]:
+            g0 = G[k][G[k]["sym"].isin(stocks)] if sym == "7 STOCKS" else G[k][G[k]["sym"] == sym]
+            cells = []
+            for y in yrs:
+                gy = g0[g0["year"] == y]
+                cells.append(f"{gy['k20'].mean():+.2f} / {gy['a_k20'].mean():+.2f} ({len(gy)})" if len(gy) >= 10 else f"- ({len(gy)})")
+            md.append(f"| {sym} | " + " | ".join(cells) + " |")
+    # ---- 4) TTM + VWAP detail on the 7 stocks pooled
+    W7 = G["R1"][G["R1"]["sym"].isin(stocks)]
+    F7 = G["R3"][G["R3"]["sym"].isin(stocks)]
+    for nm, g0 in (("Whipsaw", W7), ("Failed pop", F7)):
+        if len(g0) < 50:
+            continue
+        md += ["", f"## 4) {nm} on the 7 stocks - TTM and VWAP one at a time", HEAD]
+        md.append(f"| ***TTM at the signal*** | | | | | | | | | | |")
+        for lb in BP_TTM_ORDER:
+            g = g0[g0["TTM"] == lb]
+            if len(g) >= 30:
+                md.append(row(lb, g, 5))
+        md.append(f"| ***Price vs VWAP*** | | | | | | | | | | |")
+        for lb in BP_VWX_LAB:
+            g = g0[g0["VWX"] == lb]
+            if len(g) >= 30:
+                md.append(row(lb, g, 5))
+    # ---- 5) time of day: does the open skew it? Also in plain % (no ATR), since the 9:35 ATR still holds thin premarket candles
+    E["pct"] = E["k20"] * E["atr"] / E["px"] * 100
+    E["prand"] = E["a_k20"] * E["atr"] / E["px"] * 100
+    for k in ("R1", "R2", "R4"):
+        G[k] = G[k].assign(pct=E.loc[G[k].index, "pct"], prand=E.loc[G[k].index, "prand"])
+    WIN = [("9:35-10:00 (the open)", 935, 959), ("9:35-15:30 (all day, as tested)", 935, 1530),
+           ("9:50-15:30 (skip first 20 min)", 950, 1530), ("10:00-15:30 (skip first 30 min)", 1000, 1530),
+           ("10:00-11:30", 1000, 1129), ("11:30-14:00", 1130, 1359), ("14:00-15:30", 1400, 1530)]
+    TH = ("| Window | Trades | vs random 2020-23 (t) | **vs random 2024-now (t)** | Green % | Avg move % of price | vs random, % of price "
+          "| Years + |\n|---|---|---|---|---|---|---|---|")
+    for k in ("R1", "R2", "R4"):
+        nm = dict((a_, b_) for a_, b_, *_ in M7_RULES)[k]
+        for grp, gs in (("7 stocks pooled", stocks), ("SPY + QQQ", sorted(M7_INDEX & set(syms)))):
+            g0 = G[k][G[k]["sym"].isin(gs)]
+            if len(g0) < 50:
+                continue
+            md += ["", f"## 5) Time of day - {k} {nm} - {grp}", TH]
+            for wn, lo_, hi_ in WIN:
+                g = g0[(g0["hm"] >= lo_) & (g0["hm"] <= hi_)]
+                if len(g) < 30:
+                    md.append(f"| {wn} | {len(g)} | - | - | - | - | - | - |")
+                    continue
+                s = m7_score(g)
+                ys = g.groupby("year")["a_k20"].mean()
+                md.append(f"| {wn} | {len(g)} | {m7_f(s, 'tr')} | **{m7_f(s, 'te')}** | {100 * (g['k20'] > 0).mean():.0f}% | "
+                          f"{g['pct'].mean():+.3f}% | {g['prand'].mean():+.3f}% | {int((ys > 0).sum())}/{len(ys)} |")
+    # ---- the answer
+    md += ["", "## The answer in 30 seconds"]
+    for k, nm, *_ in M7_RULES:
+        g = G[k][G[k]["sym"].isin(stocks)]
+        s = m7_score(g)
+        both = sum(1 for sym in stocks if all((m7_score(G[k][G[k]["sym"] == sym])[p][0] or 0) > 0 for p in ("tr", "te")))
+        md.append(f"- **{k} {nm}:** 7 stocks pooled {m7_f(s, 'tr')} / **{m7_f(s, 'te')}** ATR vs random; positive in BOTH periods on "
+                  f"**{both}/{len(stocks)}** stocks{' ✅' if m7_real(g, 5) else ''}.")
+    md += ["- A rule that works on stocks it never saw is the real thing. One that only works on SPY + QQQ may be a fit to those two.",
+           "", "**Luck check:** 7 rules x 9 tickers = 63 cells, so a few will look good or bad by chance. Read the pooled rows and "
+           "the stock count, not one cell."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/mag7_{stamp}.md", f"{OUT}/mag7_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    E[E["setup"] != "VF_ALL"].drop(columns=["ts"]).round(4).to_csv(f"{OUT}/mag7_events.csv", index=False)
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "blueprint":
+    if MODE == "mag7":
+        mag7_main()
+    elif MODE == "blueprint":
         blueprint_main()
     elif MODE == "visual":
         visual_main()
