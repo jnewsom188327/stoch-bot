@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "maxed").strip().lower() or "maxed"
+MODE = os.getenv("MODE", "other").strip().lower() or "other"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -15141,8 +15141,352 @@ def maxed_main():
             fh.write(text + "\n")
 
 
+# ================================================================ THE OTHER SIDE AT THE BREAK - EVERY VARIABLE (MODE=other)
+# Trade = the REVERSAL at the break of a maxed Vix Fix run: fear run breaks -> LONG, greed run breaks -> SHORT.
+# Signal on the break candle's CLOSE (9:35-15:30), entry at the NEXT candle's open, exit at the close after k candles
+# (or 15:55). Scored in ATR vs RANDOM entries the same way on the same chart and period (removes drift).
+# Every variable known at the break candle is split out inside the 30-60 group (and the other groups),
+# then the best 2-variable combos are picked on 2020-23 ONLY and judged blind on 2024-now. DATA ONLY.
+OT_LEVELS = [100.0, 95.0, 91.0]
+OT_K = [3, 5, 10, 20]
+OT_CLEAN = 20                       # candles allowed for the +1 ATR before -1 ATR check
+OT_SPLIT = pd.Timestamp(os.getenv("OT_SPLIT", "2024-01-01"), tz=NY)
+
+
+def ot_bucket(x, edges, labels):
+    return pd.cut(pd.Series(x), edges, labels=labels, right=False).astype(str).to_numpy()
+
+
+def ot_outcomes(ind, dend, sig, d):
+    """sig = signal candle index (break candle), entry = sig + 1's open. Returns ATR results for OT_K, clean flag, heat."""
+    o, h, l, c, a = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"]
+    e = sig + 1
+    A = a[sig]
+    R = np.full((len(sig), len(OT_K)), np.nan)
+    for q, k in enumerate(OT_K):
+        x = np.minimum(e + k - 1, dend[e])
+        R[:, q] = d * (c[x] - o[e]) / A
+    clean = np.full(len(sig), np.nan)
+    heat = np.full(len(sig), np.nan)
+    for t in range(len(sig)):
+        ee, de, aa, dd = e[t], dend[e[t]], A[t], d[t]
+        if not (aa > 0):
+            continue
+        last = min(ee + OT_CLEAN - 1, de)
+        hh, ll = h[ee:last + 1], l[ee:last + 1]
+        if dd == 1:
+            up, dn = hh - o[ee] >= aa, o[ee] - ll >= aa
+            heat[t] = (o[ee] - ll[:10].min()) / aa
+        else:
+            up, dn = o[ee] - ll >= aa, hh - o[ee] >= aa
+            heat[t] = (hh[:10].max() - o[ee]) / aa
+        iu = np.argmax(up) if up.any() else 10 ** 9
+        idn = np.argmax(dn) if dn.any() else 10 ** 9
+        clean[t] = 1.0 if iu < idn else 0.0          # same candle = stop first (conservative)
+    return R, clean, heat
+
+
+def ot_chart(df, ind, sym, tf, rng):
+    F, G = vfx_pane(df)
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    v = df["volume"].to_numpy(dtype=float)
+    st, vw = ind["st"], ind["vwap"]
+    n = len(c)
+    hc22 = df["close"].rolling(22).max().to_numpy()
+    lc22 = df["close"].rolling(22).min().to_numpy()
+    # last regular-hours candle (before 15:56) of each day, and the 9:30 open
+    idx = np.arange(n)
+    ok = hm < 1556
+    s_ = pd.Series(np.where(ok, idx, -1))
+    dend = s_.groupby(day).transform("max").to_numpy()
+    o930 = pd.Series(np.where(hm >= 930, o, np.nan)).groupby(day).transform("first").to_numpy()
+    hi_d = pd.Series(np.where(hm >= 930, h, np.nan)).groupby(day).cummax().to_numpy()
+    lo_d = pd.Series(np.where(hm >= 930, l, np.nan)).groupby(day).cummin().to_numpy()
+    rows = []
+    for side in (1, -1):
+        X, Y = (F, G) if side == 1 else (G, F)
+        X, Y = np.nan_to_num(X), np.nan_to_num(Y)
+        d = side                      # fear run -> LONG (+1), greed run -> SHORT (-1)
+        for lv in OT_LEVELS:
+            runs = mx_runs(X, day, hm, lv)
+            nth, last_b, cur_day = 0, -999, None
+            for s, j, b in runs:
+                if day[s] != cur_day:
+                    cur_day, nth, last_b = day[s], 0, -999
+                nth += 1
+                rebreak = (b - last_b) <= 10 if b >= 0 else False
+                if b >= 0:
+                    last_b = b
+                if b < 1 or b + 1 >= n or day[b + 1] != day[b] or not (935 <= hm[b] <= 1530) or not (a[b] > 0):
+                    continue
+                if dend[b + 1] < b + 1:
+                    continue
+                ext = l[s:j + 1].min() if side == 1 else h[s:j + 1].max()
+                rng_d = hi_d[b] - lo_d[b]
+                rows.append(dict(
+                    sig=b, sym=sym, tf=tf, side="FEAR->LONG" if side == 1 else "GREED->SHORT", d=d, lv=lv,
+                    oth=Y[b], jump=Y[b] - Y[j], me=X[b], bars=j - s + 1,
+                    run=((c[s - 1] - ext) if side == 1 else (ext - c[s - 1])) / a[b] if s >= 1 else np.nan,
+                    back=((c[b] - ext) if side == 1 else (ext - c[b])) / a[b],
+                    revc=(c[b] > o[b]) if side == 1 else (c[b] < o[b]),
+                    cback=(((c[b] - l[b]) if side == 1 else (h[b] - c[b])) / (h[b] - l[b]) >= 0.5) if h[b] > l[b] else False,
+                    vlow=v[b] < v[j], why="stopped" if ((l[b] >= l[b - 1]) if side == 1 else (h[b] <= h[b - 1])) else "rolled",
+                    trend=st[b] * d, vwap=(c[b] < vw[b]) if side == 1 else (c[b] > vw[b]),
+                    hm=hm[b], nth=nth, rebreak=rebreak, othavg=Y[s:j + 1].mean(),
+                    daymove=((o930[b] - c[b]) if side == 1 else (c[b] - o930[b])) / rng_d if rng_d > 0 else 0.0))
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame()
+    E = pd.DataFrame(rows)
+    R, cl, ht = ot_outcomes(ind, dend, E["sig"].to_numpy(), E["d"].to_numpy())
+    for q, k in enumerate(OT_K):
+        E[f"k{k}"] = R[:, q]
+    E["clean"], E["heat"] = cl, ht
+    ts = df.index[E["sig"].to_numpy()]
+    E["date"], E["year"], E["per"] = ts.date, ts.year, np.where(ts < OT_SPLIT, "tr", "te")
+    # random entries, both directions, same chart
+    pool = np.nonzero((hm >= 935) & (hm <= 1530) & (a > 0))[0]
+    pool = pool[(pool + 1 < n) & (dend[np.minimum(pool + 1, n - 1)] >= pool + 1)]
+    pool = pool[day[pool + 1] == day[pool]]
+    ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("OT_RANDOM", "20000"))), replace=False))
+    B = []
+    for dv, nm in ((1, "FEAR->LONG"), (-1, "GREED->SHORT")):
+        R2, cl2, _ = ot_outcomes(ind, dend, ridx, np.full(len(ridx), dv))
+        b_ = pd.DataFrame(R2, columns=[f"k{k}" for k in OT_K])
+        b_["clean"] = cl2
+        tsr = df.index[ridx]
+        b_["per"] = np.where(tsr < OT_SPLIT, "tr", "te")
+        b_["sym"], b_["tf"], b_["side"] = sym, tf, nm
+        B.append(b_)
+    return E, pd.concat(B, ignore_index=True)
+
+
+OT_VARS = {
+    "LV": ("Maxed level", None),
+    "OTH": ("OTHER side at the break candle", None),
+    "JUMP": ("Other side's jump from the last maxed candle to the break", None),
+    "ME": ("This side at the break candle (how far it fell from max)", None),
+    "LEN": ("Maxed run length (candles)", None),
+    "RUN": ("How far price ran during the maxed run (ATR)", None),
+    "BACK": ("Price already off the extreme at the break close (ATR)", None),
+    "REVC": ("Break candle color", None),
+    "CBACK": ("Break candle close", None),
+    "VLOW": ("Break candle volume vs the last maxed candle", None),
+    "WHY": ("Why it broke", None),
+    "TREND": ("Your trend line vs the trade", None),
+    "VWAP": ("Price vs VWAP", None),
+    "TOD": ("Time of day", None),
+    "NTH": ("Which maxed run of the day (this side, this level)", None),
+    "REB": ("First break or a re-break (same side broke within 10 candles before)", None),
+    "OAVG": ("Other side's average during the maxed run", None),
+    "DAY": ("The day so far (move from the 9:30 open / day range)", None),
+    "TF": ("Chart", None),
+    "SIDE": ("Side", None),
+}
+
+
+def ot_label(E):
+    L = pd.DataFrame(index=E.index)
+    L["LV"] = E["lv"].map(lambda x: f"{x:.0f}+")
+    L["OTH"] = ot_bucket(E["oth"], [-1, 10, 30, 40, 50, 60, 80, 101], ["under 10", "10-30", "30-40", "40-50", "50-60", "60-80", "80+"])
+    L["JUMP"] = ot_bucket(E["jump"], [-101, 0, 10, 20, 40, 101], ["fell", "+0-10", "+10-20", "+20-40", "+40 or more"])
+    L["ME"] = ot_bucket(E["me"], [-1, 50, 70, 90, 101], ["under 50", "50-70", "70-90", "90+"])
+    L["LEN"] = ot_bucket(E["bars"], [0, 2, 4, 6, 999], ["1", "2-3", "4-5", "6+"])
+    L["RUN"] = ot_bucket(E["run"], [-99, 1, 2, 3, 999], ["under 1", "1-2", "2-3", "3+"])
+    L["BACK"] = ot_bucket(E["back"], [-99, 0.25, 0.5, 1, 999], ["under 0.25", "0.25-0.5", "0.5-1", "1+"])
+    L["REVC"] = np.where(E["revc"], "reversal color", "same color")
+    L["CBACK"] = np.where(E["cback"], "closed back (good half)", "closed weak")
+    L["VLOW"] = np.where(E["vlow"], "lower", "higher")
+    L["WHY"] = E["why"].to_numpy()
+    L["TREND"] = np.where(E["trend"] > 0, "line already YOUR way", np.where(E["trend"] < 0, "line AGAINST you", "gray"))
+    L["VWAP"] = np.where(E["vwap"], "stretched past VWAP (good side for a snap)", "VWAP side already your way")
+    L["TOD"] = ot_bucket(E["hm"], [0, 1000, 1130, 1400, 2400], ["9:35-10:00", "10:00-11:30", "11:30-14:00", "14:00-15:30"])
+    L["NTH"] = ot_bucket(E["nth"], [0, 2, 3, 999], ["1st", "2nd", "3rd+"])
+    L["REB"] = np.where(E["rebreak"], "re-break (2nd try)", "first break")
+    L["OAVG"] = ot_bucket(E["othavg"], [-1, 15, 30, 101], ["under 15", "15-30", "30+"])
+    L["DAY"] = ot_bucket(E["daymove"], [-99, -0.3, 0.3, 99], ["run AGAINST the day", "flat day", "run WITH the day"])
+    L["TF"] = E["tf"].map(lambda x: f"{x}m")
+    L["SIDE"] = E["side"].to_numpy()
+    return L
+
+
+def other_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("OT_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(21)
+    EV, BS = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            E, B = ot_chart(df, ind, sym, tf, rng)
+            EV.append(E)
+            BS.append(B)
+            print(f"  {sym} {tf}m: {len(E)} breaks ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(EV, ignore_index=True)
+    B = pd.concat(BS, ignore_index=True)
+    KC = [f"k{k}" for k in OT_K] + ["clean"]
+    base = B.groupby(["sym", "tf", "side", "per"])[KC].mean()
+    adj = E[["sym", "tf", "side", "per"]].join(base, on=["sym", "tf", "side", "per"])
+    for k in KC:
+        E["a_" + k] = E[k] - adj[k]
+    L = ot_label(E)
+    E = pd.concat([E, L], axis=1)
+    yrs = sorted(E["year"].unique())
+
+    def score(g, k):
+        """vs random (ATR), day-clustered t, per period"""
+        out = {}
+        for p in ("tr", "te"):
+            x = g[g["per"] == p]
+            if len(x) < 30:
+                out[p] = (np.nan, np.nan, len(x))
+                continue
+            y = x["a_" + k].dropna()
+            m = y.mean()
+            # day-clustered noise: trades on the same day move together, so they count as one block
+            cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+            se = np.sqrt((cs ** 2).sum()) / len(y) if len(y) else np.nan
+            t = m / se if se and se > 0 and len(cs) > 2 else np.nan
+            out[p] = (m, t, len(y))
+        return out
+
+    def best_k(g):
+        tr = g[g["per"] == "tr"]
+        if len(tr) < 30:
+            return "k10"
+        return max([f"k{k}" for k in OT_K], key=lambda kk: tr["a_" + kk].mean())
+
+    def real(g, k):
+        s = score(g, k)
+        if any(np.isnan(s[p][0]) for p in ("tr", "te")):
+            return False
+        ys = g.groupby("year")["a_" + k].mean()
+        sy = g.groupby("sym")["a_" + k].mean()
+        return (s["tr"][0] >= 0.05 and s["te"][0] >= 0.05 and s["tr"][1] >= 2 and s["te"][1] >= 2 and (sy > 0).all()
+                and (ys < 0).sum() <= 1 and len(g) >= 200)
+
+    def row(name, g, k=None):
+        k = k or best_k(g)
+        s = score(g, k)
+        cl = g.groupby("per")["a_clean"].mean()
+        ys = g.groupby("year")["a_" + k].mean()
+
+        def f(p):
+            m, t, nn = s[p]
+            return "-" if np.isnan(m) else f"{m:+.3f} ({t:.1f})"
+        flag = "✅" if real(g, k) else ""
+        return (f"| {name} | {len(g)} | {k[1:]} | {f('tr')} | **{f('te')}** | {100 * cl.get('tr', np.nan):+.1f} / "
+                f"{100 * cl.get('te', np.nan):+.1f} | {g['heat'].median():.2f} | {int((ys > 0).sum())}/{len(ys)} | {flag} |")
+
+    HEAD = ("| Group | Trades | Hold (candles) | vs random 2020-23 (t) | **vs random 2024-now (t)** | Clean +1 ATR first vs random, pts "
+            "(2020-23 / 2024-now) | Heat (ATR) | Years + | |\n|---|---|---|---|---|---|---|---|---|")
+    md = [f"# THE OTHER SIDE AT THE BREAK - EVERY VARIABLE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Trade** = the reversal when a maxed Vix Fix run breaks (fear breaks -> LONG, greed breaks -> SHORT). Signal = the break "
+          "candle's close (9:35-15:30), entry = next open, exit = the close after the hold (or 15:55). **vs random** = ATR result minus "
+          "random entries the SAME way on the same chart and period (the fair score; 0 = no edge). **t** = edge / noise, by day "
+          "(2+ = unlikely luck). **Hold** = picked on 2020-23 only. **Clean** = how many more points of trades hit +1 ATR before "
+          "-1 ATR (within 20 candles) than random - the options-style number. **Heat** = median worst move against you in the first 10 "
+          "candles. **REAL EDGE ✅** = +0.05 ATR vs random in BOTH periods with t 2+ in both, SPY and QQQ both positive, every year but "
+          "one, 200+ trades. Levels 100 / 95 / 91 are all in (each break counted once per level, so the same moment can show up "
+          "at 2-3 levels).", ""]
+    md += ["## 1) The headline: the reversal trade by the OTHER side at the break", HEAD]
+    for lb in ["under 10", "10-30", "30-40", "40-50", "50-60", "60-80", "80+"]:
+        g = E[E["OTH"] == lb]
+        if len(g):
+            md.append(row(f"Other side {lb}", g))
+    md.append(row("**30-60 (all)**", E[(E["oth"] >= 30) & (E["oth"] < 60)]))
+    md.append(row("**60+ (all)**", E[E["oth"] >= 60]))
+    md.append(row("Every break", E))
+    md.append("")
+    groups = [("30-60", (E["oth"] >= 30) & (E["oth"] < 60)), ("60+", E["oth"] >= 60), ("under 30", E["oth"] < 30)]
+    for gname, gm in groups:
+        G0 = E[gm]
+        if len(G0) < 100:
+            continue
+        md += [f"## 2) Inside OTHER SIDE {gname} - every variable, one at a time ({len(G0)} trades)", HEAD]
+        for var, (title, _) in OT_VARS.items():
+            if var == "OTH" and gname != "30-60":
+                continue
+            md.append(f"| ***{title}*** | | | | | | | | |")
+            for lb, g in G0.groupby(var):
+                if len(g) >= 50:
+                    md.append(row(lb, g))
+        md.append("")
+        if gname == "under 30":
+            continue
+        # ---- blind 2-variable combos: picked on 2020-23, judged on 2024-now
+        cand = []
+        vars_ = [v for v in OT_VARS if v not in ("OTH",)]
+        for i1 in range(len(vars_)):
+            for i2 in range(i1 + 1, len(vars_)):
+                v1, v2 = vars_[i1], vars_[i2]
+                for (b1, b2), g in G0.groupby([v1, v2]):
+                    tr = g[g["per"] == "tr"]
+                    if len(tr) < 300 or (g["per"] == "te").sum() < 150:
+                        continue
+                    k = best_k(g)
+                    s = score(g, k)
+                    if np.isnan(s["tr"][1]):
+                        continue
+                    cand.append((s["tr"][1], f"{OT_VARS[v1][0]}: {b1} + {OT_VARS[v2][0]}: {b2}", g, k))
+        cand.sort(key=lambda z: -z[0])
+        md += [f"### 2b) Inside OTHER SIDE {gname} - best 2-variable combos, picked on 2020-23 (t), judged BLIND on 2024-now", HEAD]
+        for tt, name, g, k in cand[:20]:
+            md.append(row(name, g, k))
+        held = [z for z in cand[:20] if score(z[2], z[3])["te"][1] >= 2 and score(z[2], z[3])["te"][0] > 0]
+        md += ["", f"- Of the top 20 picked on 2020-23, **{len(held)}** held up blind on 2024-now (positive with t 2+).", ""]
+    # ---- per year + per chart for the 30-60 group
+    G0 = E[(E["oth"] >= 30) & (E["oth"] < 60)]
+    if len(G0):
+        k = best_k(G0)
+        md += [f"## 3) OTHER SIDE 30-60 - every year and chart (hold {k[1:]}, ATR vs random)",
+               "| Chart | Side | " + " | ".join(str(y) for y in yrs) + " |", "|---|---|" + "---|" * len(yrs)]
+        for tf in ST_TFS:
+            for sd in ("FEAR->LONG", "GREED->SHORT"):
+                g = G0[(G0["tf"] == tf) & (G0["side"] == sd)]
+                cells = []
+                for y in yrs:
+                    gy = g[g["year"] == y]
+                    cells.append(f"{gy['a_' + k].mean():+.3f}" if len(gy) >= 20 else "-")
+                md.append(f"| {tf}m | {sd} | " + " | ".join(cells) + " |")
+        md.append("")
+        md += ["## 4) OTHER SIDE 30-60 - raw results (not vs random), so you can see the size",
+               "| Hold | Avg ATR | Green % | Clean +1 ATR first % | Random avg ATR | Random clean % |", "|---|---|---|---|---|---|"]
+        for kk in OT_K:
+            rb = B[f"k{kk}"]
+            md.append(f"| {kk} candles | {G0[f'k{kk}'].mean():+.3f} | {100 * (G0[f'k{kk}'] > 0).mean():.0f}% | "
+                      f"{100 * G0['clean'].mean():.0f}% | {rb.mean():+.3f} | {100 * B['clean'].mean():.0f}% |")
+    nreal = sum(1 for lb, g in E.groupby("OTH") if real(g, best_k(g)))
+    md += ["", "## The answer in 30 seconds",
+           f"- Other-side groups with a REAL EDGE on their own: **{nreal}** of 7.",
+           "- Look for ✅ rows in section 2 and combos in 2b that held up blind - those are the ones worth a live test. A variable "
+           "that flips sign between 2020-23 and 2024-now is noise, however good one period looks.",
+           "", "**Luck check:** hundreds of splits are scored, so some will look good by chance. Section 2b is the honest one: picked on "
+           "one period, judged on the other."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/other_{stamp}.md", f"{OUT}/other_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "maxed":
+    if MODE == "other":
+        other_main()
+    elif MODE == "maxed":
         maxed_main()
     elif MODE == "peak":
         peak_main()
