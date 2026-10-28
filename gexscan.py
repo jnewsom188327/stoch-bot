@@ -24,6 +24,18 @@ FOR EVERY TICKER, EVERY SCAN:
            target. Saved to gex_fires.csv - that is the grade. No orders are sent.
   SETUP  : one plain call per ticker (RUN, TREND + FLOW, PIN AT A WALL, FLOW SURGE, FLIP CROSS) with a bias
            (CALLS / PUTS) and a 0-100 WATCH SCORE. The score is a ranking, NOT a tested edge - the logs are for grading it.
+  1m RULES (SPY + QQQ, LOOSE): every minute, the Trend Flip backtest's rules on the 1-minute chart, same math as
+           backtest.py (it is imported, not copied):
+             WHIPSAW    = Vix Fix side breaks back under 100 with the other side 60+ (first break) -> reversal
+                          tags R2 = TTM with you / turning your way, R5 = within 1 ATR of VWAP, R6 = both
+             FAILED POP = red / pink line, candle closes back down through it, greed 60-90 + fear 10-30 -> PUTS
+                          tag R4 = TTM not turning away
+           LOOSE = every whipsaw and every failed pop fires (the tags say which tighter rule it also meets, so it can be
+           tightened from the log). Contract: 0-1 DTE, $0.40-$0.80, delta 0.15+, target 3 x the 1-minute ATR. Tracked
+           exactly like the other FIRES (+ the 20-minute mark = the backtest's exit). Every signal, fired or not, goes to
+           gex_rules.csv with the reason.
+  GREEKS : if the free feed leaves out greeks on a contract, delta / gamma / theta are worked out (Black-Scholes) from
+           its implied volatility, or from its own mid price. The board says how many were filled in.
 LOGS (committed to the repo):
   gex_board.md   - the live board (pushed every 10 minutes, open it on GitHub)
   gex_log.csv    - one row per ticker per scan: price, every GEX level, flow $, trend numbers, setup, score
@@ -78,6 +90,16 @@ FIRE_MIN = 45                # watch score needed to FIRE
 FIRE_COOL = 30               # minutes before the same ticker can fire the same way again
 TRACK_MIN = 60               # each fired contract is followed this long (or to 15:55)
 TRACK_SECS = 30              # how often fired contracts are re-quoted
+# ===== 1m RULES on SPY + QQQ (loose) =====
+RULE_ON = os.getenv("RULES", "1").strip() != "0"
+RULE_SYMS = ["SPY", "QQQ"]
+RULE_COOL = 5                # minutes before the same ticker can rule-fire the same way again
+RULE_DTE = 1                 # 0-1 DTE for the 1m scalps
+RULE_DELTA = 0.15            # loose: delta at least this
+RULE_TGT = 3.0               # target = this x the 1-minute ATR
+RULE_HOLD = 20               # minutes (the backtest's exit = 20 candles later)
+RULE_LATE = 3                # a signal first seen more than this many minutes after its candle closed is logged, not fired
+RULES = "gex_rules.csv"
 
 ET = ZoneInfo("America/New_York")
 KEY = os.getenv("ALPACA_KEY", "").strip()
@@ -120,6 +142,39 @@ def bs_gamma(S, K, T, iv, r=RATE):
         d1 = (np.log(S / K) + (r + 0.5 * iv * iv) * T) / sq
         g = np.exp(-0.5 * d1 * d1) / (np.sqrt(2 * np.pi) * S * sq)
     return np.nan_to_num(g)
+
+
+def bs_greeks(S, K, T, iv, cp, r=RATE):
+    """Black-Scholes (price, delta, gamma, theta per calendar day) for one contract; None if it cannot be priced"""
+    if not (S > 0 and K > 0 and T > 0 and iv > 0):
+        return None
+    sq = iv * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * iv * iv) * T) / sq
+    d2 = d1 - sq
+    N = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))  # noqa: E731
+    pdf = math.exp(-0.5 * d1 * d1) / math.sqrt(2 * math.pi)
+    disc = math.exp(-r * T)
+    price = cp * (S * N(cp * d1) - K * disc * N(cp * d2))
+    delta = N(d1) if cp == 1 else N(d1) - 1.0
+    gamma = pdf / (S * sq)
+    theta = (-S * pdf * iv / (2 * math.sqrt(T)) - cp * r * K * disc * N(cp * d2)) / 365.0
+    return price, delta, gamma, theta
+
+
+def implied_vol(px, S, K, T, cp):
+    """the volatility that prices the contract at px (bisection); 0 if px is at / under intrinsic or unusable"""
+    if not (px > 0 and S > 0 and K > 0 and T > 0) or px <= max(0.0, cp * (S - K)) + 0.005:
+        return 0.0
+    lo, hi = 0.01, 5.0
+    if bs_greeks(S, K, T, hi, cp)[0] < px:
+        return 0.0
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        if bs_greeks(S, K, T, mid, cp)[0] > px:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
 
 
 def occ_parse(sym):
@@ -214,6 +269,42 @@ def fetch_quotes(oc, contracts):
         for k, v in r.items():
             out[k] = (float(v.get("bp", 0) or 0), float(v.get("ap", 0) or 0))
     return out
+
+
+def parse_chain(chain, oi, today, spot, t):
+    """raw chain snapshots -> GEX rows, quotes, today's volume, picker rows, last prices, and how many contracts had their
+    greeks worked out here because the feed left them out"""
+    rows, quotes, vol_today, crow, last_px, filled = [], {}, {}, [], {}, 0
+    for c, s in chain.items():
+        try:
+            _, exp, cp, k = occ_parse(c)
+        except Exception:  # noqa: BLE001
+            continue
+        q = s.get("latestQuote") or {}
+        bid, ask = float(q.get("bp", 0) or 0), float(q.get("ap", 0) or 0)
+        quotes[c] = (bid, ask)
+        lt = s.get("latestTrade") or {}
+        last_px[c] = float(lt.get("p", 0) or 0)
+        db = s.get("dailyBar") or {}
+        # only TODAY's bar counts (early in the day the free feed still shows yesterday's bar)
+        vol_today[c] = float(db.get("v", 0) or 0) if str(db.get("t", ""))[:10] == today.isoformat() else 0.0
+        gm = s.get("greeks") or {}
+        iv = float(s.get("impliedVolatility") or 0)
+        delta, gamma, theta = float(gm.get("delta") or 0), float(gm.get("gamma") or 0), float(gm.get("theta") or 0)
+        if delta == 0 or gamma == 0:
+            # greeks missing: work them out from the implied vol, or from the contract's own mid (else last trade)
+            T = years_to(exp, t)
+            if not iv > 0:
+                px = (bid + ask) / 2 if bid > 0 and ask >= bid else last_px[c]
+                iv = implied_vol(px, spot, k, T, cp)
+            g = bs_greeks(spot, k, T, iv, cp) if iv > 0 else None
+            if g:
+                _, delta, gamma, theta = g
+                filled += 1
+        rows.append(dict(cp=cp, K=k, exp=exp, iv=iv, gamma=gamma, oi=float(oi.get(c, 0))))
+        crow.append(dict(contract=c, cp=cp, K=k, exp=exp, dte=(exp - today).days, bid=bid, ask=ask,
+                         delta=delta, gamma=gamma, theta=theta, vol=vol_today[c], oi=float(oi.get(c, 0))))
+    return rows, quotes, vol_today, crow, last_px, filled
 
 
 # ===== one ticker =====
@@ -338,22 +429,26 @@ def target_of(r, bias, atr5):
     return float(spot + bias * PICK_ATR * atr5), "2.5 ATR"
 
 
-def pick_contract(crow, spot, bias, target):
+def pick_contract(crow, spot, bias, target, dte=None, dmin=None, hold=None):
     """among calls (bias +1) or puts (-1), 0-7 DTE, ask $0.40-$0.80, delta 0.20+, tight enough and traded enough:
     the one with the biggest % gain if price reaches the target in about 30 minutes
-    (value at the target = mid + delta x move + 1/2 gamma x move^2 + 30 minutes of time decay, sold at the bid)"""
+    (value at the target = mid + delta x move + 1/2 gamma x move^2 + 30 minutes of time decay, sold at the bid)
+    dte / dmin / hold override PICK_DTE / PICK_DELTA / PICK_HOLD (the 1m rules use 0-1 DTE, delta 0.15, 20 minutes)"""
+    dte = PICK_DTE if dte is None else dte
+    dmin = PICK_DELTA if dmin is None else dmin
+    hold = PICK_HOLD if hold is None else hold
     mv = target - spot
     best = None
     why = dict(side=0, price=0, delta=0, spread=0, liq=0)
     for o in crow:
-        if o["cp"] != bias or o["dte"] > PICK_DTE:
+        if o["cp"] != bias or o["dte"] > dte:
             continue
         why["side"] += 1
         bid, ask = o["bid"], o["ask"]
         if not (PICK_MIN <= ask <= PICK_MAX) or bid <= 0 or ask < bid:
             continue
         why["price"] += 1
-        if abs(o["delta"]) < PICK_DELTA:
+        if abs(o["delta"]) < dmin:
             continue
         why["delta"] += 1
         mid = (bid + ask) / 2
@@ -363,14 +458,14 @@ def pick_contract(crow, spot, bias, target):
         if o["oi"] < PICK_LIQ and o["vol"] < PICK_LIQ:
             continue
         why["liq"] += 1
-        est = mid + o["delta"] * mv + 0.5 * o["gamma"] * mv * mv + o["theta"] * PICK_HOLD / 390
+        est = mid + o["delta"] * mv + 0.5 * o["gamma"] * mv * mv + o["theta"] * hold / 390
         est = max(est, max(0.0, (target - o["K"]) if bias == 1 else (o["K"] - target)))
         sell = max(est - (ask - bid) / 2, 0.0)
         juice = sell / ask - 1
         if best is None or juice > best["juice"] or (juice == best["juice"] and o["vol"] > best["vol"]):
             best = dict(o, est=sell, juice=juice)
-    PICK_WHY[0] = (f"{why['side']} {'calls' if bias == 1 else 'puts'} 0-{PICK_DTE}DTE > {why['price']} priced {PICK_MIN:.2f}-{PICK_MAX:.2f} > "
-                   f"{why['delta']} delta {PICK_DELTA}+ > {why['spread']} spread ok > {why['liq']} liquid")
+    PICK_WHY[0] = (f"{why['side']} {'calls' if bias == 1 else 'puts'} 0-{dte}DTE > {why['price']} priced {PICK_MIN:.2f}-{PICK_MAX:.2f} > "
+                   f"{why['delta']} delta {dmin}+ > {why['spread']} spread ok > {why['liq']} liquid")
     return best
 
 
@@ -398,25 +493,7 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     except Exception as e:  # noqa: BLE001
         note_err(f"{sym} option chain", e)
         chain = {}
-    rows, quotes, vol_today, crow, last_px = [], {}, {}, [], {}
-    for c, s in chain.items():
-        try:
-            _, exp, cp, k = occ_parse(c)
-        except Exception:  # noqa: BLE001
-            continue
-        q = s.get("latestQuote") or {}
-        quotes[c] = (float(q.get("bp", 0) or 0), float(q.get("ap", 0) or 0))
-        lt = s.get("latestTrade") or {}
-        last_px[c] = float(lt.get("p", 0) or 0)
-        db = s.get("dailyBar") or {}
-        # only TODAY's bar counts (early in the day the free feed still shows yesterday's bar)
-        vol_today[c] = float(db.get("v", 0) or 0) if str(db.get("t", ""))[:10] == today.isoformat() else 0.0
-        gm = s.get("greeks") or {}
-        rows.append(dict(cp=cp, K=k, exp=exp, iv=float(s.get("impliedVolatility") or 0), gamma=float(gm.get("gamma") or 0),
-                         oi=float(oi.get(c, 0))))
-        crow.append(dict(contract=c, cp=cp, K=k, exp=exp, dte=(exp - today).days, bid=quotes[c][0], ask=quotes[c][1],
-                         delta=float(gm.get("delta") or 0), gamma=float(gm.get("gamma") or 0), theta=float(gm.get("theta") or 0),
-                         vol=vol_today[c], oi=float(oi.get(c, 0))))
+    rows, quotes, vol_today, crow, last_px, filled = parse_chain(chain, oi, today, spot, t)
     lv = gex_levels(rows, spot, t) or dict(net=np.nan, net0=np.nan, share0=np.nan, flip=np.nan, call_wall=np.nan, put_wall=np.nan,
                                          call_wall0=np.nan, put_wall0=np.nan)
     # flow since the last scan (near the money, 0-7 DTE)
@@ -491,6 +568,8 @@ def scan_ticker(sym, tc, oc, bars, st_day, t, delay_min):
     if r["bias"] != 0:
         tg, tk = target_of(r, r["bias"], atr5)
         pk = pick_contract(crow, spot, r["bias"], tg)
+        if filled:
+            PICK_WHY[0] += f" ({filled} contracts' greeks worked out here)"
     r["pick_why"] = PICK_WHY[0]
     r.update(target=round(tg, 2) if np.isfinite(tg) else np.nan, target_kind=tk, pick=pk["contract"] if pk else "",
              pick_bid=pk["bid"] if pk else np.nan, pick_ask=pk["ask"] if pk else np.nan, pick_delta=round(pk["delta"], 2) if pk else np.nan,
@@ -563,6 +642,17 @@ def write_board(rows, prints, t, delay, state=None):
                      f"{a:.2f} | {f['last_bid']:.2f} | {best_p:+.0f}% ({f['max_min']}m) | **{now_p:+.0f}%**{' (done)' if f['closed'] else ''} | "
                      f"{f['est_juice_pct']:+.0f}% | {lvl(f['target'])}{' hit' if f['target_hit_min'] is not None else ''} |")
         L.append("")
+    rlog = (state or {}).get("rule_log", [])
+    if RULE_ON:
+        L += [f"## 1m RULES on SPY / QQQ - loose ({len(rlog)} signals today, last 10)",
+              "Whipsaw (R1, +R2 TTM with/turning, +R5 near VWAP, +R6 both) and failed pop (R3, +R4 TTM not turning away). "
+              "Every signal fires if a 0-1 DTE contract qualifies. Full list: gex_rules.csv."]
+        if rlog:
+            L += ["| Candle | Ticker | Rule | Tags | Side | TTM | Result |", "|---|---|---|---|---|---|---|"]
+            for g in reversed(rlog[-10:]):
+                res = f"**FIRE** {g['contract']}" if g["fired"] else g["why"][:90]
+                L.append(f"| {g['candle']} | {g['sym']} | {g['rule']} | {g['tags']} | {g['side']} | {g['ttm']} | {res} |")
+        L.append("")
     L += ["| # | Ticker | Price | Setup | Bias | Score | Best contract for the move | Gamma | Flip | Call wall | Put wall | Flow today | Big prints 15m | Trend |",
           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for i, r in enumerate(rows, 1):
@@ -598,7 +688,7 @@ def write_board(rows, prints, t, delay, state=None):
 
 def push(msg):
     try:
-        files = [f for f in (BOARD, LOG, PRINTS, STATE, FIRES) if os.path.exists(f)]
+        files = [f for f in (BOARD, LOG, PRINTS, STATE, FIRES, RULES) if os.path.exists(f)]
         subprocess.run(["git", "add"] + files, check=False, capture_output=True)
         if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
             return
@@ -621,6 +711,7 @@ def load_state(today):
 
 def save_state(s):
     slim = {"day": s["day"], "flow_delay": s.get("flow_delay", 0), "fires": s.get("fires", []), "last_fire": s.get("last_fire", {}),
+            "rule_seen": s.get("rule_seen", {}), "rule_log": s.get("rule_log", [])[-30:],
             "tickers": {}}
     for k, v in s["tickers"].items():
         slim["tickers"][k] = {x: y for x, y in v.items() if x != "oi"}
@@ -653,7 +744,7 @@ def fire_check(rows, bars, state, t):
                  side="CALLS" if r["bias"] == 1 else "PUTS", setup=r["setup"], score=r["score"], contract=r["pick"],
                  entry_bid=r["pick_bid"], entry_ask=r["pick_ask"], delta=r["pick_delta"], spot=r["price"], target=r["target"],
                  target_kind=r["target_kind"], est_juice_pct=r["pick_juice"], last_bid=r["pick_bid"], max_bid=r["pick_bid"],
-                 max_min=0, min_bid=r["pick_bid"], bid_15=None, bid_30=None, bid_60=None, hit25_min=None, hit50_min=None,
+                 max_min=0, min_bid=r["pick_bid"], bid_15=None, bid_20=None, bid_30=None, bid_60=None, hit25_min=None, hit50_min=None,
                  hit100_min=None, down30_min=None, target_hit_min=None, closed=False)
         fires.append(f)
         log(f"FIRE {f['side']} {r['sym']} {r['setup']} | {f['contract']} ask {f['entry_ask']:.2f} | target {f['target']} "
@@ -684,12 +775,12 @@ def track_fires(oc, state, t):
                     f[k] = round(el)
             if f["down30_min"] is None and pct <= -0.30:
                 f["down30_min"] = round(el)
-        for k, m_ in (("bid_15", 15), ("bid_30", 30), ("bid_60", 60)):
-            if f[k] is None and el >= m_:
+        for k, m_ in (("bid_15", 15), ("bid_20", 20), ("bid_30", 30), ("bid_60", 60)):
+            if f.get(k) is None and el >= m_:
                 f[k] = f["last_bid"]
         if el >= TRACK_MIN or hhmm(t) >= 1555:
-            for k in ("bid_15", "bid_30", "bid_60"):
-                if f[k] is None:
+            for k in ("bid_15", "bid_20", "bid_30", "bid_60"):
+                if f.get(k) is None:
                     f[k] = f["last_bid"]
             f["closed"] = True
             done.append(f)
@@ -699,11 +790,183 @@ def track_fires(oc, state, t):
         pc = lambda x: round((x / a - 1) * 100, 1) if x is not None and a else None
         rows.append(dict(t_entry=f["t_entry"], sym=f["sym"], side=f["side"], setup=f["setup"], score=f["score"], contract=f["contract"],
                          entry_ask=a, delta=f["delta"], spot=f["spot"], target=f["target"], target_kind=f["target_kind"],
-                         est_pct=f["est_juice_pct"], pct_15=pc(f["bid_15"]), pct_30=pc(f["bid_30"]), pct_60=pc(f["bid_60"]),
+                         est_pct=f["est_juice_pct"], pct_15=pc(f["bid_15"]), pct_20=pc(f.get("bid_20")), pct_30=pc(f["bid_30"]), pct_60=pc(f["bid_60"]),
                          best_pct=pc(f["max_bid"]), best_at_min=f["max_min"], worst_pct=pc(f["min_bid"]), hit25_min=f["hit25_min"],
                          hit50_min=f["hit50_min"], hit100_min=f["hit100_min"], down30_min=f["down30_min"], target_hit_min=f["target_hit_min"]))
         log(f"FIRE DONE {f['id']} {f['contract']}: 15m {pc(f['bid_15'])}% | 30m {pc(f['bid_30'])}% | best {pc(f['max_bid'])}% at {f['max_min']}m")
     append_csv(FIRES, rows)
+
+
+# ===== 1m RULES on SPY + QQQ (the Trend Flip backtest's whipsaw / failed pop, fired loose) =====
+_BT = [None]
+TTM_REL = {("cyan", 1): "WITH you", ("yellow", 1): "TURNING your way", ("dark blue", 1): "TURNING away",
+           ("red", 1): "AGAINST you", ("red", -1): "WITH you", ("dark blue", -1): "TURNING your way",
+           ("yellow", -1): "TURNING away", ("cyan", -1): "AGAINST you"}
+
+
+def bt():
+    """backtest.py, imported once (only its functions are used - same math as the test)"""
+    if _BT[0] is None:
+        import backtest as B
+        _BT[0] = B
+    return _BT[0]
+
+
+def fetch_1m(dc, syms):
+    """closed 1-minute candles (all sessions, like the backtest), last 5 days, IEX feed"""
+    from alpaca.data.enums import DataFeed
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    now = datetime.now(timezone.utc)
+    df = dc.get_stock_bars(StockBarsRequest(symbol_or_symbols=syms, timeframe=TimeFrame.Minute,
+                                            start=now - timedelta(days=5), end=now, feed=DataFeed.IEX)).df
+    out = {}
+    if df is None or df.empty:
+        return out
+    cut = pd.Timestamp(now).tz_convert(ET)
+    for s in syms:
+        try:
+            d = df.xs(s, level=0) if isinstance(df.index, pd.MultiIndex) else df
+        except KeyError:
+            continue
+        d = d.sort_index()
+        d.index = d.index.tz_convert(ET)
+        out[s] = d[d.index + pd.Timedelta(minutes=1) <= cut][["open", "high", "low", "close", "volume"]].astype(float)
+    return out
+
+
+def rule_events(d):
+    """every whipsaw / failed pop in d (1m candles), with the tags of the tighter rules each one also meets.
+    A copy of the last candle is added as a stand-in 'next candle' so the backtest's event code can see the last one."""
+    B = bt()
+    n = len(d)
+    if n < 120:
+        return []
+    pad = d.iloc[[-1]].copy()
+    pad.index = pad.index + pd.Timedelta(minutes=1)
+    df = pd.concat([d, pad])
+    ind = B.indicators(df, 13, 34, True)
+    ev, F, G, _, _, _ = B.vs_events(df, ind)
+    mom = np.asarray(B.cl_ttm(df)[0], dtype=float)
+    c, a, vw = ind["c"], ind["atr"], ind["vwap"]
+    out = []
+    for setup, i, side in ev:
+        if setup not in ("VF_WHIP", "TL_FAILPOP") or i >= n or not (a[i] > 0):
+            continue
+        if np.isfinite(mom[i]) and i > 0:
+            raw = ("cyan" if mom[i] > mom[i - 1] else "dark blue") if mom[i] >= 0 else ("yellow" if mom[i] > mom[i - 1] else "red")
+            rel = TTM_REL[(raw, side)]
+        else:
+            raw, rel = "n/a", "n/a"
+        vwx = side * (c[i] - vw[i]) / a[i] if np.isfinite(vw[i]) else np.nan
+        if setup == "VF_WHIP":
+            name, tags = "1m WHIPSAW", ["R1"]
+            ttm_ok = rel in ("WITH you", "TURNING your way")
+            near = np.isfinite(vwx) and abs(vwx) < 1
+            if ttm_ok:
+                tags.append("R2")
+            if near:
+                tags.append("R5")
+            if ttm_ok and near:
+                tags.append("R6")
+        else:
+            name, tags = "1m FAILED POP", ["R3"]
+            if rel != "TURNING away":
+                tags.append("R4")
+        out.append(dict(t=d.index[i], setup=setup, name=name, tags=tags, d=side, ttm=raw, rel=rel, vwx=vwx,
+                        atr=float(a[i]), close=float(c[i]), fear=float(np.nan_to_num(F[i])), greed=float(np.nan_to_num(G[i]))))
+    return out
+
+
+def rule_pick(tc, oc, state, sym, e, t):
+    """the best 0-1 DTE $0.40-$0.80 contract for a 1m rule signal, from a fresh chain"""
+    today = t.date()
+    spot = e["close"]
+    day = state["tickers"].setdefault(sym, {})
+    if day.get("oi_date") != today.isoformat() or not day.get("oi"):
+        try:
+            day["oi"] = fetch_oi(tc, sym, spot * (1 - STRIKE_PCT), spot * (1 + STRIKE_PCT), today)
+            day["oi_date"] = today.isoformat()
+        except Exception as ex:  # noqa: BLE001
+            note_err(f"{sym} open interest", ex)
+            day["oi"] = {}
+    chain = fetch_chain(oc, sym, spot * 0.97, spot * 1.03, today)
+    _, _, _, crow, _, filled = parse_chain(chain, day.get("oi", {}), today, spot, t)
+    target = spot + e["d"] * RULE_TGT * e["atr"]
+    PICK_WHY[0] = ""
+    pk = pick_contract(crow, spot, e["d"], target, dte=RULE_DTE, dmin=RULE_DELTA, hold=RULE_HOLD)
+    why = PICK_WHY[0] + (f" ({filled} greeks worked out here)" if filled else "")
+    return pk, target, why
+
+
+def rule_check(tc, dc, oc, state, t):
+    """runs every minute: new 1m rule signals on SPY / QQQ -> FIRE (loose). Returns how many fired."""
+    if not RULE_ON or hhmm(t) < 936 or hhmm(t) > 1532:
+        return 0
+    try:
+        bars1 = fetch_1m(dc, RULE_SYMS)
+    except Exception as ex:  # noqa: BLE001
+        note_err("1m candles", ex)
+        return 0
+    seen = state.setdefault("rule_seen", {})
+    last = state.setdefault("last_fire", {})
+    fires = state.setdefault("fires", [])
+    rlog = state.setdefault("rule_log", [])
+    rows, new = [], 0
+    for sym in RULE_SYMS:
+        d = bars1.get(sym)
+        if d is None or len(d) < 120:
+            continue
+        try:
+            evs = rule_events(d)
+        except Exception as ex:  # noqa: BLE001
+            note_err(f"{sym} 1m rules", ex)
+            continue
+        prev = seen.get(sym, "")
+        for e in evs:
+            ts = e["t"].isoformat()
+            if e["t"].date() != t.date() or ts <= prev:
+                continue
+            seen[sym] = max(seen.get(sym, ""), ts)
+            age = (t - (e["t"] + pd.Timedelta(minutes=1))).total_seconds() / 60
+            side = "CALLS" if e["d"] == 1 else "PUTS"
+            row = dict(t=t.isoformat(timespec="seconds"), candle=e["t"].strftime("%H:%M"), sym=sym, rule=e["name"],
+                       tags=" ".join(e["tags"]), side=side, close=round(e["close"], 2), atr1=round(e["atr"], 3), ttm=e["rel"],
+                       vwap_atr=round(e["vwx"], 2) if np.isfinite(e["vwx"]) else "", fear=round(e["fear"]), greed=round(e["greed"]),
+                       seen_after_min=round(age, 1), fired="", contract="", ask="", delta="", target="", why="")
+            key = f"{sym}|{e['d']}|1m"
+            if age > RULE_LATE:
+                row["why"] = "seen late (not fired)"
+            elif key in last and (t - datetime.fromisoformat(last[key])).total_seconds() < RULE_COOL * 60:
+                row["why"] = f"{RULE_COOL}-minute cooldown"
+            else:
+                try:
+                    pk, tg, why = rule_pick(tc, oc, state, sym, e, t)
+                except Exception as ex:  # noqa: BLE001
+                    note_err(f"{sym} 1m rule contract", ex)
+                    pk, tg, why = None, np.nan, f"chain failed: {str(ex)[:80]}"
+                row["target"] = round(tg, 2) if np.isfinite(tg) else ""
+                if not pk:
+                    row["why"] = "no contract: " + why
+                else:
+                    last[key] = t.isoformat()
+                    setup = f"{e['name']} ({' '.join(e['tags'])})"
+                    f = dict(id=f"{sym}-1m-{t:%H%M}", t_entry=t.isoformat(timespec="seconds"), sym=sym, bias=e["d"], side=side,
+                             setup=setup, score=None, contract=pk["contract"], entry_bid=pk["bid"], entry_ask=pk["ask"],
+                             delta=round(pk["delta"], 2), spot=round(e["close"], 2), target=round(tg, 2), target_kind=f"{RULE_TGT:g} x 1m ATR",
+                             est_juice_pct=round(pk["juice"] * 100, 1), last_bid=pk["bid"], max_bid=pk["bid"], max_min=0,
+                             min_bid=pk["bid"], bid_15=None, bid_20=None, bid_30=None, bid_60=None, hit25_min=None, hit50_min=None,
+                             hit100_min=None, down30_min=None, target_hit_min=None, closed=False)
+                    fires.append(f)
+                    new += 1
+                    row.update(fired="FIRE", contract=pk["contract"], ask=pk["ask"], delta=round(pk["delta"], 2), why=why)
+                    log(f"FIRE 1m {side} {sym} {setup} | {f['contract']} ask {f['entry_ask']:.2f} | target {f['target']} "
+                        f"| est +{f['est_juice_pct']:.0f}%")
+            rows.append(row)
+            rlog.append({k: row[k] for k in ("candle", "sym", "rule", "tags", "side", "ttm", "fired", "contract", "why")})
+    del rlog[:-30]
+    append_csv(RULES, rows)
+    return new
 
 
 # ===== loop =====
@@ -766,9 +1029,19 @@ def run_loop(tc, dc, oc):
                 push(f"gex scan {t:%Y-%m-%d %H:%M}")
         t = now_et()
         nxt = t.replace(second=20, microsecond=0) + timedelta(minutes=SCAN_MIN - t.minute % SCAN_MIN)
+        nrule = t                                   # the 1m rules run right after a scan, then 8 seconds into every minute
         while now_et() < nxt:
+            if now_et() >= nrule:
+                try:
+                    if rule_check(tc, dc, oc, state, now_et()):
+                        save_state(state)
+                        push(f"gex 1m rule fire {now_et():%Y-%m-%d %H:%M}")
+                except Exception as ex:  # noqa: BLE001
+                    log(f"1m rules failed: {str(ex)[:200]}")
+                tn = now_et()
+                nrule = tn.replace(second=8, microsecond=0) + timedelta(minutes=1)
             track_fires(oc, state, now_et())
-            sleep(min(TRACK_SECS, max(0.0, (nxt - now_et()).total_seconds())))
+            sleep(min(TRACK_SECS, max(0.0, (min(nxt, nrule) - now_et()).total_seconds())))
         save_state(state)
     push(f"gex scan {now_et():%Y-%m-%d %H:%M}")
     s = os.getenv("GITHUB_STEP_SUMMARY")
