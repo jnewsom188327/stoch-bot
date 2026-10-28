@@ -1,4 +1,4 @@
-# GEX + FLOW SCAN - Wed Oct 28, 02:20 PM ET
+# GEX + FLOW SCAN - Wed Oct 28, 02:30 PM ET
 Log only, no orders. Options feed: indicative. Flow = real time (volume change x price). Big prints run 16 min behind (free plan limit on option trades). FIRE = score 45+ with a bias: the bot picks the 0.40-0.80 contract with the most juice for the move and follows its real bid for 60 minutes. Score and fires are being graded, not proven.
 
 ## FIRES today (6)
@@ -20,63 +20,61 @@ Whipsaw (R1, +R2 TTM with/turning, +R5 near VWAP, +R6 both) and failed pop (R3, 
 
 | # | Ticker | Price | Setup | Bias | Score | Best contract for the move | Gamma | Flip | Call wall | Put wall | Flow today | Big prints 15m | Trend |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | **AAPL** | 344.35 | PIN AT PUT WALL (positive gamma) - bounce | **CALLS** | 37 | 10/30 350C @ 0.79 (delta 0.21) = est +11% at 345 | POS +$288.1M | 341.49 | 350 | 345 | +$2.5M | +$219k bull / +$0 bear | out (clean 28, ADX 14, RVol 1.1) |
-| 2 | **IWM** | 279.68 | - | **-** | 24 | - | NEG -$503.7M | 281.01 | 280 | 270 | +$12.2M | +$385k bull / +$0 bear | out (clean 24, ADX 29, RVol 0.6) |
-| 3 | **SMH** | 564.81 | - | **-** | 22 | - | POS +$50.0M | 560.42 | 570 | 555 | -$3.3M | +$35k bull / +$0 bear | out (clean 28, ADX 16, RVol 1.1) |
-| 4 | **HOOD** | 90.03 | - | **-** | 22 | - | NEG -$18.0M | - | 95 | 90 | +$4.3M | +$95k bull / +$0 bear | out (clean 30, ADX 16, RVol 0.8) |
-| 5 | **AMD** | 570.32 | - | **-** | 20 | - | POS +$171.5M | - | 600 | 550 | +$6.5M | +$890k bull / -$309k bear | out (clean 29, ADX 28, RVol 1.1) |
-| 6 | **META** | 610.01 | - | **-** | 20 | - | NEG -$259.7M | 634.13 | 650 | 600 | +$10.8M | +$266k bull / +$0 bear | out (clean 29, ADX 23, RVol 0.9) |
-| 7 | **PLTR** | 193.56 | - | **-** | 20 | - | POS +$34.2M | 189.4 | 200 | 190 | +$546k | +$56k bull / +$0 bear | out (clean 27, ADX 38, RVol 0.9) |
-| 8 | **NVDA** | 216.58 | - | **-** | 18 | - | POS +$480.2M | 210.22 | 220 | 215 | +$10.6M | +$387k bull / +$0 bear | out (clean 26, ADX 17, RVol 0.7) |
-| 9 | **AMZN** | 252.35 | - | **-** | 17 | - | POS +$176.6M | 242.17 | 250 | 250 | +$4.2M | +$798k bull / +$0 bear | out (clean 31, ADX 17, RVol 0.8) |
-| 10 | **MSTR** | 139.47 | - | **-** | 17 | - | POS +$16.8M | - | 152.5 | 140 | +$1.1M | +$58k bull / -$29k bear | out (clean 27, ADX 12, RVol 0.4) |
-| 11 | **GOOGL** | 323.10 | - | **-** | 16 | - | POS +$7.8M | 321.27 | 355 | 300 | +$582k | +$882k bull / +$0 bear | out (clean 32, ADX 22, RVol 1.1) |
-| 12 | **AVGO** | 347.88 | - | **-** | 16 | - | POS +$61.8M | 336.26 | 350 | 340 | +$363k | +$265k bull / -$56k bear | out (clean 29, ADX 26, RVol 0.6) |
-| 13 | **MU** | 967.10 | - | **-** | 16 | - | POS +$623.5M | - | 950 | 950 | +$24.9M | +$4.7M bull / -$800k bear | out (clean 28, ADX 19, RVol 0.4) |
-| 14 | **QQQ** | 721.45 | - | **-** | 15 | - | NEG -$2.0B | 727.61 | 720 | 720 | +$29.2M | +$926k bull / -$487k bear | out (clean 29, ADX 11, RVol 0.7) |
-| 15 | **TSLA** | 401.90 | - | **-** | 15 | - | POS +$600.2M | - | 400 | 400 | -$14.8M | +$1.9M bull / -$201k bear | out (clean 29, ADX 15, RVol 0.4) |
-| 16 | **MSFT** | 526.58 | - | **-** | 15 | - | POS +$426.4M | - | 550 | 500 | +$184k | +$543k bull / +$0 bear | out (clean 29, ADX 14, RVol 1.4) |
-| 17 | **SPY** | 770.12 | - | **-** | 14 | - | NEG -$3.2B | 773.08 | 770 | 750 | +$7.1M | +$2.0M bull / +$0 bear | out (clean 29, ADX 12, RVol 0.7) |
-| 18 | **SHOP** | 167.10 | - | **-** | 11 | - | NEG -$4.5M | 172.28 | 175 | 165 | -$28k | - | out (clean 29, ADX 24, RVol 0.9) |
-| 19 | **ORCL** | 131.32 | - | **-** | 10 | - | POS +$18.3M | 126.53 | 135 | 130 | -$805k | - | out (clean 29, ADX 18, RVol 1.3) |
-| 20 | **BABA** | 99.88 | - | **-** | 10 | - | NEG -$15.7M | 102.85 | 102 | 100 | +$70k | - | out (clean 28, ADX 17, RVol 0.8) |
-| 21 | **SMCI** | 34.77 | - | **-** | 8 | - | POS +$19.4M | - | 35 | 35 | +$140k | - | out (clean 28, ADX 17, RVol 0.5) |
-| 22 | **UBER** | 65.29 | - | **-** | 8 | - | NEG -$33.2M | - | 70 | 65 | +$46k | - | out (clean 30, ADX 23, RVol 1.3) |
-| 23 | **COIN** | 158.42 | - | **-** | 6 | - | POS +$1.3M | 155.57 | 170 | 150 | +$63k | - | out (clean 29, ADX 10, RVol 1.0) |
-| 24 | **NFLX** | 61.59 | - | **-** | 5 | - | NEG -$58.3M | - | 65 | 60 | -$38k | - | out (clean 31, ADX 15, RVol 0.9) |
-| 25 | **DELL** | 493.24 | - | **-** | 5 | - | POS +$28.9M | - | 500 | 500 | +$228k | - | out (clean 30, ADX 12, RVol 0.4) |
-| 26 | **ARM** | 231.84 | - | **-** | 5 | - | POS +$1.6M | 223.74 | 227.5 | 250 | +$101k | - | out (clean 26, ADX 14, RVol 0.5) |
-| 27 | **CRM** | 241.40 | - | **-** | 5 | - | POS +$6.4M | 234.85 | 260 | 240 | +$18k | - | out (clean 26, ADX 14, RVol 0.6) |
+| 1 | **AAPL** | 344.67 | PIN AT PUT WALL (positive gamma) - bounce | **CALLS** | 38 | 10/28 345C @ 0.58 (delta 0.43) = est -54% at 345 | POS +$295.9M | 341.55 | 350 | 345 | +$3.2M | +$356k bull / +$0 bear | out (clean 28, ADX 15, RVol 1.2) |
+| 2 | **IWM** | 279.75 | - | **-** | 23 | - | NEG -$429.0M | 280.96 | 280 | 270 | +$12.3M | +$146k bull / +$0 bear | out (clean 25, ADX 29, RVol 0.6) |
+| 3 | **SMH** | 565.96 | - | **-** | 22 | - | POS +$67.3M | 560.47 | 570 | 555 | -$3.6M | +$35k bull / -$51k bear | out (clean 28, ADX 14, RVol 1.0) |
+| 4 | **HOOD** | 90.44 | - | **-** | 22 | - | NEG -$17.6M | - | 95 | 90 | +$4.2M | +$95k bull / +$0 bear | out (clean 30, ADX 16, RVol 0.9) |
+| 5 | **META** | 610.18 | - | **-** | 21 | - | NEG -$275.8M | 636.81 | 650 | 610 | +$12.2M | +$696k bull / -$102k bear | out (clean 29, ADX 28, RVol 1.1) |
+| 6 | **SMCI** | 34.98 | PINNED between the walls (positive gamma) - chop | **-** | 21 | - | POS +$20.1M | - | 35 | 35 | +$131k | - | out (clean 27, ADX 18, RVol 0.5) |
+| 7 | **AMD** | 571.65 | - | **-** | 20 | - | POS +$166.5M | - | 600 | 550 | +$5.4M | +$890k bull / -$426k bear | out (clean 29, ADX 29, RVol 1.3) |
+| 8 | **PLTR** | 193.96 | - | **-** | 20 | - | POS +$37.3M | 189.73 | 200 | 190 | +$517k | +$58k bull / +$0 bear | out (clean 27, ADX 38, RVol 1.1) |
+| 9 | **NVDA** | 217.04 | - | **-** | 17 | - | POS +$519.3M | 210.22 | 220 | 215 | +$9.2M | +$199k bull / -$238k bear | out (clean 26, ADX 16, RVol 0.6) |
+| 10 | **GOOGL** | 323.64 | - | **-** | 17 | - | POS +$14.0M | 320.71 | 355 | 300 | +$667k | +$915k bull / +$0 bear | out (clean 33, ADX 20, RVol 1.3) |
+| 11 | **TSLA** | 403.26 | - | **-** | 16 | - | POS +$623.1M | - | 400 | 400 | -$16.2M | +$1.5M bull / -$487k bear | out (clean 29, ADX 16, RVol 0.5) |
+| 12 | **AMZN** | 252.88 | - | **-** | 16 | - | POS +$184.0M | 243.08 | 255 | 250 | +$2.4M | +$798k bull / -$1.0M bear | out (clean 31, ADX 18, RVol 0.8) |
+| 13 | **AVGO** | 349.00 | - | **-** | 16 | - | POS +$60.0M | 338.2 | 350 | 340 | -$142k | +$265k bull / -$34k bear | out (clean 29, ADX 27, RVol 0.6) |
+| 14 | **MU** | 970.33 | - | **-** | 16 | - | POS +$633.3M | - | 950 | 950 | +$23.0M | +$3.8M bull / -$1.0M bear | out (clean 28, ADX 18, RVol 0.4) |
+| 15 | **MSTR** | 140.37 | - | **-** | 16 | - | POS +$18.5M | - | 152.5 | 140 | +$668k | +$59k bull / +$0 bear | out (clean 27, ADX 14, RVol 0.5) |
+| 16 | **QQQ** | 722.55 | - | **-** | 15 | - | NEG -$1.5B | 727.34 | 720 | 720 | +$32.9M | +$2.1M bull / -$1.3M bear | out (clean 29, ADX 11, RVol 0.8) |
+| 17 | **MSFT** | 528.13 | - | **-** | 15 | - | POS +$471.7M | - | 550 | 500 | -$81k | +$419k bull / +$0 bear | out (clean 29, ADX 14, RVol 1.2) |
+| 18 | **NFLX** | 61.65 | - | **-** | 15 | - | NEG -$56.6M | - | 65 | 60 | -$94k | +$0 bull / -$38k bear | out (clean 31, ADX 16, RVol 0.8) |
+| 19 | **ORCL** | 141.63 | - | **-** | 15 | - | POS +$38.8M | - | 135 | 140 | -$1.2M | - | out (clean 30, ADX 27, RVol 7.1) |
+| 20 | **SPY** | 770.89 | - | **-** | 14 | - | NEG -$2.4B | 773.28 | 780 | 750 | +$8.0M | +$1.8M bull / -$1.1M bear | out (clean 29, ADX 12, RVol 0.8) |
+| 21 | **SHOP** | 167.41 | - | **-** | 11 | - | NEG -$3.9M | 171.57 | 175 | 165 | -$26k | - | out (clean 29, ADX 21, RVol 1.4) |
+| 22 | **UBER** | 65.35 | - | **-** | 10 | - | NEG -$30.9M | - | 70 | 65 | +$62k | - | out (clean 30, ADX 23, RVol 1.6) |
+| 23 | **BABA** | 100.16 | - | **-** | 10 | - | NEG -$13.6M | 102.97 | 102 | 100 | +$66k | - | out (clean 28, ADX 17, RVol 1.0) |
+| 24 | **COIN** | 158.91 | - | **-** | 5 | - | POS +$2.0M | 154.93 | 170 | 150 | +$58k | - | out (clean 28, ADX 10, RVol 0.7) |
+| 25 | **DELL** | 494.19 | - | **-** | 5 | - | POS +$30.6M | - | 500 | 500 | +$216k | - | out (clean 30, ADX 11, RVol 0.4) |
+| 26 | **ARM** | 232.72 | - | **-** | 4 | - | POS +$1.9M | 222.24 | 227.5 | 250 | +$64k | - | out (clean 26, ADX 13, RVol 0.5) |
+| 27 | **CRM** | 241.35 | - | **-** | 4 | - | POS +$6.8M | 234.59 | 260 | 240 | +$14k | - | out (clean 26, ADX 13, RVol 0.5) |
 
-## Big prints this scan (79)
-- **GOOGL** CALL 332.5 2026-10-30 (2DTE): 998 @ 6.40 = **+$639k** BUY | vol 3,637 / OI 7,806
-- **MU** PUT 965 2026-10-28 (0DTE): 899 @ 3.70 = **+$333k** SELL | vol 30,740 / OI 17
-- **SPY** PUT 775 2026-10-30 (2DTE): 450 @ 5.00 = **+$225k** SELL | vol 2,777 / OI 3,175
-- **QQQ** PUT 726 2026-10-29 (1DTE): 338 @ 6.45 = **+$218k** SELL | vol 3,263 / OI 321
-- **MSFT** CALL 532.5 2026-11-02 (5DTE): 200 @ 10.90 = **+$218k** MID | vol 251 / OI 82
-- **SPY** CALL 770 2026-10-30 (2DTE): 392 @ 4.72 = **+$185k** BUY | vol 7,349 / OI 22,207
-- **MU** CALL 955 2026-10-28 (0DTE): 100 @ 18.00 = **+$180k** BUY | vol 3,282 / OI 340
-- **TSLA** CALL 400 2026-10-28 (0DTE): 487 @ 3.50 = **+$170k** BUY | vol 89,529 / OI 4,776
-- **MU** CALL 970 2026-10-28 (0DTE): 195 @ 7.00 = **+$136k** BUY | vol 36,919 / OI 3,109
-- **SPY** PUT 780 2026-10-30 (2DTE): 140 @ 9.18 = **+$129k** SELL | vol 897 / OI 3,391
-- **MU** CALL 930 2026-11-04 (7DTE): 23 @ 55.25 = **+$127k** BUY | vol 214 / OI 30
-- **MSFT** CALL 545 2026-11-02 (5DTE): 200 @ 6.20 = **+$124k** MID | vol 1,629 / OI 140
-- **MSFT** CALL 545 2026-11-02 (5DTE): 200 @ 6.20 = **+$124k** MID | vol 1,629 / OI 140
-- **MU** CALL 930 2026-11-04 (7DTE): 21 @ 55.20 = **+$116k** BUY | vol 214 / OI 30
-- **AMD** CALL 567.5 2026-10-28 (0DTE): 166 @ 6.00 = **+$100k** BUY | vol 8,868 / OI 357
+## Big prints this scan (60)
+- **SPY** PUT 775 2026-10-30 (2DTE): 1,171 @ 6.25 = **+$732k** BUY | vol 4,238 / OI 3,175
+- **QQQ** CALL 710 2026-10-30 (2DTE): 223 @ 14.29 = **+$319k** SELL | vol 598 / OI 9,707
+- **QQQ** CALL 717 2026-10-30 (2DTE): 223 @ 9.15 = **+$204k** SELL | vol 700 / OI 1,332
+- **SPY** PUT 772 2026-10-29 (1DTE): 311 @ 3.91 = **+$122k** BUY | vol 21,154 / OI 264
+- **NVDA** CALL 217.5 2026-10-28 (0DTE): 1,786 @ 0.59 = **+$105k** SELL | vol 121,958 / OI 7,446
+- **AMZN** CALL 265 2026-10-30 (2DTE): 172 @ 5.07 = **+$87k** SELL | vol 1,891 / OI 18,534
+- **MU** CALL 960 2026-10-28 (0DTE): 80 @ 10.90 = **+$87k** SELL | vol 8,612 / OI 2,947
+- **AMZN** PUT 247.5 2026-10-30 (2DTE): 100 @ 7.80 = **+$78k** BUY | vol 841 / OI 1,100
+- **TSLA** CALL 397.5 2026-10-28 (0DTE): 190 @ 4.10 = **+$78k** SELL | vol 21,107 / OI 2,326
+- **AMZN** PUT 247.5 2026-10-30 (2DTE): 90 @ 7.78 = **+$70k** BUY | vol 841 / OI 1,100
+- **MU** CALL 955 2026-10-28 (0DTE): 50 @ 13.50 = **+$68k** SELL | vol 3,411 / OI 340
+- **AMZN** CALL 260 2026-10-30 (2DTE): 90 @ 6.82 = **+$61k** SELL | vol 2,629 / OI 8,793
+- **META** PUT 610 2026-10-28 (0DTE): 200 @ 2.63 = **+$53k** SELL | vol 39,638 / OI 1,065
+- **MU** PUT 990 2026-10-30 (2DTE): 16 @ 32.83 = **+$53k** BUY | vol 1,317 / OI 542
+- **NVDA** PUT 217.5 2026-10-30 (2DTE): 155 @ 3.24 = **+$50k** BUY | vol 13,287 / OI 5,808
 
 ## New unusual volume (traded more than open interest, 500+)
-- **SPY** PUT 769 2026-11-04 (7DTE): 527 traded vs OI 55
-- **QQQ** CALL 741 2026-10-29 (1DTE): 583 traded vs OI 71
-- **QQQ** PUT 688 2026-10-28 (0DTE): 672 traded vs OI 0
-- **QQQ** PUT 690 2026-10-29 (1DTE): 2,012 traded vs OI 1,923
-- **QQQ** PUT 722 2026-11-13 (16DTE): 973 traded vs OI 169
-- **IWM** CALL 283 2026-11-13 (16DTE): 1,022 traded vs OI 406
-- **NVDA** CALL 227.5 2026-11-04 (7DTE): 500 traded vs OI 226
-- **AAPL** PUT 310 2026-11-06 (9DTE): 2,235 traded vs OI 0
-- **AMD** CALL 580 2026-10-30 (2DTE): 2,010 traded vs OI 1,965
-- **ORCL** CALL 144 2026-10-30 (2DTE): 582 traded vs OI 0
-- **ORCL** CALL 131 2026-10-30 (2DTE): 1,066 traded vs OI 1,059
-- **HOOD** CALL 91 2026-11-20 (23DTE): 600 traded vs OI 520
+- **SPY** CALL 776 2026-11-02 (5DTE): 605 traded vs OI 431
+- **SMH** CALL 567.5 2026-11-06 (9DTE): 512 traded vs OI 316
+- **TSLA** CALL 422.5 2026-11-02 (5DTE): 508 traded vs OI 187
+- **META** PUT 605 2026-10-30 (2DTE): 875 traded vs OI 864
+- **AMZN** CALL 250 2026-10-28 (0DTE): 6,532 traded vs OI 6,491
+- **MSFT** PUT 505 2026-11-06 (9DTE): 523 traded vs OI 271
+- **GOOGL** PUT 307.5 2026-11-06 (9DTE): 1,389 traded vs OI 63
+- **MU** PUT 1,000 2026-10-28 (0DTE): 508 traded vs OI 35
+- **MSTR** CALL 146 2026-10-30 (2DTE): 845 traded vs OI 785
+- **ORCL** CALL 155 2026-10-30 (2DTE): 530 traded vs OI 0
 
 **How to read it:** POS gamma = dealers pin price (fade the walls). NEG gamma = dealers chase (moves run). Flip = where gamma turns from one to the other. Call wall / put wall = the strikes with the most call / put gamma (magnets and lids). Flow today = bullish $ (calls bought + puts sold) minus bearish $ (puts bought + calls sold), near the money, 0-7 DTE. BUY / SELL is a guess from where the print hit the current quote.
