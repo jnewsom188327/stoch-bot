@@ -78,10 +78,30 @@ def build(df, close_hm=1600):
     zc_dn = pd.Series((m < 0) & (np.r_[0.0, m[:-1]] >= 0)).rolling(4, min_periods=1).max().astype(bool).to_numpy()
     hm, day = ind["hm"], ind["day"]
     idx = np.arange(n)
+    # TRUE FLUSH pieces: how far price fell into this candle (from the highest high of the last 10 candles, in ATR),
+    # and how many candles in a row fear / greed has been pinned at 100
+    hh = pd.Series(ind["h"]).rolling(11, min_periods=1).max().to_numpy()
+    ll = pd.Series(ind["l"]).rolling(11, min_periods=1).min().to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dropL = np.where(a > 0, (hh - ind["l"]) / a, 0.0)
+        dropS = np.where(a > 0, (ind["h"] - ll) / a, 0.0)
+
+    def runlen(mask):
+        r = np.zeros(n, dtype=np.int32)
+        k = 0
+        for j in range(n):
+            if mask[j]:
+                k = k + 1 if j > 0 and day[j] == day[j - 1] else 1
+            else:
+                k = 0
+            r[j] = k
+        return r
+    runF, runG = runlen(F >= 99.999), runlen(G >= 99.999)
     dend = pd.Series(np.where(hm < close_hm, idx, -1)).groupby(day).transform("max").to_numpy()
     return dict(against1=(state == -1) | agreeDn, against_1=(state == 1) | agreeUp,
                 o=ind["o"], h=ind["h"], l=ind["l"], c=ind["c"], atr=a, hm=hm, day=day, st=ind["st"], F=F, G=G, state=state,
-                agreeUp=agreeUp, agreeDn=agreeDn, sqF5=sqF5, zc_up=zc_up, zc_dn=zc_dn, dend=dend, n=n)
+                agreeUp=agreeUp, agreeDn=agreeDn, sqF5=sqF5, zc_up=zc_up, zc_dn=zc_dn, dend=dend, n=n,
+                dropL=dropL, dropS=dropS, runF=runF, runG=runG)
 
 
 # ---------------------------------------------------------------- the setups
@@ -89,23 +109,33 @@ def variants(X):
     S = X
     up_base = (S["state"] == 1) & S["agreeUp"]
     dn_base = (S["state"] == -1) & S["agreeDn"]
-    V = {}
-    for pk in (85, 95, 100):
-        for w in (10, 20):
-            V[f"base p{pk} w{w}"] = (pk, w, up_base, dn_base)
-            V[f"FULL p{pk} w{w}"] = (pk, w, up_base & S["sqF5"] & (S["st"] == 1), dn_base & S["sqF5"] & (S["st"] == -1))
-    V["+squeeze p95 w20"] = (95, 20, up_base & S["sqF5"], dn_base & S["sqF5"])
-    V["+green/red line p95 w20"] = (95, 20, up_base & (S["st"] == 1), dn_base & (S["st"] == -1))
-    V["zero-cross + agree p95 w20"] = (95, 20, S["zc_up"] & S["agreeUp"], S["zc_dn"] & S["agreeDn"])
+    full_u, full_d = up_base & S["sqF5"] & (S["st"] == 1), dn_base & S["sqF5"] & (S["st"] == -1)
+    V = {"base p95 w20": (95, 20, up_base, dn_base), "FULL p95 w20": (95, 20, full_u, full_d)}   # last run's, for reference
+
+    def tf(d, r):
+        """a TRUE flush candle: fear pinned at 100 for r+ candles in a row AND price fell d+ ATR into it (mirror for greed)"""
+        return ((S["F"] >= 99.999) & (S["runF"] >= r) & (S["dropL"] >= d), (S["G"] >= 99.999) & (S["runG"] >= r) & (S["dropS"] >= d))
+    for d in (3, 4, 5, 6, 8):
+        for r in (1, 3):
+            V[f"TRUE d{d} r{r}"] = (tf(d, r), 20, up_base, dn_base)
+    V["TRUE d4 r3 w10"] = (tf(4, 3), 10, up_base, dn_base)
+    V["TRUE d4 r3 FULL"] = (tf(4, 3), 20, full_u, full_d)
+    V["TRUE d4 r3 +squeeze"] = (tf(4, 3), 20, up_base & S["sqF5"], dn_base & S["sqF5"])
+    V["TRUE d4 r3 +line"] = (tf(4, 3), 20, up_base & (S["st"] == 1), dn_base & (S["st"] == -1))
+    V["TRUE d4 r3 zero-cross"] = (tf(4, 3), 20, S["zc_up"] & S["agreeUp"], S["zc_dn"] & S["agreeDn"])
+    V["TRUE d6 r3 FULL"] = (tf(6, 3), 20, full_u, full_d)
     return V
 
 
 def detect(S, peak, win, cond, side, t_from, t_to):
     """one event per flush: the first candle (within `win` candles of the latest peak, same day) where cond is true"""
-    X = S["F"] if side == 1 else S["G"]
     hm, day = S["hm"], S["day"]
     nxt_ok = np.r_[day[1:] == day[:-1], False]
-    peaks = np.nonzero(X >= peak - 1e-9)[0]
+    if isinstance(peak, tuple):                       # a TRUE flush mask (long, short)
+        peaks = np.nonzero(peak[0] if side == 1 else peak[1])[0]
+    else:
+        X = S["F"] if side == 1 else S["G"]
+        peaks = np.nonzero(X >= peak - 1e-9)[0]
     cand = np.nonzero(cond & (hm >= t_from) & (hm <= t_to) & nxt_ok & (S["atr"] > 0))[0]
     out, used = [], -1
     if not len(peaks):
@@ -246,7 +276,7 @@ def main():
         del df, S
     E = pd.DataFrame(EV)
     BS = pd.concat(BASE, ignore_index=True)
-    E[E["var"].isin(["base p95 w20", "FULL p95 w20", "FULL p85 w20", "base p100 w10"])].to_csv(f"{OUT}/futures_flush_events.csv.gz", index=False)
+    E[E["var"].isin(list(("TRUE d4 r3", "TRUE d4 r3 FULL", "TRUE d6 r3", "TRUE d3 r3", "base p95 w20")))].to_csv(f"{OUT}/futures_flush_events.csv.gz", index=False)
 
     # real futures
     fut_rows, fut_note = [], ""
@@ -259,7 +289,7 @@ def main():
             ratio[sym] = (float(fd["close"].iloc[-1]) / ratio[sym][1], ratio[sym][1])
             S = build(fd, close_hm=2400)
             base = random_base(S, nm, 0, 2359, nr=4000)
-            for name in ("base p95 w20", "FULL p95 w20", "FULL p85 w20", "base p100 w10"):
+            for name in ("TRUE d4 r3", "TRUE d4 r3 FULL", "TRUE d6 r3", "TRUE d3 r3", "base p95 w20"):
                 pk, w, cu, cd = variants(S)[name]
                 for lab, tf, tt in (("all hours", 0, 2359), ("9:35-15:30", 935, 1530)):
                     rows = []
@@ -286,7 +316,9 @@ def write(E, BS, ratio, FR, fut_note, t0):
          f"SPY -> ES, QQQ -> NQ (1m, {START} to yesterday). DATA ONLY. Runtime {(time.time() - t0) / 60:.0f} min.",
          "**The setup (Oct 28 11:00):** fear peaks (85 / 95 / 100) -> within 10 or 20 candles TTM turns up (2 rising candles) and "
          "Vix Fix + TTM AGREE UP (greed avg rising, fear avg falling). **FULL** = also the squeeze fired in the last 5 candles and "
-         "the line is green. Shorts = the mirror (greed peak -> agree down, line red). One trade per flush, signal 9:35-15:30, "
+         "the line is green. **TRUE dX rY** = only a REAL flush counts: fear pinned at 100 for Y+ candles in a row AND price fell "
+         "X+ ATR within the last 10 candles (from their highest high) into it - the plain 'peak' fires 20-30 times a day, a true flush "
+         "is rare. Shorts = the mirror (greed peak -> agree down, line red). One trade per flush, signal 9:35-15:30, "
          "entry next open.",
          "**vs random** = ATR result minus random entries the same way, same ticker, same year, same exit (0 = no edge). "
          "**t** = edge / noise by day (2+ = unlikely luck). 2020-23 / **2024-now** are separate checks.",
@@ -301,7 +333,7 @@ def write(E, BS, ratio, FR, fut_note, t0):
         E[k + "_fut"] = E[k + "_pts"] * E["sym"].map(lambda s: ratio.get(s, (1, 0))[0]) - COST_PTS
     best = []
     L += ["## 1) Every setup - best exit, edge vs random (ATR): 2020-23 / **2024-now**",
-          "| Setup | Trades | /day | Best exit | vs random 2020-23 (t) | **vs random 2024-now (t)** | Raw ATR | Win % | ES pts net (SPY) | NQ pts net (QQQ) |",
+          "| Setup | Trades | /week | Best exit | vs random 2020-23 (t) | **vs random 2024-now (t)** | Raw ATR | Win % | ES pts net (SPY) | NQ pts net (QQQ) |",
           "|---|---|---|---|---|---|---|---|---|---|"]
     ndays = max(1, E["date"].nunique())
     alld = max(1, len(pd.bdate_range(START, now.date())))
@@ -312,11 +344,11 @@ def write(E, BS, ratio, FR, fut_note, t0):
         es = g[g["sym"] == "SPY"][k + "_fut"].mean() if (g["sym"] == "SPY").any() else np.nan
         nq = g[g["sym"] == "QQQ"][k + "_fut"].mean() if (g["sym"] == "QQQ").any() else np.nan
         best.append((name, k, s, len(g), es, nq, g))
-        L.append(f"| {name} | {len(g)} | {len(g) / alld:.1f} | {EXIT_NAME[k]} | {fmt(s, 'tr')} | **{fmt(s, 'te')}** | {g[k].mean():+.2f} | "
+        L.append(f"| {name} | {len(g)} | {len(g) / alld * 5:.1f} | {EXIT_NAME[k]} | {fmt(s, 'tr')} | **{fmt(s, 'te')}** | {g[k].mean():+.2f} | "
                  f"{(g[k] > 0).mean() * 100:.0f}% | {es:+.2f} | {nq:+.2f} |")
     real = [b for b in best if all(not np.isnan(b[2][p][0]) and b[2][p][0] >= 0.05 and b[2][p][1] >= 2 for p in ("tr", "te"))]
     L += ["", "## 2) Every exit for the main versions (ATR vs random, 2024-now (t)) and ES / NQ points net"]
-    for name in ("base p95 w20", "FULL p95 w20", "FULL p85 w20", "base p100 w10"):
+    for name in ("TRUE d4 r3", "TRUE d4 r3 FULL", "TRUE d6 r3", "TRUE d3 r3", "base p95 w20"):
         g = E[E["var"] == name]
         if not len(g):
             continue
@@ -329,16 +361,16 @@ def write(E, BS, ratio, FR, fut_note, t0):
             L.append(f"| {EXIT_NAME[k]} | {fmt(s, 'tr')} | **{fmt(s, 'te')}** | {g[k].mean():+.2f} | {(g[k] > 0).mean() * 100:.0f}% | "
                      f"{es:+.2f} | {nq:+.2f} | {g[g['d'] == 1][k].mean():+.2f} | {g[g['d'] == -1][k].mean():+.2f} |")
         L.append("")
-    L += ["## 3) Every year - FULL p95 w20, your exit (raw ATR / vs random, trades)", "| Year | SPY | QQQ |", "|---|---|---|"]
-    g = E[E["var"] == "FULL p95 w20"]
+    L += ["## 3) Every year - TRUE d4 r3, hold 20 min (raw ATR / vs random, trades)", "| Year | SPY | QQQ |", "|---|---|---|"]
+    g = E[E["var"] == "TRUE d4 r3"]
     if len(g):
-        b = BS.groupby(["sym", "d", "year"])["IND"].mean()
-        g = g.assign(adj=g["IND"] - b.reindex(pd.MultiIndex.from_arrays([g["sym"], g["d"], g["year"]])).to_numpy())
+        b = BS.groupby(["sym", "d", "year"])["H20"].mean()
+        g = g.assign(adj=g["H20"] - b.reindex(pd.MultiIndex.from_arrays([g["sym"], g["d"], g["year"]])).to_numpy())
         for y, gy in g.groupby("year"):
             cells = []
             for s_ in ("SPY", "QQQ"):
                 x = gy[gy["sym"] == s_]
-                cells.append(f"{x['IND'].mean():+.2f} / {x['adj'].mean():+.2f} ({len(x)})" if len(x) else "-")
+                cells.append(f"{x['H20'].mean():+.2f} / {x['adj'].mean():+.2f} ({len(x)})" if len(x) else "-")
             L.append(f"| {y} | " + " | ".join(cells) + " |")
     L += ["", "## 4) Real ES / NQ futures - last ~29 days (Yahoo 1m) - points per trade NET of 2 ticks", fut_note]
     if len(FR):
