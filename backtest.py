@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "colors").strip().lower() or "colors"
+MODE = os.getenv("MODE", "visual").strip().lower() or "visual"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -16203,8 +16203,197 @@ def colors_main():
             fh.write(text + "\n")
 
 
+# ================================================================ CHART DATA FOR THE STUDY DECK (MODE=visual)
+# Exports, for every setup found so far: (1) the AVERAGE price path around the entry (ATR, -15 to +30 candles, signed so
+# up = your trade's way) vs random entries, all years; (2) real EXAMPLE windows from 2026 (candles, EMA 13 line + color,
+# VWAP, Vix Fix fear/greed 0-100, TTM momentum + squeeze) - best, typical and losing ones - to draw on slides.
+# Files: results/visual_paths.csv and results/visual_examples.json. DATA ONLY.
+VS_TF = [int(x) for x in os.getenv("VS_TFS", "1").split(",")]
+VS_EX_FROM = pd.Timestamp(os.getenv("VS_EX_FROM", "2026-01-01"), tz=NY)
+VS_PRE, VS_POST = 15, 30
+VS_WIN_PRE, VS_WIN_POST = 40, 30
+VS_SETUPS = {
+    "VF_WHIP": "Vix Fix whipsaw: 100 breaks with the other side 60+ (first break)",
+    "VF_ASLEEP": "Vix Fix 100 breaks with the other side asleep (under 10)",
+    "VF_ALL": "Every Vix Fix 100 break (reversal)",
+    "TL_DIP_FEAR": "Buy the dip into a green line with fear maxed 91+",
+    "TL_FAILPOP": "Short the failed pop under a red/pink line, greed 60-90 + fear 10-30",
+    "TL_DIP": "Buy the dip into a green line (plain)",
+    "TL_POP": "Short the pop into a red line (plain)",
+}
+
+
+def vs_events(df, ind):
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    n = len(c)
+    F, G = vfx_pane(df)
+    F, G = np.nan_to_num(F), np.nan_to_num(G)
+    color, ef = tlt_colors(df, ind)
+    idx = np.arange(n)
+    dend = pd.Series(np.where(hm < 1556, idx, -1)).groupby(day).transform("max").to_numpy()
+    ok = (hm >= 935) & (hm <= 1530) & (a > 0) & np.r_[day[1:] == day[:-1], False]
+    ev = []
+    for side in (1, -1):
+        X, Y = (F, G) if side == 1 else (G, F)
+        cur, last_b = None, -999
+        for s, j, b in mx_runs(X, day, hm, 100.0):
+            if day[s] != cur:
+                cur, last_b = day[s], -999
+            first = (b - last_b) > 10
+            if b >= 0:
+                last_b = b
+            if b < 1 or b + 1 >= n or not ok[b]:
+                continue
+            ev.append(("VF_ALL", b, side))
+            if Y[b] >= 60 and first:
+                ev.append(("VF_WHIP", b, side))
+            if Y[b] < 10:
+                ev.append(("VF_ASLEEP", b, side))
+    prev_c, prev_ef, pcol = np.r_[np.nan, c[:-1]], np.r_[np.nan, ef[:-1]], np.r_[0, color[:-1]]
+    up_thru = (c > ef) & (prev_c <= prev_ef)
+    dn_thru = (c < ef) & (prev_c >= prev_ef)
+    for i in np.nonzero(ok & (pcol > 0) & dn_thru)[0]:
+        ev.append(("TL_DIP", i, 1))
+        if F[i] >= 91:
+            ev.append(("TL_DIP_FEAR", i, 1))
+    for i in np.nonzero(ok & (pcol < 0) & up_thru)[0]:
+        ev.append(("TL_POP", i, -1))
+    for i in np.nonzero(ok & (pcol < 0) & dn_thru)[0]:
+        if 60 <= G[i] < 91 and 10 <= F[i] < 30:
+            ev.append(("TL_FAILPOP", i, -1))
+    return ev, F, G, color, ef, dend
+
+
+def vs_path(ind, dend, day, i, d):
+    """close at offsets -VS_PRE..+VS_POST minus the entry (next open), in ATR, signed; NaN outside the same day"""
+    o, c, a = ind["o"], ind["c"], ind["atr"]
+    n = len(c)
+    e = i + 1
+    out = np.full(VS_PRE + VS_POST + 1, np.nan)
+    for q, t in enumerate(range(-VS_PRE, VS_POST + 1)):
+        k = i + t
+        if 0 <= k < n and day[k] == day[i] and k <= dend[e]:
+            out[q] = d * (c[k] - o[e]) / a[i]
+    return out
+
+
+def visual_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("VS_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(51)
+    P, EX = [], []
+    offs = list(range(-VS_PRE, VS_POST + 1))
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in VS_TF:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day, vw = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["vwap"]
+            ev, F, G, color, ef, dend = vs_events(df, ind)
+            mom, sq_on, since = cl_ttm(df)
+            ts = df.index
+            for nm, i, d in ev:
+                P.append((nm, sym, tf, d, i, ts[i] >= VS_EX_FROM, *vs_path(ind, dend, day, i, d)))
+            # random baseline, both directions
+            pool = np.nonzero((hm >= 935) & (hm <= 1530) & (a > 0) & np.r_[day[1:] == day[:-1], False])[0]
+            for i in rng.choice(pool, size=min(len(pool), 8000), replace=False):
+                for d in (1, -1):
+                    P.append(("RANDOM", sym, tf, d, int(i), False, *vs_path(ind, dend, day, int(i), d)))
+            # examples (2026): per setup x side pick best / typical / losing by the +20 result
+            E = pd.DataFrame([(nm, i, d) for nm, i, d in ev if ts[i] >= VS_EX_FROM], columns=["nm", "i", "d"])
+            if len(E):
+                E["r20"] = [vs_path(ind, dend, day, i, d)[VS_PRE + 20] for i, d in zip(E["i"], E["d"])]
+                E = E.dropna(subset=["r20"])
+                E = E[(E["i"] - VS_WIN_PRE >= 0) & (E["i"] + VS_WIN_POST < len(c))]
+                for (nm, d), g in E.groupby(["nm", "d"]):
+                    if nm in ("VF_ALL", "TL_DIP", "TL_POP"):
+                        continue
+                    g = g.sort_values("r20")
+                    picks = []
+                    if len(g) >= 1:
+                        picks += [("best", g.iloc[-1])]
+                    if len(g) >= 3:
+                        picks += [("2nd best", g.iloc[-2]), ("typical", g.iloc[len(g) // 2]), ("loser", g.iloc[0])]
+                    used = set()
+                    for tag, r in picks:
+                        i = int(r["i"])
+                        if (day[i], i // 15) in used:
+                            continue
+                        used.add((day[i], i // 15))
+                        w = range(i - VS_WIN_PRE, i + VS_WIN_POST + 1)
+                        w = [k for k in w if day[k] == day[i] and 930 <= hm[k] < 1600]
+                        mm = mom[w] / a[i]
+                        mp = np.r_[np.nan, mom[:-1]][w] / a[i]
+                        EX.append(dict(setup=nm, tag=tag, sym=sym, tf=tf, d=int(d), date=str(day[i]),
+                                       time=f"{ts[i]:%H:%M}", sig=int(i - w[0]), r20=round(float(r["r20"]), 2), atr=round(float(a[i]), 4),
+                                       t=[f"{ts[k]:%H:%M}" for k in w],
+                                       o=[round(float(o[k]), 3) for k in w], h=[round(float(h[k]), 3) for k in w],
+                                       l=[round(float(l[k]), 3) for k in w], c=[round(float(c[k]), 3) for k in w],
+                                       ef=[round(float(ef[k]), 3) for k in w], col=[int(color[k]) for k in w],
+                                       vwap=[round(float(vw[k]), 3) for k in w],
+                                       fear=[round(float(F[k]), 1) for k in w], greed=[round(float(G[k]), 1) for k in w],
+                                       mom=[None if mm[q] != mm[q] else round(float(mm[q]), 3) for q in range(len(w))],
+                                       momup=[bool(mm[q] >= mp[q]) if mm[q] == mm[q] and mp[q] == mp[q] else None for q in range(len(w))],
+                                       sq=[bool(sq_on[k]) for k in w]))
+            print(f"  {sym} {tf}m: {len(ev)} events, {len(EX)} examples so far ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    cols = ["setup", "sym", "tf", "d", "i", "y26"] + [f"p{t}" for t in offs]
+    Pd = pd.DataFrame(P, columns=cols)
+    rows = []
+    pc = [f"p{t}" for t in offs]
+    for (nm, tf, d), g in list(Pd.groupby(["setup", "tf", "d"])) + [((nm_, tf_, 0), g_) for (nm_, tf_), g_ in Pd.groupby(["setup", "tf"])]:
+        for per, gg in (("all", g), ("2026", g[g["y26"]])):
+            if nm == "RANDOM" and per == "2026":
+                continue
+            if len(gg) < 10:
+                continue
+            X = gg[pc].to_numpy(dtype=float)
+            r = dict(setup=nm, tf=tf, d=d, per=per, n=len(gg))
+            for q, t in enumerate(offs):
+                col = X[:, q]
+                col = col[~np.isnan(col)]
+                if len(col):
+                    r[f"mean{t}"] = round(float(col.mean()), 4)
+                    r[f"med{t}"] = round(float(np.median(col)), 4)
+                    r[f"q25_{t}"] = round(float(np.quantile(col, .25)), 4)
+                    r[f"q75_{t}"] = round(float(np.quantile(col, .75)), 4)
+                    r[f"up{t}"] = round(float((col > 0).mean()), 4)
+            rows.append(r)
+    S = pd.DataFrame(rows)
+    S.to_csv(f"{OUT}/visual_paths.csv", index=False)
+    import json as _json
+    with open(f"{OUT}/visual_examples.json", "w") as fh:
+        _json.dump(dict(setups=VS_SETUPS, examples=EX), fh)
+    md = [f"# CHART DATA FOR THE STUDY DECK - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in VS_TF)}. Runtime {(time.time() - t0) / 60:.0f} min.",
+          f"Saved results/visual_paths.csv ({len(S)} rows) and results/visual_examples.json ({len(EX)} example windows from "
+          f"{VS_EX_FROM:%Y-%m-%d} on).", "",
+          "| Setup | Chart | Trades (all years) | Avg at +10 (ATR) | Avg at +20 | Random at +20 | Up at +20 |", "|---|---|---|---|---|---|---|"]
+    for nm, title in list(VS_SETUPS.items()) + [("RANDOM", "Random entries")]:
+        for tf in VS_TF:
+            g = S[(S["setup"] == nm) & (S["tf"] == tf) & (S["d"] == 0) & (S["per"] == "all")]
+            rb = S[(S["setup"] == "RANDOM") & (S["tf"] == tf) & (S["d"] == 0) & (S["per"] == "all")]
+            if len(g):
+                z = g.iloc[0]
+                md.append(f"| {title} | {tf}m | {int(z['n'])} | {z['mean10']:+.3f} | {z['mean20']:+.3f} | {rb.iloc[0]['mean20']:+.3f} | {100 * z['up20']:.0f}% |")
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    with open(f"{OUT}/visual_latest.md", "w") as fh:
+        fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "colors":
+    if MODE == "visual":
+        visual_main()
+    elif MODE == "colors":
         colors_main()
     elif MODE == "whip":
         whip_main()
