@@ -12,6 +12,8 @@ YOUR PLAN (settings below):
   +30%  : sell 4, keep 1 as the runner.
   RUNNER: sells at the close of candle 15, or when it falls 20% from its best price after the partial.
   STOP  : option down 30% from the fill -> sell everything still open (checked every 5 seconds).
+  BREAKEVEN: once the option has traded +10% over the fill, the stop moves up to the fill price (sell everything
+          still open if it falls back to it). Replay of the first 6 days: Trend Flip +$126 -> +$530.
   ALSO  : opposite color flip on that chart -> sell everything (v3.0 rule) | flat 5 min before the close.
   No new trades after 15:30. Max 4 trades open (one per chart).
 Option prices for the % rules = middle of bid/ask. Orders are market orders (paper fills).
@@ -36,6 +38,7 @@ QTY = 5                      # contracts per trade
 PARTIAL_QTY = 4              # sold at the first target
 TP_PCT = 30                  # first target: option up this % -> sell PARTIAL_QTY
 SL_PCT = 30                  # stop: option down this % -> sell everything still open
+BE_ARM_PCT = 10              # breakeven: once the option has been this % over the fill, the stop moves to the fill (0 = off)
 TRAIL_PCT = 20               # runner: sell if it falls this % from its best price (0 = off)
 HOLD = 15                    # time exit: close of candle N (entry candle = 1)
 FLIP_EXIT = True             # sell everything on the opposite color flip (v3.0 rule)
@@ -309,8 +312,12 @@ def fast_checks(tc, oc, trades):
         if not m:
             continue
         pct = (m / tr["fill"] - 1) * 100
+        armed = BE_ARM_PCT > 0 and tr["best"] >= BE_ARM_PCT          # armed on an EARLIER check, like the replay
         tr["best"], tr["worst"] = max(tr["best"], pct), min(tr["worst"], pct)
-        if pct <= -SL_PCT:
+        if armed and pct <= 0:
+            if sell(tc, tr, tr["qty"], f"BREAKEVEN (was +{BE_ARM_PCT}%)"):
+                changed = True
+        elif pct <= -SL_PCT:
             if sell(tc, tr, tr["qty"], f"STOP -{SL_PCT}%"):
                 changed = True
         elif not tr["partial"] and pct >= TP_PCT and tr["qty"] > PARTIAL_QTY:
@@ -406,7 +413,7 @@ def run_loop(tc, dc, oc, GetCalendarRequest):
     last_fire = min(LAST_FIRE, hhmm(close_dt - timedelta(minutes=30)))
     exp = expiry(tc, today)
     log(f"Trend Flip bot | {', '.join(SYMBOLS)} on {', '.join(f'{t}m' for t in TFS)} | buy {QTY} 1st OTM, expiry {exp} | "
-        f"+{TP_PCT}% sell {PARTIAL_QTY} | runner: candle {HOLD} or -{TRAIL_PCT}% from best | stop -{SL_PCT}% | "
+        f"+{TP_PCT}% sell {PARTIAL_QTY} | breakeven after +{BE_ARM_PCT}% | runner: candle {HOLD} or -{TRAIL_PCT}% from best | stop -{SL_PCT}% | "
         f"no new trades after {last_fire} | flat {flat_dt:%H:%M}")
 
     trades = recover_check(tc, load_state(today))
