@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "peak").strip().lower() or "peak"
+MODE = os.getenv("MODE", "maxed").strip().lower() or "maxed"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -14871,5 +14871,280 @@ def peak_main():
             fh.write(text + "\n")
 
 
+# ================================================================ HOW LONG DOES VIX FIX STAY MAXED, AND WHAT BREAKS IT (MODE=maxed)
+# Your VIX FIX pane (bar height 0-100 = wvf / highest(wvf, 50) * 100). A MAXED RUN = fear (or greed) bar at/above the
+# level on consecutive candles of the same day. The run starts 9:30-15:40. BREAK candle = the first candle under the level.
+# DATA ONLY. Levels: 100 (exactly the new 50-candle high), 95 and 91 (your 'maxed' band).
+MX_LEVELS = [100.0, 95.0, 91.0]
+
+
+def mx_runs(X, day, hm, level):
+    """(start, last, break) index triples of every run of X >= level; break = last+1 when it is the same day, else -1"""
+    m = np.nan_to_num(X, nan=0.0) >= level - 1e-9
+    prev = np.r_[False, m[:-1]] & np.r_[False, day[1:] == day[:-1]]
+    starts = np.nonzero(m & ~prev)[0]
+    out = []
+    n = len(X)
+    for s in starts:
+        if not (930 <= hm[s] < 1540):
+            continue
+        j = s
+        while j + 1 < n and m[j + 1] and day[j + 1] == day[s]:
+            j += 1
+        b = j + 1 if (j + 1 < n and day[j + 1] == day[s]) else -1
+        out.append((s, j, b))
+    return out
+
+
+def mx_episode_rows(df, ind, side, level, tf):
+    """side +1 = FEAR (price fell), -1 = GREED (price rose). One dict per maxed run."""
+    F, G = vfx_pane(df)
+    X, Y = (F, G) if side == 1 else (G, F)
+    Y = np.nan_to_num(Y)
+    o, h, l, c, a = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"]
+    v = df["volume"].to_numpy(dtype=float)
+    hm, day = ind["hm"], ind["day"]
+    hc22 = df["close"].rolling(22).max().to_numpy()
+    lc22 = df["close"].rolling(22).min().to_numpy()
+    n = len(X)
+    rows = []
+    for s, j, b in mx_runs(X, day, hm, level):
+        r = dict(i=s, bars=j - s + 1, mins=(j - s + 1) * tf, broke=b >= 0)
+        # the OTHER side while this side is maxed
+        seg = Y[s:j + 1]
+        r.update(oth_avg=seg.mean(), oth_max=seg.max(), oth_start=Y[s], oth_last=Y[j], oth_asleep=seg.max() < 10)
+        # how far price ran during the maxed run (from the close before it to the extreme), in ATR
+        if s >= 1 and a[s] > 0:
+            r["run_atr"] = ((c[s - 1] - l[s:j + 1].min()) if side == 1 else (h[s:j + 1].max() - c[s - 1])) / a[s]
+        if b >= 1 and b + 10 < n and day[b + 10] == day[b]:
+            if side == 1:
+                stopped = l[b] >= l[b - 1]
+                rolled = hc22[b] < hc22[b - 1]
+                rev_color = c[b] > o[b]
+                up_close = (c[b] - l[b]) / (h[b] - l[b]) if h[b] > l[b] else 0.5
+                fwd = lambda k: (c[b + k] - c[b]) / a[b] if a[b] > 0 else np.nan           # + = bounce
+            else:
+                stopped = h[b] <= h[b - 1]
+                rolled = lc22[b] > lc22[b - 1]
+                rev_color = c[b] < o[b]
+                up_close = (h[b] - c[b]) / (h[b] - l[b]) if h[b] > l[b] else 0.5
+                fwd = lambda k: (c[b] - c[b + k]) / a[b] if a[b] > 0 else np.nan           # + = pullback
+            r.update(stopped=stopped, rolled=rolled and not stopped, other_roll=(not stopped) and (not rolled),
+                     rev_color=rev_color, rev_close=up_close >= 0.5,
+                     vol_lower=v[b] < v[j] if v[j] > 0 else np.nan, vol_ratio=v[b] / v[j] if v[j] > 0 else np.nan,
+                     other_woke=(Y[b] - Y[j]) >= 20, other_at_break=Y[b],
+                     f5=fwd(5), f10=fwd(10), from_hi=X[b])
+            # after the break: same day, next 20 candles
+            e = b
+            while e + 1 < n and e + 1 <= b + 20 and day[e + 1] == day[b]:
+                e += 1
+            Xa, Ya = np.nan_to_num(X[b:e + 1]), Y[b:e + 1]
+            k50 = np.nonzero(Ya >= 50)[0]
+            k91 = np.nonzero(Ya >= 91)[0]
+            k0 = np.nonzero(Xa < 10)[0]
+            km = np.nonzero(Xa[1:min(len(Xa), 11)] >= level - 1e-9)[0]
+            ext = l[s:j + 1].min() if side == 1 else h[s:j + 1].max()
+            nxt = l[b:min(e, b + 10) + 1].min() if side == 1 else h[b:min(e, b + 10) + 1].max()
+            r.update(oth_to50=k50[0] if len(k50) else np.nan, oth_to91=k91[0] if len(k91) else np.nan,
+                     oth_maxed20=len(k91) > 0, me_to10=k0[0] if len(k0) else np.nan,
+                     remax10=len(km) > 0, remax_at=km[0] + 1 if len(km) else np.nan,
+                     new_ext10=(nxt < ext) if side == 1 else (nxt > ext),
+                     snap10=((h[b:min(e, b + 10) + 1].max() - ext) if side == 1 else (ext - l[b:min(e, b + 10) + 1].min())) / a[b]
+                     if a[b] > 0 else np.nan)
+        rows.append(r)
+    return rows
+
+
+def maxed_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("MX_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    split = pd.Timestamp(os.getenv("MX_RECENT", "2025-01-01"), tz=NY)
+    t0 = time.time()
+    rows, days = [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            hm = ind["hm"]
+            rth = (hm >= 930) & (hm < 1540)
+            days[(sym, tf)] = len(np.unique(ind["day"][rth & (df.index >= split)]))
+            for side, nm in ((1, "FEAR"), (-1, "GREED")):
+                for lv in MX_LEVELS:
+                    ep = mx_episode_rows(df, ind, side, lv, tf)
+                    if not ep:
+                        continue
+                    d_ = pd.DataFrame(ep)
+                    ts = df.index[d_["i"].to_numpy()]
+                    d_["recent"], d_["year"] = ts >= split, ts.year
+                    d_["tod"] = np.where(hm[d_["i"].to_numpy()] < 1000, "9:30-10:00",
+                                         np.where(hm[d_["i"].to_numpy()] < 1130, "10:00-11:30",
+                                                  np.where(hm[d_["i"].to_numpy()] < 1400, "11:30-14:00", "14:00-15:40")))
+                    d_["sym"], d_["tf"], d_["side"], d_["lv"] = sym, tf, nm, lv
+                    rows.append(d_)
+            print(f"  {sym} {tf}m done ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(rows, ignore_index=True)
+    rec = E[E["recent"]]
+
+    def pct(x):
+        return f"{100 * x:.0f}%"
+
+    def dist(g):
+        b = g["bars"]
+        return (f"{b.mean():.1f} | **{b.median():.0f}** | {b.quantile(.75):.0f} | {b.quantile(.9):.0f} | {b.max():.0f} | "
+                f"{pct((b == 1).mean())} / {pct((b == 2).mean())} / {pct((b == 3).mean())} / {pct(((b >= 4) & (b <= 5)).mean())} / {pct((b >= 6).mean())}")
+
+    md = [f"# HOW LONG DOES VIX FIX STAY MAXED - AND WHAT BREAKS IT - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min. Tables use {split:%Y}-now unless the heading says all years.",
+          "**Maxed run** = your VIX FIX pane bar (0-100) at or above the level on back-to-back candles (same day, pre/post market included in "
+          "the math like your chart; run starts 9:30-15:40). **Level 100** = the bar IS the new 50-candle high of the raw Vix Fix, so it "
+          "stays there only while price keeps making a fresh extreme. **91 / 95** = your 'maxed' band. **Bars** = candles in a row; "
+          "x chart minutes = time. **Break candle** = the first candle under the level.", ""]
+    for lv in MX_LEVELS:
+        md += [f"## How many candles it stays maxed at {lv:.0f}+ ({split:%Y}-now)",
+               "| Chart | Side | Runs | Per day | Avg bars | **Median** | 75% | 90% | Longest | Lasted 1 / 2 / 3 / 4-5 / 6+ bars |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+        for tf in ST_TFS:
+            for nm in ("FEAR", "GREED"):
+                g = rec[(rec["lv"] == lv) & (rec["tf"] == tf) & (rec["side"] == nm)]
+                if not len(g):
+                    continue
+                nd = sum(days[(s_, tf)] for s_ in SYMBOLS)
+                d = dist(g).split(" | ")
+                md.append(f"| {tf}m | {nm} | {len(g)} | {len(g) / max(nd, 1):.1f} | " + " | ".join(d) + " |")
+        ga = E[E["lv"] == lv]
+        md.append(f"| **all years** | both | {len(ga)} | | " + " | ".join(dist(ga).split(" | ")) + " |")
+        md.append("")
+    br = E[E["broke"] & E["stopped"].notna()]
+    brr = br[br["recent"]]
+    md += ["## What breaks it - the break candle (the first one under the level)",
+           "**Price stopped** = fear: this candle's low is NOT lower than the last one's (greed: high not higher) - the push ran out. "
+           "**22-candle extreme rolled off** = price still pushed, but the old high (low) the Vix Fix measures from dropped out of the "
+           "22-candle window, which shrinks the number by itself (mechanical). **Other** = anything else. **Reversal candle** = "
+           "fear: green candle (greed: red). **Closed back** = the close is in the better half of its range (fear: upper, greed: lower). "
+           "**Volume lower** = break candle volume under the last maxed candle's. **Other side woke up** = the opposite pane rose 20+ "
+           "points since the last maxed candle. **Next 5 / 10 candles** = move in ATR against the run (the bounce after fear, the pullback "
+           "after greed), from the break candle's close: median, then % of runs positive.", ""]
+    for lv in MX_LEVELS:
+        md += [f"### Level {lv:.0f}+ ({split:%Y}-now)",
+               "| Chart | Side | Breaks | Price stopped | 22c extreme rolled off | Other | Reversal candle | Closed back | Volume lower | Other side woke up | Next 5: median / % up | Next 10: median / % up |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for tf in ST_TFS:
+            for nm in ("FEAR", "GREED"):
+                g = brr[(brr["lv"] == lv) & (brr["tf"] == tf) & (brr["side"] == nm)]
+                if len(g) < 20:
+                    continue
+                md.append(f"| {tf}m | {nm} | {len(g)} | {pct(g['stopped'].mean())} | {pct(g['rolled'].mean())} | {pct(g['other_roll'].mean())} | "
+                          f"{pct(g['rev_color'].mean())} | {pct(g['rev_close'].mean())} | {pct(g['vol_lower'].dropna().mean())} | "
+                          f"{pct(g['other_woke'].mean())} | {g['f5'].median():+.2f} / {pct((g['f5'] > 0).mean())} | "
+                          f"{g['f10'].median():+.2f} / {pct((g['f10'] > 0).mean())} |")
+        ga = br[br["lv"] == lv]
+        md.append(f"| **all years** | both | {len(ga)} | {pct(ga['stopped'].mean())} | {pct(ga['rolled'].mean())} | {pct(ga['other_roll'].mean())} | "
+                  f"{pct(ga['rev_color'].mean())} | {pct(ga['rev_close'].mean())} | {pct(ga['vol_lower'].dropna().mean())} | "
+                  f"{pct(ga['other_woke'].mean())} | {ga['f5'].median():+.2f} / {pct((ga['f5'] > 0).mean())} | "
+                  f"{ga['f10'].median():+.2f} / {pct((ga['f10'] > 0).mean())} |")
+        md.append("")
+    lv0 = 100.0
+    md += [f"## Which break candle predicts the bounce / pullback? (level {lv0:.0f}+, all charts + years, ATR from the break candle's close)",
+           "| Break candle | Breaks | Next 5: median / % up | Next 10: median / % up |", "|---|---|---|---|"]
+    g0 = br[br["lv"] == lv0]
+    for name, mask in (("Price stopped making the extreme", g0["stopped"]), ("22-candle extreme rolled off (mechanical)", g0["rolled"]),
+                       ("Other", g0["other_roll"]), ("Reversal-color candle", g0["rev_color"]), ("Same-color (continuation) candle", ~g0["rev_color"]),
+                       ("Closed back in the better half", g0["rev_close"]), ("Closed in the worse half", ~g0["rev_close"]),
+                       ("Volume LOWER than the last maxed candle", g0["vol_lower"] == True),  # noqa: E712
+                       ("Volume HIGHER than the last maxed candle", g0["vol_lower"] == False),  # noqa: E712
+                       ("Other side woke up 20+", g0["other_woke"]), ("Other side stayed asleep", ~g0["other_woke"]),
+                       ("Stopped + reversal color + closed back", g0["stopped"] & g0["rev_color"] & g0["rev_close"])):
+        g = g0[mask.fillna(False)]
+        if len(g) < 30:
+            continue
+        md.append(f"| {name} | {len(g)} | {g['f5'].median():+.2f} / {pct((g['f5'] > 0).mean())} | {g['f10'].median():+.2f} / {pct((g['f10'] > 0).mean())} |")
+    # ---------------- the OTHER side + the interesting facts
+    def med(x, f="{:.0f}"):
+        x = pd.Series(x).dropna()
+        return f.format(x.median()) if len(x) else "-"
+
+    md += ["", "## The OTHER side while one side is maxed",
+           "**Other side** = the opposite pane (greed while fear is maxed, and the reverse), 0-100. **Asleep the whole run** = it never "
+           "got to 10 while this side was maxed. **After the break** (same day, next 20 candles): how many candles until the other side "
+           "reaches 50 / 91, how often it MAXES (91+) within 20 candles (= a whiplash), and how many candles until this side falls under 10.", ""]
+    for lv in MX_LEVELS:
+        md += [f"### Level {lv:.0f}+ ({split:%Y}-now)",
+               "| Chart | Side | Other side: avg during run | max during run | at the last maxed candle | Asleep the whole run | "
+               "Candles to other side 50 | to 91 | Other side maxed within 20 | Candles until this side under 10 |",
+               "|---|---|---|---|---|---|---|---|---|---|"]
+        for tf in ST_TFS:
+            for nm in ("FEAR", "GREED"):
+                g = brr[(brr["lv"] == lv) & (brr["tf"] == tf) & (brr["side"] == nm)]
+                if len(g) < 20:
+                    continue
+                md.append(f"| {tf}m | {nm} | {g['oth_avg'].mean():.1f} | {g['oth_max'].median():.0f} | {g['oth_last'].median():.0f} | "
+                          f"{pct(g['oth_asleep'].mean())} | {med(g['oth_to50'])} ({pct(g['oth_to50'].notna().mean())} get there) | "
+                          f"{med(g['oth_to91'])} | {pct(g['oth_maxed20'].mean())} | {med(g['me_to10'])} |")
+        md.append("")
+    g0 = br[br["lv"] == 100.0].copy()
+    md += ["## Interesting facts (level 100+, all charts, all years)", ""]
+    if len(g0):
+        md += [f"- **False breaks:** {pct(g0['remax10'].mean())} of breaks go back to 100 on the SAME side within 10 candles "
+               f"(median {med(g0['remax_at'])} candles later). So the first break is often not the end.",
+               f"- **The extreme isn't always in:** after the break, price made a NEW low (fear) / high (greed) beyond the maxed run's "
+               f"extreme within 10 candles {pct(g0['new_ext10'].mean())} of the time.",
+               f"- **Snap off the extreme:** median {g0['snap10'].median():.2f} ATR within 10 candles of the break "
+               f"(75% of runs: {g0['snap10'].quantile(.75):.2f}, 90%: {g0['snap10'].quantile(.9):.2f}).",
+               f"- **Run size:** a maxed run moves price a median {g0['run_atr'].median():.2f} ATR from the close before it to its extreme.",
+               f"- **Whiplash:** the other side maxes (91+) within 20 candles after {pct(g0['oth_maxed20'].mean())} of breaks.",
+               f"- **Other side asleep:** in {pct(g0['oth_asleep'].mean())} of maxed runs the other side stayed under 10 the whole time.", ""]
+        g0["len_b"] = pd.cut(g0["bars"], [0, 1, 3, 5, 999], labels=["1 bar", "2-3 bars", "4-5 bars", "6+ bars"])
+        md += ["### Does a LONGER maxed run mean a bigger snap back?",
+               "| Run length | Runs | Run size (ATR) | Snap in 10 (ATR) | Next 10 close: median / % your way | New extreme after the break | Back to 100 within 10 |",
+               "|---|---|---|---|---|---|---|"]
+        for lb, g in g0.groupby("len_b", observed=True):
+            md.append(f"| {lb} | {len(g)} | {g['run_atr'].median():.2f} | {g['snap10'].median():.2f} | {g['f10'].median():+.2f} / "
+                      f"{pct((g['f10'] > 0).mean())} | {pct(g['new_ext10'].mean())} | {pct(g['remax10'].mean())} |")
+        g0["oth_b"] = pd.cut(g0["other_at_break"], [-1, 10, 30, 60, 101], labels=["asleep (under 10)", "10-30", "30-60", "60+"])
+        md += ["", "### Does the OTHER side at the break candle tell you anything?",
+               "| Other side at the break | Breaks | Snap in 10 (ATR) | Next 10 close: median / % your way | New extreme after | Other side maxes within 20 |",
+               "|---|---|---|---|---|---|"]
+        for lb, g in g0.groupby("oth_b", observed=True):
+            md.append(f"| {lb} | {len(g)} | {g['snap10'].median():.2f} | {g['f10'].median():+.2f} / {pct((g['f10'] > 0).mean())} | "
+                      f"{pct(g['new_ext10'].mean())} | {pct(g['oth_maxed20'].mean())} |")
+        md += ["", "### By chart (level 100+, all years)",
+               "| Chart | Side | False break (back to 100 in 10) | New extreme after | Snap in 10 (ATR) | Whiplash within 20 |", "|---|---|---|---|---|---|"]
+        for tf in ST_TFS:
+            for nm in ("FEAR", "GREED"):
+                g = g0[(g0["tf"] == tf) & (g0["side"] == nm)]
+                if len(g):
+                    md.append(f"| {tf}m | {nm} | {pct(g['remax10'].mean())} | {pct(g['new_ext10'].mean())} | {g['snap10'].median():.2f} | "
+                              f"{pct(g['oth_maxed20'].mean())} |")
+    md += ["", f"## When in the day does it get maxed (level {lv0:.0f}+, {split:%Y}-now): runs and median bars",
+           "| Time | Runs | Median bars | Avg bars |", "|---|---|---|---|"]
+    for t_ in ("9:30-10:00", "10:00-11:30", "11:30-14:00", "14:00-15:40"):
+        g = rec[(rec["lv"] == lv0) & (rec["tod"] == t_)]
+        if len(g):
+            md.append(f"| {t_} | {len(g)} | {g['bars'].median():.0f} | {g['bars'].mean():.1f} |")
+    md += ["", "**Read with care:** 'next 5 / 10 candles' is not an edge test - the market drifts, so compare the % up with 50%, and see the "
+           "random-entry tests (bnc, wsw) for edges. This mode only measures how long it stays maxed and what the break candle looks like."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/maxed_{stamp}.md", f"{OUT}/maxed_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    peak_main() if MODE == "peak" else main()
+    if MODE == "maxed":
+        maxed_main()
+    elif MODE == "peak":
+        peak_main()
+    else:
+        main()
