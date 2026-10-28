@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "whip").strip().lower() or "whip"
+MODE = os.getenv("MODE", "colors").strip().lower() or "colors"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -15777,8 +15777,436 @@ def whip_main():
             fh.write(text + "\n")
 
 
+# ================================================================ YOUR 5-COLOR TREND LINE ON PRICE ACTION (MODE=colors)
+# Line = EMA 13, colored like Trend Flip / Flow Suite: GREEN (EMA13 > EMA34 + price over VWAP), BLUE (up but fading:
+# closed back under the fast line while it rolls over, 2 candles), RED / PINK = the mirror, GRAY = they disagree.
+# A) the colors themselves: how long, what follows what, how far price moves, how much is gone when the fade color shows.
+# B) color x price ABOVE / BELOW the line: what price does next (vs random).
+# C) entries: SHORT THE POP (red/pink line, price closes up through it), BUY THE DIP (green/blue, closes down through it),
+#    and the 'back through' versions (pop fails / dip reclaims) - each split by VIX FIX and TTM SQUEEZE readings and
+#    the line itself, then blind 2-variable combos (picked on 2020-23, judged on 2024-now). Regular hours. DATA ONLY.
+CL_SPLIT = pd.Timestamp(os.getenv("CL_SPLIT", "2024-01-01"), tz=NY)
+CL_NAMES = {2: "GREEN", 1: "BLUE", 0: "GRAY", -1: "PINK", -2: "RED"}
+CL_EVENTS = {
+    "POP": "SHORT THE POP - red/pink line, a candle closes UP through the line",
+    "FAILPOP": "SHORT THE FAILED POP - red/pink line, price was over the line and closes back UNDER it",
+    "DIP": "BUY THE DIP - green/blue line, a candle closes DOWN through the line",
+    "RECLAIM": "BUY THE RECLAIM - green/blue line, price was under the line and closes back OVER it",
+}
+CL_VARS = {
+    "LINE": "Line color before the candle (strong vs fading)",
+    "VFME": "Vix Fix on the side the move pushed (greed for a pop, fear for a dip), 0-100",
+    "VFOTH": "Vix Fix on the OTHER side (fear for a pop, greed for a dip)",
+    "VFMAX": "That pushed side maxed (91+) in the last 5 candles",
+    "TTM": "TTM momentum vs your trade",
+    "SQZ": "TTM squeeze",
+    "DIST": "How far the close is through the line (ATR)",
+    "SLOPE": "Line slope over 3 candles, + = your trade's way (ATR)",
+    "AGE": "How long the line has had this color (candles)",
+    "VWAP": "Price vs VWAP",
+    "TOD": "Time of day",
+    "TF": "Chart",
+}
+
+
+def cl_ttm(df):
+    cs, hs, ls = df["close"], df["high"], df["low"]
+    basis = cs.rolling(20).mean()
+    dev = 2.0 * cs.rolling(20).std(ddof=0)
+    pc = cs.shift(1)
+    tr = pd.concat([hs - ls, (hs - pc).abs(), (ls - pc).abs()], axis=1).max(axis=1)
+    rma = tr.rolling(20).mean()
+    sq_on = (((basis - dev) > (basis - 1.5 * rma)) & ((basis + dev) < (basis + 1.5 * rma))).fillna(False).to_numpy()
+    mid = ((hs.rolling(20).max() + ls.rolling(20).min()) / 2 + basis) / 2
+    mom = linreg_last((cs - mid).to_numpy(), 20)
+    since = bars_since(sq_on)
+    return mom, sq_on, since
+
+
+def cl_part_a(color, ind, rth):
+    """color runs (same day, regular hours) -> DataFrame"""
+    c, h, l, a, day = ind["c"], ind["h"], ind["l"], ind["atr"], ind["day"]
+    n = len(c)
+    ch = np.r_[True, (color[1:] != color[:-1]) | (day[1:] != day[:-1]) | (rth[1:] != rth[:-1])]
+    starts = np.nonzero(ch & rth)[0]
+    ends = np.r_[np.nonzero(ch)[0][1:] - 1, n - 1]
+    ends = ends[np.searchsorted(np.nonzero(ch)[0], starts)]
+    rows = []
+    for s, e in zip(starts, ends):
+        col = int(color[s])
+        nxt = int(color[e + 1]) if e + 1 < n and day[e + 1] == day[s] and rth[e + 1] else None
+        dirn = 1 if col > 0 else (-1 if col < 0 else 0)
+        mv = ((c[e] - c[s - 1]) * dirn / a[s]) if s >= 1 and a[s] > 0 and dirn != 0 else np.nan
+        rows.append((s, e, col, nxt, e - s + 1, mv))
+    return pd.DataFrame(rows, columns=["s", "e", "col", "nxt", "bars", "move"])
+
+
+def cl_legs(color, ind, rth):
+    """up legs (green/blue in a row) and down legs (red/pink in a row): how much of the leg's best move was already
+    done when the fade color (blue / pink) first showed, and what the leg did after it."""
+    c, h, l, a, day = ind["c"], ind["h"], ind["l"], ind["a"] if "a" in ind else ind["atr"], ind["day"]
+    st = np.sign(color)
+    n = len(c)
+    out = []
+    for side in (1, -1):
+        m = (st == side) & rth
+        ch = np.r_[True, (m[1:] != m[:-1]) | (day[1:] != day[:-1])]
+        idx = np.nonzero(ch & m)[0]
+        bnd = np.nonzero(ch)[0]
+        for s in idx:
+            k = np.searchsorted(bnd, s)
+            e = (bnd[k + 1] - 1) if k + 1 < len(bnd) else n - 1
+            if s < 1 or not (a[s] > 0):
+                continue
+            base = c[s - 1]
+            seg = h[s:e + 1] if side == 1 else l[s:e + 1]
+            best = (seg.max() - base) if side == 1 else (base - seg.min())
+            fade = np.nonzero(np.abs(color[s:e + 1]) == 1)[0]
+            if len(fade):
+                f = s + fade[0]
+                before = ((h[s:f].max() - base) if side == 1 else (base - l[s:f].min())) if f > s else 0.0
+                share = before / best if best > 0 else np.nan
+                more = (best - before) / a[s]
+                after_bars = e - f + 1
+                strong_again = (np.abs(color[f:e + 1]) == 2).any()
+            else:
+                share, after_bars, strong_again, more = np.nan, 0, False, np.nan
+            out.append(dict(side="UP (green/blue)" if side == 1 else "DOWN (red/pink)", bars=e - s + 1, best=best / a[s],
+                            had_fade=len(fade) > 0, share=share, after_bars=after_bars, strong_again=strong_again,
+                            more=more, more0=(more == more and more <= 0.05)))
+    return pd.DataFrame(out)
+
+
+def cl_chart(df, ind, sym, tf, rng):
+    color, ef = tlt_colors(df, ind)
+    o, h, l, c, a, hm, day, vw = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["vwap"]
+    n = len(c)
+    rth = (hm >= 930) & (hm < 1600)
+    F, G = vfx_pane(df)
+    F, G = np.nan_to_num(F), np.nan_to_num(G)
+    mom, sq_on, since = cl_ttm(df)
+    momA = mom / np.where(a > 0, a, np.nan)
+    momp = np.r_[np.nan, momA[:-1]]
+    idx = np.arange(n)
+    dend = pd.Series(np.where(hm < 1556, idx, -1)).groupby(day).transform("max").to_numpy()
+    ts = df.index
+    per_all = np.where(ts < CL_SPLIT, "tr", "te")
+    # ---- A
+    A = cl_part_a(color, ind, rth)
+    A["sym"], A["tf"] = sym, tf
+    A["per"] = per_all[A["s"].to_numpy()]
+    LG = cl_legs(color, ind, rth)
+    LG["sym"], LG["tf"] = sym, tf
+    # ---- B: every regular-hours candle 9:35-15:30, color x above/below the line, forward closes (long direction)
+    win = (hm >= 935) & (hm <= 1530) & (a > 0)
+    bi = np.nonzero(win)[0]
+    above = c > ef
+    Bf = {"i": bi, "state": [f"{CL_NAMES[int(color[i])]} line, price {'ABOVE' if above[i] else 'BELOW'}" for i in bi]}
+    for k in (5, 10, 20):
+        x = np.minimum(bi + k, dend[bi])
+        Bf[f"f{k}"] = (c[x] - c[bi]) / a[bi]
+    B = pd.DataFrame(Bf)
+    B["date"], B["per"], B["sym"], B["tf"] = ts[bi].date, per_all[bi], sym, tf
+    # ---- C: events on the candle's close (line color = the PREVIOUS candle's, what you saw before it)
+    prev_c = np.r_[np.nan, c[:-1]]
+    prev_ef = np.r_[np.nan, ef[:-1]]
+    pcol = np.r_[0, color[:-1]]
+    ok = win & (np.r_[day[1:] == day[:-1], False]) & (dend[np.minimum(idx + 1, n - 1)] >= idx + 1)
+    up_thru = (c > ef) & (prev_c <= prev_ef)
+    dn_thru = (c < ef) & (prev_c >= prev_ef)
+    ev = {"POP": ok & (pcol < 0) & up_thru, "FAILPOP": ok & (pcol < 0) & dn_thru,
+          "DIP": ok & (pcol > 0) & dn_thru, "RECLAIM": ok & (pcol > 0) & up_thru}
+    dirs = {"POP": -1, "FAILPOP": -1, "DIP": 1, "RECLAIM": 1}
+    # how long the line has had its color (sign) - same day
+    sgn = np.sign(color)
+    age = np.zeros(n, dtype=np.int64)
+    for i in range(1, n):
+        age[i] = age[i - 1] + 1 if (sgn[i] == sgn[i - 1] and day[i] == day[i - 1]) else 1
+    slope3 = (ef - np.r_[[np.nan] * 3, ef[:-3]]) / np.where(a > 0, a, np.nan)
+    rows = []
+    for nm, m in ev.items():
+        sig = np.nonzero(m)[0]
+        if not len(sig):
+            continue
+        d = dirs[nm]
+        dv = np.full(len(sig), d)
+        R, clean, heat = ot_outcomes(ind, dend, sig, dv)
+        me = G[sig] if d == -1 else F[sig]            # a pop pushes greed up; a dip pushes fear up
+        oth = F[sig] if d == -1 else G[sig]
+        mx = np.zeros(len(sig), dtype=bool)
+        for q in range(5):
+            j = np.maximum(sig - q, 0)
+            mx |= ((G[j] if d == -1 else F[j]) >= 91)
+        mm, mp = momA[sig] * d, momp[sig] * d             # + = momentum on your trade's side
+        ttm = np.where(mm > 0, np.where(mm >= mp, "WITH you, getting stronger", "WITH you, fading"),
+                       np.where(mm >= mp, "AGAINST you, turning your way", "AGAINST you, getting stronger"))
+        sq = np.where(sq_on[sig], "in a squeeze", np.where(since[sig] <= 3, "squeeze fired 0-3 candles ago",
+                                                           np.where(since[sig] <= 10, "squeeze fired 4-10 ago", "no squeeze in 10+")))
+        E = pd.DataFrame({"sig": sig, "ev": nm, "d": d, "sym": sym, "tf": tf,
+                          "LINE": [("RED (strong)" if pcol[i] == -2 else "PINK (fading)") if d == -1 and nm in ("POP", "FAILPOP")
+                                   else ("GREEN (strong)" if pcol[i] == 2 else "BLUE (fading)") for i in sig],
+                          "me": me, "oth": oth, "VFMAX": np.where(mx, "yes", "no"), "TTM": ttm, "SQZ": sq,
+                          "dist": np.abs(c[sig] - ef[sig]) / a[sig], "slope": slope3[sig] * d, "age": age[sig],
+                          "VWAP": np.where((c[sig] - vw[sig]) * d > 0, "price on your trade's side of VWAP", "price on the other side of VWAP"),
+                          "hm": hm[sig]})
+        for q, k in enumerate(OT_K):
+            E[f"k{k}"] = R[:, q]
+        E["clean"], E["heat"] = clean, heat
+        rows.append(E)
+    C = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if len(C):
+        t2 = ts[C["sig"].to_numpy()]
+        C["date"], C["year"], C["per"] = t2.date, t2.year, np.where(t2 < CL_SPLIT, "tr", "te")
+    # random baseline (both directions) for C
+    pool = np.nonzero(ok)[0]
+    ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("CL_RANDOM", "20000"))), replace=False))
+    RB = []
+    for dv in (1, -1):
+        R2, cl2, _ = ot_outcomes(ind, dend, ridx, np.full(len(ridx), dv))
+        b_ = pd.DataFrame(R2, columns=[f"k{k}" for k in OT_K])
+        b_["clean"], b_["d"], b_["sym"], b_["tf"] = cl2, dv, sym, tf
+        b_["per"] = per_all[ridx]
+        RB.append(b_)
+    return A, LG, B, C, pd.concat(RB, ignore_index=True)
+
+
+def colors_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("CL_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(41)
+    AA, LL, BB, CC, RR, ndays = [], [], [], [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            hm = ind["hm"]
+            ndays[(sym, tf)] = len(np.unique(ind["day"][(hm >= 930) & (hm < 1600)]))
+            A, LG, B, C, R = cl_chart(df, ind, sym, tf, rng)
+            AA.append(A); LL.append(LG); BB.append(B); CC.append(C); RR.append(R)
+            print(f"  {sym} {tf}m: {len(A)} color runs, {len(C)} entries ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    A, LG, B = pd.concat(AA, ignore_index=True), pd.concat(LL, ignore_index=True), pd.concat(BB, ignore_index=True)
+    C, RB = pd.concat(CC, ignore_index=True), pd.concat(RR, ignore_index=True)
+
+    def pct(x):
+        return "-" if x != x else f"{100 * x:.0f}%"
+
+    md = [f"# YOUR 5-COLOR TREND LINE ON PRICE ACTION - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}, regular hours. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**Line** = EMA 13. **GREEN** = EMA 13 over EMA 34 and price over VWAP. **BLUE** = still up but fading (closed back under the "
+          "fast line while it rolls over, 2 candles). **RED / PINK** = the mirror. **GRAY** = EMA and VWAP disagree. ATR = the chart's "
+          "ATR at the time.", ""]
+    # ---------------- A
+    md += ["## A1) How long each color lasts (candles in a row, same day)",
+           "| Chart | Color | Runs per day | Avg | **Median** | 75% | 90% | 1 candle only | Price move during it (median ATR, the color's way) |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for tf in ST_TFS:
+        nd = sum(ndays[(s_, tf)] for s_ in SYMBOLS)
+        for col in (2, 1, 0, -1, -2):
+            g = A[(A["tf"] == tf) & (A["col"] == col)]
+            if not len(g):
+                continue
+            mv = g["move"].median()
+            md.append(f"| {tf}m | {CL_NAMES[col]} | {len(g) / max(nd, 1):.1f} | {g['bars'].mean():.1f} | **{g['bars'].median():.0f}** | "
+                      f"{g['bars'].quantile(.75):.0f} | {g['bars'].quantile(.9):.0f} | {pct((g['bars'] == 1).mean())} | "
+                      f"{'-' if mv != mv else f'{mv:+.2f}'} |")
+    md += ["", "## A2) What each color turns into (next color, all charts)",
+           "| From \\ to | " + " | ".join(CL_NAMES[c_] for c_ in (2, 1, 0, -1, -2)) + " | Runs |", "|---|---|---|---|---|---|---|"]
+    Ax = A[A["nxt"].notna()]
+    for col in (2, 1, 0, -1, -2):
+        g = Ax[Ax["col"] == col]
+        if not len(g):
+            continue
+        md.append(f"| **{CL_NAMES[col]}** | " + " | ".join(pct((g["nxt"] == c_).mean()) for c_ in (2, 1, 0, -1, -2)) + f" | {len(g)} |")
+    md.append("")
+    md += ["## A3) By chart: does the fade color come back strong, or turn?",
+           "| Chart | BLUE -> back to GREEN | BLUE -> GRAY | BLUE -> RED/PINK | PINK -> back to RED | PINK -> GRAY | PINK -> GREEN/BLUE | "
+           "GRAY -> a trend that lasts 5+ |", "|---|---|---|---|---|---|---|---|"]
+    for tf in ST_TFS:
+        g = Ax[Ax["tf"] == tf]
+        b, p, gr = g[g["col"] == 1], g[g["col"] == -1], g[g["col"] == 0]
+        # gray -> next run is green/red and lasts 5+
+        Atf = A[A["tf"] == tf].reset_index(drop=True)
+        nxt_len = Atf["bars"].shift(-1)
+        gmask = (Atf["col"] == 0) & Atf["nxt"].isin([2, -2, 1, -1])
+        g5 = (nxt_len[gmask] >= 5).mean() if gmask.any() else np.nan
+        md.append(f"| {tf}m | {pct((b['nxt'] == 2).mean())} | {pct((b['nxt'] == 0).mean())} | {pct(b['nxt'].isin([-1, -2]).mean())} | "
+                  f"{pct((p['nxt'] == -2).mean())} | {pct((p['nxt'] == 0).mean())} | {pct(p['nxt'].isin([1, 2]).mean())} | {pct(g5)} |")
+    md += ["", "## A4) Up legs (green/blue in a row) and down legs (red/pink): how much is already gone when the fade color shows",
+           "**Best move** = the leg's best price from the close before it started (ATR). **Done when it fades** = share of that best move "
+           "already made before the first blue (pink) candle. **Strong again** = the leg goes back to green (red) after fading, before it ends.",
+           "| Chart | Leg | Legs | Median candles | Best move (median ATR) | Fade shows | Done when it fades (median) | More gained after the fade: median / avg ATR | Leg already topped when the fade showed | Strong again after the fade |",
+           "|---|---|---|---|---|---|---|---|---|---|"]
+    for tf in ST_TFS:
+        for sd in ("UP (green/blue)", "DOWN (red/pink)"):
+            g = LG[(LG["tf"] == tf) & (LG["side"] == sd)]
+            if not len(g):
+                continue
+            gf = g[g["had_fade"]]
+            md.append(f"| {tf}m | {sd} | {len(g)} | {g['bars'].median():.0f} | {g['best'].median():.2f} | {pct(g['had_fade'].mean())} | "
+                      f"{pct(gf['share'].median())} | {gf['more'].median():.2f} / {gf['more'].mean():.2f} | {pct(gf['more0'].mean())} | "
+                      f"{pct(gf['strong_again'].mean())} |")
+    # ---------------- B
+    md += ["", "## B) Color x price ABOVE / BELOW the line - what price does next",
+           "By the line's own math BLUE always has price UNDER the line and PINK always has price OVER it, so those have one row each.",
+           "**Next k** = close k candles later minus the close now (ATR, + = up). **vs all** = minus the average of every candle on the same "
+           "chart and period (removes drift). **t** = by day (2+ = unlikely luck). Read it as: + = price tends to go UP from here, - = DOWN.",
+           "| State | Share of the time | Next 5 vs all (2020-23 / 2024-now) | Next 10 vs all | **Next 20 vs all** | Next 20 up % |",
+           "|---|---|---|---|---|---|"]
+    allm = B.groupby(["sym", "tf", "per"])[["f5", "f10", "f20"]].mean()
+    j = B[["sym", "tf", "per"]].join(allm, on=["sym", "tf", "per"])
+    for k in ("f5", "f10", "f20"):
+        B["a" + k] = B[k] - j[k]
+
+    def bscore(g, k):
+        out = []
+        for p in ("tr", "te"):
+            x = g[g["per"] == p]
+            y = x["a" + k].dropna()
+            if len(y) < 50:
+                out.append("-")
+                continue
+            m = y.mean()
+            cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+            se = np.sqrt((cs ** 2).sum()) / len(y)
+            out.append(f"{m:+.3f} ({m / se:.1f})" if se > 0 else f"{m:+.3f}")
+        return " / ".join(out)
+    order = [f"{CL_NAMES[c_]} line, price {p_}" for c_ in (2, 1, 0, -1, -2) for p_ in ("ABOVE", "BELOW")]
+    for stt in order:
+        g = B[B["state"] == stt]
+        if len(g):
+            md.append(f"| {stt} | {pct(len(g) / len(B))} | {bscore(g, 'f5')} | {bscore(g, 'f10')} | **{bscore(g, 'f20')}** | "
+                      f"{pct((g['f20'] > 0).mean())} |")
+    md += ["", "**By chart (next 20 vs all, 2024-now):**", "| State | " + " | ".join(f"{t}m" for t in ST_TFS) + " |",
+           "|---|" + "---|" * len(ST_TFS)]
+    for stt in order:
+        cells = []
+        for tf in ST_TFS:
+            g = B[(B["state"] == stt) & (B["tf"] == tf) & (B["per"] == "te")]
+            cells.append(f"{g['af20'].mean():+.3f}" if len(g) > 50 else "-")
+        md.append(f"| {stt} | " + " | ".join(cells) + " |")
+    # ---------------- C
+    if len(C):
+        KC = [f"k{k}" for k in OT_K] + ["clean"]
+        base = RB.groupby(["sym", "tf", "d", "per"])[KC].mean()
+        jj = C[["sym", "tf", "d", "per"]].join(base, on=["sym", "tf", "d", "per"])
+        for k in KC:
+            C["a_" + k] = C[k] - jj[k]
+        C["VFME"] = ot_bucket(C["me"], [-1, 30, 60, 91, 101], ["under 30", "30-60", "60-90", "91+ (maxed)"])
+        C["VFOTH"] = ot_bucket(C["oth"], [-1, 10, 30, 60, 101], ["asleep (under 10)", "10-30", "30-60", "60+"])
+        C["DIST"] = ot_bucket(C["dist"], [-1, 0.1, 0.25, 0.5, 99], ["under 0.1", "0.1-0.25", "0.25-0.5", "0.5+"])
+        C["SLOPE"] = ot_bucket(C["slope"], [-99, -0.3, 0, 0.3, 99], ["under -0.3 (against)", "-0.3 to 0", "0 to 0.3", "0.3+ (your way)"])
+        C["AGE"] = ot_bucket(C["age"], [0, 6, 16, 41, 99999], ["1-5", "6-15", "16-40", "41+"])
+        C["TOD"] = ot_bucket(C["hm"], [0, 1000, 1130, 1400, 2400], ["9:35-10:00", "10:00-11:30", "11:30-14:00", "14:00-15:30"])
+        C["TF"] = C["tf"].map(lambda x: f"{x}m")
+
+        def score(g, k):
+            out = {}
+            for p in ("tr", "te"):
+                x = g[g["per"] == p]
+                y = x["a_" + k].dropna()
+                if len(y) < 30:
+                    out[p] = (np.nan, np.nan)
+                    continue
+                m = y.mean()
+                cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+                se = np.sqrt((cs ** 2).sum()) / len(y)
+                out[p] = (m, m / se if se > 0 else np.nan)
+            return out
+
+        def best_k(g):
+            tr = g[g["per"] == "tr"]
+            return max([f"k{k}" for k in OT_K], key=lambda kk: abs(tr["a_" + kk].mean()) if len(tr) >= 30 else 0)
+
+        def real(g, k):
+            s = score(g, k)
+            if any(np.isnan(s[p][0]) for p in ("tr", "te")):
+                return False
+            ys = g.groupby("year")["a_" + k].mean()
+            sy = g.groupby("sym")["a_" + k].mean()
+            sg = np.sign(s["tr"][0])
+            return (abs(s["tr"][0]) >= 0.05 and abs(s["te"][0]) >= 0.05 and np.sign(s["te"][0]) == sg and s["tr"][1] * sg >= 2
+                    and s["te"][1] * sg >= 2 and (np.sign(sy) == sg).all() and (np.sign(ys) != sg).sum() <= 1 and len(g) >= 200)
+
+        def row(name, g, k=None):
+            k = k or best_k(g)
+            s = score(g, k)
+            f = lambda p: "-" if np.isnan(s[p][0]) else f"{s[p][0]:+.3f} ({s[p][1]:.1f})"
+            cl = g.groupby("per")["a_clean"].mean()
+            ys = g.groupby("year")["a_" + k].mean()
+            flag = ""
+            if real(g, k):
+                flag = "✅" if s["te"][0] > 0 else "✅ FLIPPED (trade it the other way)"
+            return (f"| {name} | {len(g)} | {k[1:]} | {f('tr')} | **{f('te')}** | {100 * cl.get('tr', np.nan):+.1f} / "
+                    f"{100 * cl.get('te', np.nan):+.1f} | {g['heat'].median():.2f} | {int((ys > 0).sum())}/{len(ys)} | {flag} |")
+        H = ("| Group | Trades | Hold | vs random 2020-23 (t) | **vs random 2024-now (t)** | Clean +1 ATR first vs random, pts | Heat (ATR) | "
+             "Years + | |\n|---|---|---|---|---|---|---|---|---|")
+        md += ["", "## C) Entries on the line - SHORT THE POP / BUY THE DIP and the 'back through' versions",
+               "Signal = the candle's close (9:35-15:30), line color = the candle BEFORE (what you saw), entry = next open, exit = the close "
+               "after the hold (3 / 5 / 10 / 20 candles, picked on 2020-23). **vs random** = ATR result minus random entries the SAME way on "
+               "the same chart and period. **Negative = the entry is wrong-way**: trading it the OTHER way would have earned that. **Clean** = "
+               "how many more points hit +1 ATR before -1 ATR (20 candles) than random. **✅** = 0.05+ ATR both periods, t 2+ both, same sign, "
+               "SPY and QQQ agree, every year but one, 200+ trades.", "",
+               "### C1) The four entries", H]
+        for ev_, title in CL_EVENTS.items():
+            g = C[C["ev"] == ev_]
+            if len(g):
+                md.append(row(title, g))
+        for ev_, title in CL_EVENTS.items():
+            G0 = C[C["ev"] == ev_]
+            if len(G0) < 200:
+                continue
+            md += ["", f"### C2) {title} - every Vix Fix / TTM / line variable ({len(G0)} trades)", H]
+            for var, vt in CL_VARS.items():
+                md.append(f"| ***{vt}*** | | | | | | | | |")
+                for lb, g in G0.groupby(var):
+                    if len(g) >= 50:
+                        md.append(row(lb, g))
+            cand = []
+            vv = list(CL_VARS)
+            for i1 in range(len(vv)):
+                for i2 in range(i1 + 1, len(vv)):
+                    for (b1, b2), g in G0.groupby([vv[i1], vv[i2]]):
+                        if (g["per"] == "tr").sum() < 300 or (g["per"] == "te").sum() < 150:
+                            continue
+                        k = best_k(g)
+                        s = score(g, k)
+                        if np.isnan(s["tr"][1]):
+                            continue
+                        cand.append((abs(s["tr"][1]), f"{CL_VARS[vv[i1]]}: {b1} + {CL_VARS[vv[i2]]}: {b2}", g, k))
+            cand.sort(key=lambda z: -z[0])
+            md += ["", f"**{ev_}: best 2-variable combos picked on 2020-23 (either way), judged BLIND on 2024-now**", H]
+            held = 0
+            for _, name, g, k in cand[:15]:
+                md.append(row(name, g, k))
+                s = score(g, k)
+                if not np.isnan(s["te"][1]) and np.sign(s["te"][0]) == np.sign(s["tr"][0]) and abs(s["te"][1]) >= 2:
+                    held += 1
+            md += ["", f"- Of these 15, **{held}** held up blind on 2024-now (same sign, t 2+)."]
+    md += ["", "**Luck check:** hundreds of splits are scored, so a few will look good by chance. Trust the ✅ rows and the blind combos that "
+           "held up, not one good period."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/colors_{stamp}.md", f"{OUT}/colors_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "whip":
+    if MODE == "colors":
+        colors_main()
+    elif MODE == "whip":
         whip_main()
     elif MODE == "other":
         other_main()
