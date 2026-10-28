@@ -1,28 +1,28 @@
 # GEX latest
 
-2026-10-27 15:27:55 ET. Log only. This run places no orders.
+2026-10-28 09:44:14 ET. Log only. This run places no orders.
 
 Sign convention: dealers long calls (call GEX positive) and short puts (put GEX negative). Dollar GEX is the hedge notional for a 1% move in the underlying. Open interest is the overnight print, so this is an estimate.
 
-SPY: spot below the 0DTE flip by 0.70 pts (0.09%); nearest wall is the call wall at 770.00, 0.22 pts (0.03%) away.
-QQQ: spot above the 0DTE flip by 0.13 pts (0.02%); the call wall and the put wall are the same distance, 0.42 pts (0.06%) away.
+SPY: spot below the 0DTE flip by 0.48 pts (0.06%); nearest wall is the call wall at 772.00, 1.40 pts (0.18%) away.
+QQQ: spot above the 0DTE flip by 3.38 pts (0.47%); the call wall and the put wall are the same distance, 2.75 pts (0.38%) away.
 
-SPY top |GEX| strikes: 755.00 ($1.35B), 765.00 ($681.78M), 767.00 ($657.84M).
-QQQ top |GEX| strikes: 700.00 ($402.23M), 690.00 ($289.65M), 729.00 ($160.05M).
+SPY top |GEX| strikes: 765.00 ($870.88M), 755.00 ($817.52M), 780.00 ($474.76M).
+QQQ top |GEX| strikes: 730.00 ($240.35M), 740.00 ($238.68M), 700.00 ($238.17M).
 
 |  | SPY | QQQ |
 |---|---:|---:|
-| Spot | 770.22 | 721.58 |
-| 0DTE flip | 770.91 | 721.45 |
-| All-expiry flip | 699.48 |  |
-| 0DTE call wall | 770.00 | 722.00 |
-| 0DTE put wall | 767.00 | 722.00 |
-| Net GEX 0DTE | $333.58M | $170.35M |
-| Net GEX all | -$1.79B | -$1.17B |
-| Vol-adj net 0DTE | $157.62B | $50.59B |
-| Vol-adj net all | $156.68B | $50.18B |
-| Missing greeks | 335/886 | 320/920 |
-| OI used | 1951606 | 1227712 |
+| Spot | 770.60 | 722.75 |
+| 0DTE flip | 771.08 | 719.37 |
+| All-expiry flip | 704.94 |  |
+| 0DTE call wall | 772.00 | 720.00 |
+| 0DTE put wall | 765.00 | 720.00 |
+| Net GEX 0DTE | $569.69M | $331.65M |
+| Net GEX all | -$615.61M | -$47.46M |
+| Vol-adj net 0DTE | $2.66B | $1.84B |
+| Vol-adj net all | $485.51M | $2.06B |
+| Missing greeks | 303/886 | 315/888 |
+| OI used | 1886450 | 1153756 |
 
 The one-line reading uses the 0DTE flip and walls when that expiry is in the snapshot. CSV distances are level minus spot: positive means the level is above spot.
 
