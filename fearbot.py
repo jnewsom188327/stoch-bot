@@ -34,6 +34,7 @@ from numpy.lib.stride_tricks import sliding_window_view as swv
 SYMBOLS = ["SPY", "QQQ"]
 QTY = 10                     # contracts on entry
 ADD_QTY = 10                 # contracts added when averaging down
+AVG_DOWN = True              # False = never average down (just hold the original 10 to the normal exits)
 ADD_ATR = 1.5                # average down when the stock moves this many ATR against the entry
 TP_PCT = 25                  # not averaged: option up this % -> sell PARTIAL_QTY
 PARTIAL_QTY = 7
@@ -475,7 +476,7 @@ def manage(tc, oc, dc, trades, flat_dt):
                 changed |= sell(tc, tr, tr["qty"], f"TIME {MAX_HOLD_MIN} min")
         else:
             against = None if s is None else ((tr["spot"] - s) if tr["side"] == 1 else (s - tr["spot"]))
-            if against is not None and against >= ADD_ATR * tr["atr"]:
+            if AVG_DOWN and against is not None and against >= ADD_ATR * tr["atr"]:
                 tr["shadow"] = (m - tr["fill"]) * 100 * tr["qty"]          # the no-average-down plan exits here
                 px = market(tc, tr["contract"], ADD_QTY, True)
                 if px is not None:
