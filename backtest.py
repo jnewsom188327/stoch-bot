@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "other").strip().lower() or "other"
+MODE = os.getenv("MODE", "whip").strip().lower() or "whip"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -15483,8 +15483,304 @@ def other_main():
             fh.write(text + "\n")
 
 
+# ================================================================ VIX FIX WHIPSAW - ONE RULE, TESTED ONCE (MODE=whip)
+# 2026 ONLY by default (WX_START). Halves: Jan-May vs Jun-now (WX_SPLIT).
+# THE RULE (decided BEFORE this test, from MODE=other):
+#   1) fear (or greed) on your VIX FIX pane hits 100 (the new 50-candle high of the raw Vix Fix)
+#   2) the break candle = the first candle back under 100, closed 9:35-15:30
+#   3) at the break candle the OTHER side reads 60+
+#   4) the maxed run went AGAINST the day (fear while price is above the 9:30 open, greed while below; 30%+ of the day range)
+#   5) price is on the trade's side of VWAP (long above VWAP, short below)
+#   6) first break only (the same side did not break within the 10 candles before)
+#   -> fear break = LONG, greed break = SHORT, at the next candle's open.
+# Steps 1-3 alone = BASE. Each filter is also shown alone so you can see what each one adds - but THE RULE is the full one.
+# Exits on the stock (ATR), each vs random entries the same way, same chart, same exit, same period. Then the RULE on REAL
+# option prices (Alpaca, 2026): 0DTE / 1DTE x at the money / 1 strike out of the money. DATA ONLY.
+WX_EXITS = [  # name, stop ATR (None = none, "struct" = past the flush extreme), target ATR, max candles
+    ("hold 20, no stop", None, None, 20),
+    ("hold 10, no stop", None, None, 10),
+    ("hold 20, stop 1.5 ATR", 1.5, None, 20),
+    ("hold 20, stop 2 ATR", 2.0, None, 20),
+    ("hold 20, stop past the flush extreme", "struct", None, 20),
+    ("+1 ATR target / 1.5 ATR stop, 20 max", 1.5, 1.0, 20),
+    ("+1.5 ATR target / 2 ATR stop, 20 max", 2.0, 1.5, 20),
+    ("+2 ATR target / stop past the flush, 30 max", "struct", 2.0, 30),
+]
+WX_SPLIT = pd.Timestamp(os.getenv("WX_SPLIT", "2026-06-01"), tz=NY)
+WX_OPT_FROM = pd.Timestamp(os.getenv("WX_OPT_FROM", "2026-01-01"), tz=NY)
+
+
+def wx_sim(ind, dend, e, d, stop_d, tgt, maxk):
+    """one trade from candle e's open. stop_d / tgt in $ (None = off). Stop checked first inside a candle. Returns (ATR-free $ result, exit idx, reason)"""
+    o, h, l, c = ind["o"], ind["h"], ind["l"], ind["c"]
+    p0 = o[e]
+    last = min(e + maxk - 1, dend[e])
+    for x in range(e, last + 1):
+        if stop_d is not None:
+            sp = p0 - d * stop_d
+            if (d == 1 and l[x] <= sp) or (d == -1 and h[x] >= sp):
+                fill = min(sp, o[x]) if d == 1 else max(sp, o[x])
+                return d * (fill - p0), x, "stop"
+        if tgt is not None:
+            tp = p0 + d * tgt
+            if (d == 1 and h[x] >= tp) or (d == -1 and l[x] <= tp):
+                return d * (tp - p0), x, "target"
+    return d * (c[last] - p0), last, "time"
+
+
+def wx_chart(df, ind, sym, tf, rng):
+    F, G = vfx_pane(df)
+    o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+    vw = ind["vwap"]
+    n = len(c)
+    idx = np.arange(n)
+    dend = pd.Series(np.where(hm < 1556, idx, -1)).groupby(day).transform("max").to_numpy()
+    o930 = pd.Series(np.where(hm >= 930, o, np.nan)).groupby(day).transform("first").to_numpy()
+    hi_d = pd.Series(np.where(hm >= 930, h, np.nan)).groupby(day).cummax().to_numpy()
+    lo_d = pd.Series(np.where(hm >= 930, l, np.nan)).groupby(day).cummin().to_numpy()
+    ev = []
+    for side in (1, -1):
+        X, Y = (F, G) if side == 1 else (G, F)
+        X, Y = np.nan_to_num(X), np.nan_to_num(Y)
+        cur, last_b = None, -999
+        for s, j, b in mx_runs(X, day, hm, 100.0):
+            if day[s] != cur:
+                cur, last_b = day[s], -999
+            first = (b - last_b) > 10
+            if b >= 0:
+                last_b = b
+            if b < 1 or b + 1 >= n or day[b + 1] != day[b] or not (935 <= hm[b] <= 1530) or not (a[b] > 0) or dend[b + 1] < b + 1:
+                continue
+            if Y[b] < 60:
+                continue
+            rd = hi_d[b] - lo_d[b]
+            mv = ((o930[b] - c[b]) if side == 1 else (c[b] - o930[b])) / rd if rd > 0 else 0.0   # + = run WITH the day
+            ext = l[s:j + 1].min() if side == 1 else h[s:j + 1].max()
+            ev.append(dict(sig=b, e=b + 1, d=side, sym=sym, tf=tf, side="LONG (fear broke)" if side == 1 else "SHORT (greed broke)",
+                           first=first, against=mv <= -0.3, vwap_ok=(c[b] >= vw[b]) if side == 1 else (c[b] <= vw[b]),
+                           struct=max(abs(o[b + 1] - ext) + 0.1 * a[b], 0.25 * a[b]), atr=a[b]))
+    E = pd.DataFrame(ev)
+    if not len(E):
+        return E, pd.DataFrame()
+    E["ALL"] = E["first"] & E["against"] & E["vwap_ok"]
+    ts = df.index[E["sig"].to_numpy()]
+    E["date"], E["year"], E["per"] = ts.date, ts.strftime("%Y-%m"), np.where(ts < WX_SPLIT, "tr", "te")
+    E["t_in"] = df.index[E["e"].to_numpy()]
+    struct_ratio = (E["struct"] / E["atr"]).to_numpy()
+    # random entries, same exits; the 'struct' stop gets a distance drawn from the real trades' distances (in ATR)
+    pool = np.nonzero((hm >= 935) & (hm <= 1530) & (a > 0))[0]
+    pool = pool[(pool + 1 < n)]
+    pool = pool[(day[pool + 1] == day[pool]) & (dend[pool + 1] >= pool + 1)]
+    ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("WX_RANDOM", "3000"))), replace=False))
+    R = []
+    for dv in (1, -1):
+        for b in ridx:
+            r = dict(d=dv, sym=sym, tf=tf, per="tr" if df.index[b] < WX_SPLIT else "te",
+                     side="LONG (fear broke)" if dv == 1 else "SHORT (greed broke)")
+            sr = rng.choice(struct_ratio)
+            for nm, st_, tg, mk in WX_EXITS:
+                sd = None if st_ is None else (sr * a[b] if st_ == "struct" else st_ * a[b])
+                res, _, _ = wx_sim(ind, dend, b + 1, dv, sd, None if tg is None else tg * a[b], mk)
+                r[nm] = res / a[b]
+            R.append(r)
+    for nm, st_, tg, mk in WX_EXITS:
+        out, xs, why = [], [], []
+        for t in E.itertuples():
+            sd = None if st_ is None else (t.struct if st_ == "struct" else st_ * t.atr)
+            res, x, rs = wx_sim(ind, dend, t.e, t.d, sd, None if tg is None else tg * t.atr, mk)
+            out.append(res / t.atr)
+            xs.append(x)
+            why.append(rs)
+        E[nm] = out
+        E["x_" + nm] = df.index[np.array(xs)] + pd.Timedelta(minutes=tf)    # exit at that candle's close
+        E["why_" + nm] = why
+    E["spot_in"] = o[E["e"].to_numpy()]
+    return E, pd.DataFrame(R)
+
+
+def wx_options(E):
+    """THE RULE on real option prices (1m closes). Entry = the option's close on the minute before the entry candle opens."""
+    from alpaca.data.historical import OptionHistoricalDataClient
+    oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+    rows = []
+    T = E[E["t_in"] >= WX_OPT_FROM]
+    for day_, g in T.groupby(T["t_in"].dt.date):
+        bdays = pd.bdate_range(day_, periods=4)
+        exps = {"0DTE": day_, "1DTE": bdays[1].date()}
+        want = {}
+        for t in g.itertuples():
+            cp = "C" if t.d == 1 else "P"
+            atm = round(t.spot_in)
+            for ex_nm, ex in exps.items():
+                for st_nm, k in (("ATM", atm), ("1 OTM", atm + (1 if t.d == 1 else -1))):
+                    want[(t.Index, ex_nm, st_nm)] = lab_occ(t.sym, ex, cp, k)
+        px = {}
+        for ex_nm, ex in exps.items():
+            cons = {v for (i, en, sn), v in want.items() if en == ex_nm}
+            if cons:
+                px.update(lab_fetch_opt(oc, cons, day_))
+        for (i, ex_nm, st_nm), con in want.items():
+            arr = px.get(con)
+            if arr is None:
+                continue
+            t = E.loc[i]
+            m_in = int((t["t_in"].hour * 60 + t["t_in"].minute) - 570) - 1
+            if not (0 <= m_in < 390) or np.isnan(arr[m_in]) or arr[m_in] <= 0:
+                continue
+            r = dict(i=i, exp=ex_nm, strike=st_nm, sym=t["sym"], tf=t["tf"], entry=arr[m_in], date=day_, d=t["d"])
+            for nm, *_ in WX_EXITS:
+                xt = t["x_" + nm]
+                m_out = min(389, int((xt.hour * 60 + xt.minute) - 570) - 1)
+                v = arr[m_out] if 0 <= m_out < 390 else np.nan
+                r[nm] = 100 * (v / arr[m_in] - 1) if v == v else np.nan
+                r["c_" + nm] = 100 * ((v - 0.02) / (arr[m_in] + 0.02) - 1) if v == v else np.nan   # 2 cents worse each side
+            rows.append(r)
+        print(f"  options {day_}: {len(g)} trades", flush=True)
+    return pd.DataFrame(rows)
+
+
+def whip_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("WX_START", "2026-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(31)
+    EV, BS, ndays = [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in ST_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            hm = ind["hm"]
+            ndays[(sym, tf)] = len(np.unique(ind["day"][(hm >= 935) & (hm <= 1530)]))
+            E, B = wx_chart(df, ind, sym, tf, rng)
+            EV.append(E)
+            BS.append(B)
+            print(f"  {sym} {tf}m: {len(E)} base trades, {int(E['ALL'].sum()) if len(E) else 0} with the full rule ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(EV, ignore_index=True)
+    B = pd.concat(BS, ignore_index=True)
+    EXN = [x[0] for x in WX_EXITS]
+    base = B.groupby(["sym", "tf", "side", "per"])[EXN].mean()
+    adj = E[["sym", "tf", "side", "per"]].join(base, on=["sym", "tf", "side", "per"])
+    for nm in EXN:
+        E["a_" + nm] = E[nm] - adj[nm]
+    yrs = sorted(E["year"].unique())
+
+    def tstat(x, col):
+        y = x[col].dropna()
+        if len(y) < 20:
+            return np.nan, np.nan
+        m = y.mean()
+        cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+        se = np.sqrt((cs ** 2).sum()) / len(y)
+        return m, (m / se if se > 0 else np.nan)
+
+    def line(name, g, nm, tf_days):
+        tr, te = g[g["per"] == "tr"], g[g["per"] == "te"]
+        m1, t1 = tstat(tr, "a_" + nm)
+        m2, t2 = tstat(te, "a_" + nm)
+        ys = g.groupby("year")["a_" + nm].mean()
+        sy = g.groupby("sym")["a_" + nm].mean()
+        win = (g[nm] > 0).mean()
+        pos, neg = g.loc[g[nm] > 0, nm].sum(), -g.loc[g[nm] < 0, nm].sum()
+        pf = pos / neg if neg > 0 else np.nan
+        cum = g.sort_values("t_in")[nm].cumsum()
+        dd = (cum.cummax() - cum).max() if len(cum) else np.nan
+        ok = (m1 >= 0.05 and m2 >= 0.05 and t1 >= 2 and t2 >= 2 and (sy > 0).all() and (ys < 0).sum() <= 2 and len(g) >= 50)
+        f = lambda m, t: "-" if m != m else f"{m:+.3f} ({t:.1f})"
+        return (f"| {name} | {len(g)} | {len(g) / max(tf_days, 1):.2f} | {100 * win:.0f}% | {g[nm].mean():+.3f} | {pf:.2f} | {dd:.1f} | "
+                f"{f(m1, t1)} | **{f(m2, t2)}** | {int((ys > 0).sum())}/{len(ys)} | {'✅' if ok else ''} |")
+
+    H = ("| Group | Trades | Per day | Win | Avg ATR | PF | Worst drawdown (ATR) | vs random Jan-May (t) | **vs random Jun-now (t)** | "
+         "Months + | |\n|---|---|---|---|---|---|---|---|---|---|---|")
+    md = [f"# VIX FIX WHIPSAW - ONE RULE, TESTED ONCE - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in ST_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "**THE RULE** = fear (greed) hits 100 -> the first candle back under 100 (9:35-15:30) -> the OTHER side reads 60+ -> the maxed "
+          "run went AGAINST the day (30%+ of the day range) -> price on the trade's side of VWAP -> first break only -> LONG after "
+          "fear / SHORT after greed at the next open. **BASE** = the first 3 steps only. **ATR** results are per share in units of "
+          "the chart's ATR at the signal. **vs random** = minus random entries the same way, same chart, same exit, same period "
+          "(0 = no edge). **t** = by day (2+ = unlikely luck). **PF** = gains / losses. **REAL EDGE ✅** = +0.05 ATR vs random in "
+          "both halves (Jan-May / Jun-now), t 2+ in both, SPY and QQQ both positive, no more than 2 losing months, 50+ trades.", ""]
+    for tf in ST_TFS:
+        g_tf = E[E["tf"] == tf]
+        if not len(g_tf):
+            continue
+        td = sum(ndays[(s_, tf)] for s_ in SYMBOLS)
+        md += [f"## {tf}m - THE RULE vs BASE, every exit", ""]
+        for nm in EXN:
+            md += [f"**{nm}**", H]
+            md.append(line("**THE RULE (all filters)**", g_tf[g_tf["ALL"]], nm, td))
+            md.append(line("BASE (100 + other side 60+)", g_tf, nm, td))
+            md.append(line("BASE + first break", g_tf[g_tf["first"]], nm, td))
+            md.append(line("BASE + run against the day", g_tf[g_tf["against"]], nm, td))
+            md.append(line("BASE + VWAP side", g_tf[g_tf["vwap_ok"]], nm, td))
+            for sd in ("LONG (fear broke)", "SHORT (greed broke)"):
+                md.append(line(f"THE RULE - {sd}", g_tf[g_tf["ALL"] & (g_tf["side"] == sd)], nm, td))
+            md.append("")
+    # every year for THE RULE on 1m
+    g1 = E[(E["tf"] == min(ST_TFS)) & E["ALL"]]
+    if len(g1):
+        md += [f"## THE RULE on {min(ST_TFS)}m - every month (ATR per trade vs random | trades)",
+               "| Exit | " + " | ".join(str(y) for y in yrs) + " |", "|---|" + "---|" * len(yrs)]
+        for nm in EXN:
+            cells = []
+            for y in yrs:
+                gy = g1[g1["year"] == y]
+                cells.append(f"{gy['a_' + nm].mean():+.2f} ({len(gy)})" if len(gy) else "-")
+            md.append(f"| {nm} | " + " | ".join(cells) + " |")
+        md.append("")
+    # real options
+    if not test:
+        rule = E[E["ALL"]]
+        try:
+            O = wx_options(rule)
+        except Exception as ex:  # noqa: BLE001
+            O = pd.DataFrame()
+            md.append(f"Option prices failed: {str(ex)[:200]}")
+        if len(O):
+            O.to_csv(f"{OUT}/whip_options.csv", index=False)
+            md += [f"## THE RULE on REAL option prices ({WX_OPT_FROM:%b %Y}-now)",
+                   "Entry = the option's last trade price the minute before the entry candle opens; exit = its price at the stock exit's "
+                   "minute. **After costs** = 2 cents worse on each side. % = per contract. No random comparison here - compare with 0.",
+                   "| Chart | Contract | Exit | Trades | Win | Avg % | Median % | Avg % after costs | Best / worst % |",
+                   "|---|---|---|---|---|---|---|---|---|"]
+            for tf in ST_TFS:
+                for (ex_, st_), g in O[O["tf"] == tf].groupby(["exp", "strike"]):
+                    for nm in EXN:
+                        x = g[nm].dropna()
+                        if len(x) < 10:
+                            continue
+                        md.append(f"| {tf}m | {ex_} {st_} | {nm} | {len(x)} | {100 * (x > 0).mean():.0f}% | {x.mean():+.1f}% | "
+                                  f"{x.median():+.1f}% | {g['c_' + nm].mean():+.1f}% | {x.max():+.0f}% / {x.min():+.0f}% |")
+    best = []
+    for tf in ST_TFS:
+        g_tf = E[(E["tf"] == tf) & E["ALL"]]
+        for nm in EXN:
+            if "✅" in line("", g_tf, nm, 1):
+                best.append(f"{tf}m / {nm}")
+    md += ["", "## The answer in 30 seconds",
+           f"- THE RULE passed every check on: **{', '.join(best) if best else 'none'}**.",
+           "- This rule was fixed BEFORE the test (one test, not a search), so a pass here means more than a pass in MODE=other."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/whip_{stamp}.md", f"{OUT}/whip_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "other":
+    if MODE == "whip":
+        whip_main()
+    elif MODE == "other":
         other_main()
     elif MODE == "maxed":
         maxed_main()
