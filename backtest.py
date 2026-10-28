@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "visual").strip().lower() or "visual"
+MODE = os.getenv("MODE", "blueprint").strip().lower() or "blueprint"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -16390,8 +16390,407 @@ def visual_main():
             fh.write(text + "\n")
 
 
+
+# ================================================================ THE BLUEPRINT, TESTED (MODE=blueprint)
+# From the "What to Circle" study deck. The base rule (held 7/7 years): your Vix Fix pane breaks off 100 with the OTHER side 60+
+# on the break candle (first break) -> fear break LONG, greed break SHORT, next candle's open, 20-candle hold.
+# The NEW checks from 7 circled charts, each tested here on 2020-now, SPY + QQQ, picked on nothing (no tuning):
+#   3) VWAP BAND  - distance from VWAP in ATR at the signal. "Chasing" = the stretch is in your direction (long far ABOVE VWAP),
+#                   "fading" = against it (long far BELOW VWAP). Idea: skip chasing 4+ ATR.
+#   4) TTM        - TTM color at the SIGNAL candle (known before the entry), relative to the trade: WITH you (cyan for longs /
+#                   red for shorts), TURNING your way (yellow / dark blue), TURNING away (dark blue / yellow), AGAINST (red / cyan).
+#   6) EXIT       - VWAP touch (when VWAP is ahead of you) or 20 candles, with and without the stop past the 5-candle extreme.
+#   idea 4)       - SQUEEZE RELEASE as its own trade (TTM direction), split by where it fired vs VWAP and the Vix Fix pane.
+#   idea 5)       - THE TWIN: did the other ticker's Vix Fix break the same way / the opposite way in the 10 minutes before?
+#   extras        - line color at the signal, time of day.
+# Also on the same checks: every 100 break, the trend-line dip with fear 91+, the failed pop under a red line. DATA ONLY.
+BP_TFS = [int(x) for x in os.getenv("BP_TFS", "1,2,3,5").split(",")]
+BP_SPLIT = pd.Timestamp(os.getenv("BP_SPLIT", "2024-01-01"), tz=NY)
+BP_HOLD = 20
+BP_TWIN_MIN = 10
+BP_SETUPS = {
+    "VF_WHIP": "BASE RULE: Vix Fix 100 break, other side 60+, first break",
+    "VF_ALL": "Every Vix Fix 100 break (reversal)",
+    "TL_DIP_FEAR": "Dip into a green line with fear 91+ (long)",
+    "TL_FAILPOP": "Failed pop under a red/pink line, greed 60-90 + fear 10-30 (short)",
+    "SQ_REL": "Squeeze release, traded the TTM direction",
+}
+BP_EXITS = [("x0", "hold 20 (the base)"), ("x1", "VWAP touch or 20"), ("x2", "stop past 5-candle extreme + hold 20"),
+            ("x3", "stop + VWAP touch or 20")]
+BP_TTM_ORDER = ["WITH you", "TURNING your way", "TURNING away", "AGAINST you"]
+BP_VWX_LAB = ["fading 4+ ATR (VWAP far ahead)", "fading 2-4", "fading 1-2", "within 1 ATR of VWAP", "chasing 1-2", "chasing 2-4",
+              "chasing 4+ ATR"]
+BP_LINE = {2: "strong YOUR color", 1: "fading your way", 0: "gray", -1: "fading against you", -2: "strong AGAINST you"}
+
+
+def bp_sim(ind, dend, sig, d, stop_px, use_vwap):
+    """one trade from the next candle's open: stop checked first inside a candle, then the VWAP touch (level = VWAP at the candle
+    before, filled at the level or a better open), else the close after BP_HOLD candles (or 15:55). Returns (ATR result, candles)."""
+    o, h, l, c, vw, a = ind["o"], ind["h"], ind["l"], ind["c"], ind["vwap"], ind["atr"]
+    e = sig + 1
+    p0, A = o[e], a[sig]
+    last = min(e + BP_HOLD - 1, dend[e])
+    for x in range(e, last + 1):
+        if stop_px is not None:
+            if d == 1 and l[x] <= stop_px:
+                return (min(stop_px, o[x]) - p0) / A, x - e + 1
+            if d == -1 and h[x] >= stop_px:
+                return (p0 - max(stop_px, o[x])) / A, x - e + 1
+        if use_vwap:
+            lv = vw[x - 1]
+            if d == 1 and h[x] >= lv:
+                return (max(lv, o[x]) - p0) / A, x - e + 1
+            if d == -1 and l[x] <= lv:
+                return (p0 - min(lv, o[x])) / A, x - e + 1
+    return d * (c[last] - p0) / A, last - e + 1
+
+
+def bp_chart(df, ind, sym, tf, rng):
+    ev, F, G, color, ef, dend = vs_events(df, ind)
+    mom, sq, _ = cl_ttm(df)
+    mom = np.asarray(mom, dtype=float)
+    momup = np.r_[False, mom[1:] > mom[:-1]]
+    sq = np.asarray(sq, dtype=bool)
+    o, h, l, c, a, hm, day, vw = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"], ind["vwap"]
+    n = len(c)
+    ok = (hm >= 935) & (hm <= 1530) & (a > 0) & np.r_[day[1:] == day[:-1], False]
+    # squeeze releases: last squeeze candle at i-1, none at i. Direction = TTM sign at the release candle.
+    runstart = np.arange(n)
+    for k in range(1, n):
+        if sq[k] and sq[k - 1] and day[k] == day[k - 1]:
+            runstart[k] = runstart[k - 1]
+    sqx = {}
+    for i in np.nonzero(ok & np.r_[False, sq[:-1] & ~sq[1:]])[0]:
+        if i < 2 or not np.isfinite(mom[i]) or mom[i] == 0 or day[i - 1] != day[i]:
+            continue
+        d = 1 if mom[i] > 0 else -1
+        s0 = runstart[i - 1]
+        ev.append(("SQ_REL", i, d))
+        sqx[i] = (i - s0, np.sign(d * (c[s0] - vw[s0])), np.sign(d * (c[i] - vw[i])))
+    rows = []
+    for setup, i, d in ev:
+        if setup not in BP_SETUPS:
+            continue
+        if i + 1 >= n or not (a[i] > 0) or dend[i + 1] < i + 1:
+            continue
+        m, mu = mom[i], momup[i]
+        if not np.isfinite(m):
+            raw, rel = "n/a", "n/a"
+        else:
+            raw = ("cyan" if mu else "dark blue") if m >= 0 else ("yellow" if mu else "red")
+            rel = {("cyan", 1): "WITH you", ("yellow", 1): "TURNING your way", ("dark blue", 1): "TURNING away",
+                   ("red", 1): "AGAINST you", ("red", -1): "WITH you", ("dark blue", -1): "TURNING your way",
+                   ("yellow", -1): "TURNING away", ("cyan", -1): "AGAINST you"}[(raw, d)]
+        X, Y = (F, G) if d == 1 else (G, F)      # X = the side that maxed for a reversal (fear for longs)
+        r = dict(setup=setup, sig=i, sym=sym, tf=tf, d=d, vwx=d * (c[i] - vw[i]) / a[i], ttm=raw, ttmrel=rel,
+                 line=int(color[i]) * d if np.isfinite(color[i]) else 0, hm=hm[i], me=X[i], oth=Y[i],
+                 sqlen=np.nan, sqst=np.nan, sqen=np.nan)
+        if setup == "SQ_REL":
+            r["sqlen"], r["sqst"], r["sqen"] = sqx[i]
+        if setup != "VF_ALL":
+            lo5 = l[max(0, i - 5):i + 1].min() if d == 1 else h[max(0, i - 5):i + 1].max()
+            ahead = d * (vw[i] - c[i]) > 0           # VWAP is in front of the trade (a fade)
+            r["stopd"] = abs(o[i + 1] - lo5) / a[i]
+            r["x0"], r["h0"] = bp_sim(ind, dend, i, d, None, False)
+            r["x1"], r["h1"] = bp_sim(ind, dend, i, d, None, ahead)
+            r["x2"], r["h2"] = bp_sim(ind, dend, i, d, lo5, False)
+            r["x3"], r["h3"] = bp_sim(ind, dend, i, d, lo5, ahead)
+            r["ahead"] = bool(ahead)
+        rows.append(r)
+    if not rows:
+        return pd.DataFrame(), pd.DataFrame()
+    E = pd.DataFrame(rows)
+    R, cl, _ = ot_outcomes(ind, dend, E["sig"].to_numpy(), E["d"].to_numpy())
+    E["k20"] = R[:, OT_K.index(20)]
+    E["clean"] = cl
+    ts = df.index[E["sig"].to_numpy()]
+    E["ts"] = ts
+    E["date"], E["year"], E["per"] = ts.date, ts.year, np.where(ts < BP_SPLIT, "tr", "te")
+    pool = np.nonzero(ok)[0]
+    pool = pool[(pool + 1 < n)]
+    pool = pool[dend[pool + 1] >= pool + 1]
+    ridx = np.sort(rng.choice(pool, size=min(len(pool), int(os.getenv("BP_RANDOM", "20000"))), replace=False))
+    B = []
+    for dv in (1, -1):
+        R2, cl2, _ = ot_outcomes(ind, dend, ridx, np.full(len(ridx), dv))
+        b_ = pd.DataFrame({"k20": R2[:, OT_K.index(20)], "clean": cl2})
+        b_["per"] = np.where(df.index[ridx] < BP_SPLIT, "tr", "te")
+        b_["sym"], b_["tf"], b_["d"] = sym, tf, dv
+        B.append(b_)
+    return E, pd.concat(B, ignore_index=True)
+
+
+def bp_twin(E):
+    """label every event by what the OTHER ticker's Vix Fix did in the 10 minutes before (same chart, breaks only)"""
+    E["twin"] = "only one ticker loaded"
+    syms = sorted(E["sym"].unique())
+    if len(syms) < 2:
+        return E
+    lab = np.full(len(E), "twin quiet", dtype=object)
+    win = BP_TWIN_MIN * 60.0
+    t00 = pd.Timestamp("2000-01-01", tz=NY)
+    tsi = (E["ts"] - t00).dt.total_seconds().to_numpy()   # seconds (unit-safe)
+    for tf in E["tf"].unique():
+        for sa in syms:
+            for sb in syms:
+                if sa == sb:
+                    continue
+                ia = np.nonzero(((E["tf"] == tf) & (E["sym"] == sa)).to_numpy())[0]
+                vb = E[(E["tf"] == tf) & (E["sym"] == sb) & (E["setup"] == "VF_ALL")]
+                if not len(ia) or not len(vb):
+                    continue
+                tb = (vb["ts"] - t00).dt.total_seconds().to_numpy()
+                db = vb["d"].to_numpy()
+                order = np.argsort(tb)
+                tb, db = tb[order], db[order]
+                lo = np.searchsorted(tb, tsi[ia] - win, side="left")
+                hi = np.searchsorted(tb, tsi[ia], side="right")
+                da = E["d"].to_numpy()[ia]
+                for q in range(len(ia)):
+                    if hi[q] <= lo[q]:
+                        continue
+                    seg = db[lo[q]:hi[q]]
+                    same, opp = (seg == da[q]).any(), (seg == -da[q]).any()
+                    lab[ia[q]] = ("twin fired BOTH ways" if same and opp else "twin fired the SAME way" if same
+                                  else "twin fired the OPPOSITE way")
+    E["twin"] = lab
+    return E
+
+
+def bp_label(E):
+    E["VWX"] = ot_bucket(E["vwx"], [-999, -4, -2, -1, 1, 2, 4, 999], BP_VWX_LAB)
+    E["TTM"] = E["ttmrel"]
+    E["LINE"] = E["line"].map(BP_LINE).fillna("gray")
+    E["TOD"] = ot_bucket(E["hm"], [0, 1000, 1130, 1400, 2400], ["9:35-10:00", "10:00-11:30", "11:30-14:00", "14:00-15:30"])
+    E["SQLEN"] = ot_bucket(E["sqlen"].fillna(-1), [0, 6, 12, 25, 99999], ["squeeze 1-5 candles", "6-11", "12-24", "25+"])
+    st, en = E["sqst"].fillna(0), E["sqen"].fillna(0)
+    E["SQX"] = np.select([(st < 0) & (en > 0), (st > 0) & (en > 0), (st < 0) & (en < 0), (st > 0) & (en < 0)],
+                         ["CROSSED VWAP: started wrong side, fired on your side", "your side of VWAP the whole time",
+                          "wrong side the whole time (fired toward VWAP)", "started your side, fired back toward VWAP"], "on VWAP")
+    E["VFW"] = ot_bucket(E["oth"], [-1, 30, 60, 90, 101], ["under 30", "30-60", "60-90", "90+"])  # SQ_REL: greed for longs, fear for shorts
+    return E
+
+
+def blueprint_main():
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(os.getenv("BP_START", "2020-01-01")).replace(tzinfo=timezone.utc)
+    test = os.getenv("TEST", "") == "1"
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(31)
+    EV, BS = [], []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1, feed = fake_1m(sym, start, end) if test else fetch_1m(sym, start, end)
+        for tf in BP_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            E, B = bp_chart(df, ind, sym, tf, rng)
+            EV.append(E)
+            BS.append(B)
+            print(f"  {sym} {tf}m: {len(E)} events ({time.time() - t0:.0f}s)", flush=True)
+        del df1
+    E = pd.concat(EV, ignore_index=True)
+    B = pd.concat(BS, ignore_index=True)
+    base = B.groupby(["sym", "tf", "d", "per"])[["k20", "clean"]].mean()
+    adj = E[["sym", "tf", "d", "per"]].join(base, on=["sym", "tf", "d", "per"])
+    E["a_k20"] = E["k20"] - adj["k20"]
+    E["a_clean"] = E["clean"] - adj["clean"]
+    E = bp_twin(E)
+    E = bp_label(E)
+    yrs = sorted(E["year"].unique())
+
+    def score(g, col="a_k20"):
+        out = {}
+        for p in ("tr", "te"):
+            x = g[g["per"] == p]
+            y = x[col].dropna()
+            if len(y) < 30:
+                out[p] = (np.nan, np.nan, len(y))
+                continue
+            m = y.mean()
+            cs = (y - m).groupby(x.loc[y.index, "date"]).sum()
+            se = np.sqrt((cs ** 2).sum()) / len(y)
+            out[p] = (m, m / se if se > 0 and len(cs) > 2 else np.nan, len(y))
+        return out
+
+    def real(g):
+        s = score(g)
+        if any(np.isnan(s[p][0]) for p in ("tr", "te")):
+            return False
+        ys = g.groupby("year")["a_k20"].mean()
+        sy = g.groupby("sym")["a_k20"].mean()
+        return (s["tr"][0] >= 0.05 and s["te"][0] >= 0.05 and s["tr"][1] >= 2 and s["te"][1] >= 2 and (sy > 0).all()
+                and (ys < 0).sum() <= 1 and len(g) >= 200)
+
+    def f(sc, p):
+        m, t, _ = sc[p]
+        return "-" if np.isnan(m) else (f"{m:+.3f}" if np.isnan(t) else f"{m:+.3f} ({t:.1f})")
+
+    HEAD = ("| Group | Trades | vs random 2020-23 (t) | **vs random 2024-now (t)** | Raw avg ATR | Green % | +1 ATR before -1, pts vs random "
+            "| 2026 raw avg ATR (trades) | Years + | |\n|---|---|---|---|---|---|---|---|---|---|")
+
+    def row(name, g):
+        if len(g) == 0:
+            return f"| {name} | 0 | - | - | - | - | - | - | - | |"
+        s = score(g)
+        ys = g.groupby("year")["a_k20"].mean()
+        y26 = g[g["year"] == 2026]["k20"]
+        c26 = f"{y26.mean():+.2f} ({len(y26)})" if len(y26) >= 10 else f"- ({len(y26)})"
+        return (f"| {name} | {len(g)} | {f(s, 'tr')} | **{f(s, 'te')}** | {g['k20'].mean():+.3f} | {100 * (g['k20'] > 0).mean():.0f}% | "
+                f"{100 * g['a_clean'].mean():+.1f} | {c26} | {int((ys > 0).sum())}/{len(ys)} | {'✅' if real(g) else ''} |")
+
+    def better(gb, gf):
+        """did the filter beat the base in BOTH periods (vs random, ATR)?"""
+        sb, sf = score(gb), score(gf)
+        if any(np.isnan(sf[p][0]) or np.isnan(sb[p][0]) for p in ("tr", "te")):
+            return "too few trades", np.nan, np.nan
+        dtr, dte = sf["tr"][0] - sb["tr"][0], sf["te"][0] - sb["te"][0]
+        v = ("HELPED in both periods" if dtr > 0.02 and dte > 0.02 else "HURT in both periods" if dtr < -0.02 and dte < -0.02
+             else "mixed / no real change")
+        return v, dtr, dte
+
+    EHEAD = ("| Exit | Trades | Avg ATR | Median | Green % | Avg candles held | vs hold 20, 2020-23 (t) | **vs hold 20, 2024-now (t)** "
+             "| Years better than hold 20 |\n|---|---|---|---|---|---|---|---|---|")
+
+    def exit_rows(g):
+        out = []
+        for key, nm in BP_EXITS:
+            x = g.dropna(subset=[key])
+            if not len(x):
+                continue
+            g2 = x.assign(_d=x[key] - x["x0"])
+            sd = score(g2, "_d")
+            yb = g2.groupby("year")["_d"].mean()
+            out.append(f"| {nm} | {len(x)} | {x[key].mean():+.3f} | {x[key].median():+.3f} | {100 * (x[key] > 0).mean():.0f}% | "
+                       f"{x['h' + key[1]].mean():.1f} | {f(sd, 'tr') if key != 'x0' else '-'} | "
+                       f"**{f(sd, 'te') if key != 'x0' else '-'}** | {int((yb > 0).sum()) if key != 'x0' else '-'}/{len(yb)} |")
+        return out
+
+    md = [f"# THE BLUEPRINT, TESTED - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, {', '.join(SYMBOLS)}, {', '.join(f'{t}m' for t in BP_TFS)}. DATA ONLY. "
+          f"Runtime {(time.time() - t0) / 60:.0f} min.",
+          "Every check from the study deck's last slide, on every year. **Trade** = signal candle's close (9:35-15:30), entry = next "
+          "open, exit = the close 20 candles later (or 15:55) unless an exit section says otherwise. **vs random** = ATR result minus "
+          "random entries the SAME way on the same chart and period (0 = no edge). **t** = edge / noise by day (2+ = unlikely luck). "
+          "**+1 ATR before -1** = points more often than random (the options-style number). **✅** = +0.05 ATR vs random in BOTH "
+          "2020-23 and 2024-now with t 2+ in both, SPY and QQQ both positive, every year but one, 200+ trades. **Chasing** = price "
+          "stretched from VWAP in YOUR direction (long above VWAP); **fading** = stretched against you (long below VWAP). **TTM** is "
+          "read on the signal candle, so it is known before the entry.", ""]
+    one = E[E["tf"] == BP_TFS[0]]
+    W = one[one["setup"] == "VF_WHIP"]
+    ttm_ok = W["TTM"].isin(["WITH you", "TURNING your way"])
+    ladder = [("Base rule (checks 1 + 2)", W),
+              ("+ band: not chasing 4+ ATR", W[W["vwx"] < 4]),
+              ("+ band: not chasing 3+ ATR", W[W["vwx"] < 3]),
+              ("+ band: not chasing 2+ ATR", W[W["vwx"] < 2]),
+              ("+ fading only (VWAP 1+ ATR ahead)", W[W["vwx"] <= -1]),
+              ("+ TTM with you or turning your way", W[ttm_ok]),
+              ("+ TTM NOT against you", W[W["TTM"] != "AGAINST you"]),
+              ("**+ band 4 + TTM with/turning (THE BLUEPRINT)**", W[(W["vwx"] < 4) & ttm_ok])]
+    verdicts = {nm: better(W, g) for nm, g in ladder[1:]}
+    md += [f"## 1) The blueprint ladder - {BP_TFS[0]}m, base rule plus each new check", HEAD]
+    md += [row(nm, g) for nm, g in ladder]
+    md += ["", "| Check added | Verdict vs the base (edge change 2020-23 / 2024-now, ATR) |", "|---|---|"]
+    md += [f"| {nm} | {v} ({a_:+.3f} / {b_:+.3f}) |" for nm, (v, a_, b_) in verdicts.items()]
+    md += ["", f"### 1b) Exits on the base rule ({BP_TFS[0]}m) - same trades, only the exit changes", EHEAD] + exit_rows(W)
+    WA = W[W["ahead"] == True]
+    md += ["", f"### 1c) Exits on the FADES only (VWAP ahead of you at the signal, {len(WA)} trades) - where a VWAP target exists",
+           EHEAD] + exit_rows(WA)
+    BPF = W[(W["vwx"] < 4) & ttm_ok]
+    md += ["", "### 1d) Exits on THE BLUEPRINT (band 4 + TTM)", EHEAD] + exit_rows(BPF)
+    md += ["", f"### 1e) Every year, {BP_TFS[0]}m (raw ATR, hold 20 / vs random)",
+           "| Group | " + " | ".join(str(y) for y in yrs) + " |", "|---|" + "---|" * len(yrs)]
+    for nm, g in (("Base rule", W), ("The blueprint", BPF)):
+        cells = []
+        for y in yrs:
+            gy = g[g["year"] == y]
+            cells.append(f"{gy['k20'].mean():+.2f} / {gy['a_k20'].mean():+.2f} ({len(gy)})" if len(gy) >= 10 else f"- ({len(gy)})")
+        md.append(f"| {nm} | " + " | ".join(cells) + " |")
+    # ---- checks 3 / 4 / extras for every setup
+    for sk in ("VF_WHIP", "VF_ALL", "TL_DIP_FEAR", "TL_FAILPOP"):
+        G0 = one[one["setup"] == sk]
+        if len(G0) < 50:
+            continue
+        md += ["", f"## 2) {BP_SETUPS[sk]} - {BP_TFS[0]}m ({len(G0)} trades), each check one at a time", HEAD, row("All", G0)]
+        for var, title, order in (("VWX", "Check 3: price vs VWAP (ATR)", BP_VWX_LAB), ("TTM", "Check 4: TTM at the signal", BP_TTM_ORDER),
+                                  ("LINE", "Line color at the signal", list(BP_LINE.values())),
+                                  ("TOD", "Time of day", None), ("twin", "Idea 5: the twin (other ticker's Vix Fix, last 10 min)", None)):
+            md.append(f"| ***{title}*** | | | | | | | | | |")
+            labs = order if order else sorted(G0[var].dropna().unique())
+            for lb in labs:
+                g = G0[G0[var] == lb]
+                if len(g) >= 30:
+                    md.append(row(lb, g))
+        if sk != "VF_ALL":
+            md += ["", f"### Exits - {BP_SETUPS[sk]}", EHEAD] + exit_rows(G0)
+        # TTM x VWAP band 2-way
+        md += ["", f"### TTM x VWAP band - {BP_SETUPS[sk]} (vs random 2020-23 / 2024-now, trades)",
+               "| TTM \\ band | fading 2+ | fading 1-2 / within 1 | chasing 1-2 | chasing 2+ |", "|---|---|---|---|---|"]
+        bands = [("fading 2+", G0["vwx"] <= -2), ("mid", (G0["vwx"] > -2) & (G0["vwx"] < 1)),
+                 ("chasing 1-2", (G0["vwx"] >= 1) & (G0["vwx"] < 2)), ("chasing 2+", G0["vwx"] >= 2)]
+        for tl in BP_TTM_ORDER:
+            cells = []
+            for _, bm in bands:
+                g = G0[bm & (G0["TTM"] == tl)]
+                s = score(g)
+                cells.append(f"{f(s, 'tr')} / {f(s, 'te')} ({len(g)})" if len(g) >= 30 else f"- ({len(g)})")
+            md.append(f"| {tl} | " + " | ".join(cells) + " |")
+    # ---- idea 4: squeeze release
+    S = one[one["setup"] == "SQ_REL"]
+    if len(S) >= 50:
+        md += ["", f"## 3) Idea 4: SQUEEZE RELEASE traded the TTM direction - {BP_TFS[0]}m ({len(S)} trades)", HEAD, row("Every release", S)]
+        for var, title in (("SQX", "Where it fired vs VWAP"), ("SQLEN", "Squeeze length"),
+                           ("VFW", "Vix Fix pane IN the trade's direction (fear for shorts, greed for longs)"), ("TTM", "TTM at release"),
+                           ("VWX", "Price vs VWAP at release")):
+            md.append(f"| ***{title}*** | | | | | | | | | |")
+            for lb, g in S.groupby(var):
+                if len(g) >= 30:
+                    md.append(row(lb, g))
+        cx = S[S["SQX"].str.startswith("CROSSED")]
+        md.append(f"| ***Crossed VWAP + Vix Fix in your direction 60+*** | | | | | | | | | |")
+        md.append(row("crossed + pane 60+", cx[cx["VFW"].isin(["60-90", "90+"])]))
+        md += ["", "### Exits - squeeze release", EHEAD] + exit_rows(S)
+    # ---- other charts
+    md += ["", "## 4) Same ladder on the other charts (is it a 1m thing?)", HEAD]
+    for tf in BP_TFS:
+        Wt = E[(E["tf"] == tf) & (E["setup"] == "VF_WHIP")]
+        tok = Wt["TTM"].isin(["WITH you", "TURNING your way"])
+        md += [row(f"{tf}m base", Wt), row(f"{tf}m + band 4", Wt[Wt["vwx"] < 4]), row(f"{tf}m + TTM with/turning", Wt[tok]),
+               row(f"{tf}m THE BLUEPRINT", Wt[(Wt["vwx"] < 4) & tok])]
+    # ---- the answer
+    vb, vt, vbt = verdicts["+ band: not chasing 4+ ATR"], verdicts["+ TTM with you or turning your way"], \
+        verdicts["**+ band 4 + TTM with/turning (THE BLUEPRINT)**"]
+    sd = score(WA.assign(_d=WA["x1"] - WA["x0"]), "_d") if len(WA) else {"tr": (np.nan,) * 3, "te": (np.nan,) * 3}
+    ss = score(W.assign(_d=W["x2"] - W["x0"]), "_d")
+    md += ["", "## The answer in 30 seconds",
+           f"- Base rule {BP_TFS[0]}m: {row('base', W).split('|')[3].strip()} vs random 2020-23, {row('base', W).split('|')[4].strip()} 2024-now.",
+           f"- Check 3 (skip chasing 4+ ATR): **{vb[0]}**.",
+           f"- Check 4 (TTM with you / turning your way): **{vt[0]}**.",
+           f"- Both together (the blueprint): **{vbt[0]}** - real edge flag: {'✅' if real(BPF) else 'no'}.",
+           f"- Check 6 (VWAP touch exit on fades) vs hold 20: {f(sd, 'tr')} / {f(sd, 'te')} ATR per trade (2020-23 / 2024-now).",
+           f"- The stop past the 5-candle extreme vs no stop: {f(ss, 'tr')} / {f(ss, 'te')} ATR per trade.",
+           "- A check only goes in the bot if it HELPED in both periods. Mixed = noise from 7 hand-picked charts.",
+           "", "**Luck check:** many splits are shown; any single row can look good by chance. The ladder in section 1 was "
+           "written down before this run (from the deck), so it is the honest test."]
+    text = "\n".join(md + [""])
+    print("\n" + text)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for path in (f"{OUT}/blueprint_{stamp}.md", f"{OUT}/blueprint_latest.md"):
+        with open(path, "w") as fh:
+            fh.write(text + "\n")
+    keep = E[E["setup"].isin(["VF_WHIP", "TL_DIP_FEAR", "TL_FAILPOP"])].drop(columns=["ts"])
+    keep.round(4).to_csv(f"{OUT}/blueprint_events.csv", index=False)
+    sm_ = os.getenv("GITHUB_STEP_SUMMARY")
+    if sm_:
+        with open(sm_, "a") as fh:
+            fh.write(text + "\n")
+
+
 if __name__ == "__main__":
-    if MODE == "visual":
+    if MODE == "blueprint":
+        blueprint_main()
+    elif MODE == "visual":
         visual_main()
     elif MODE == "colors":
         colors_main()
