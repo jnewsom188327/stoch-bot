@@ -34,6 +34,12 @@ FOR EVERY TICKER, EVERY SCAN:
            tightened from the log). Contract: 0-1 DTE, $0.40-$0.80, delta 0.15+, target 3 x the 1-minute ATR. Tracked
            exactly like the other FIRES (+ the 20-minute mark = the backtest's exit). Every signal, fired or not, goes to
            gex_rules.csv with the reason.
+  v3 (after the Oct 28 grade): a fire needs its contract worth +20% at the target (+10% for the 1m rules); FLOW SURGE
+           fires only when price moved with the flow (last 15 min) and sits on the right side of EMA 20; every fire also
+           records what a +40% take-profit and selling at the target would have paid (tp40_pct, sell_at_target_pct) and
+           three trailing exits off the real bid (lock_pct: +15% then never below +5%; trail_pct: +20% then 20% off the best,
+           floor break-even; tpbe_pct: +40% or break-even after +15%);
+           the 1m AGREE FLIP is logged (never traded); the board shows the last 1m check and any 1m error.
   GREEKS : if the free feed leaves out greeks on a contract, delta / gamma / theta are worked out (Black-Scholes) from
            its implied volatility, or from its own mid price. The board says how many were filled in.
 LOGS (committed to the repo):
@@ -100,6 +106,18 @@ RULE_TGT = 3.0               # target = this x the 1-minute ATR
 RULE_HOLD = 20               # minutes (the backtest's exit = 20 candles later)
 RULE_LATE = 3                # a signal first seen more than this many minutes after its candle closed is logged, not fired
 RULES = "gex_rules.csv"
+# ===== v3 fixes (after the Oct 28 grade) =====
+PICK_MIN_JUICE = 0.20        # GEX fires: the contract must be worth at least +20% if price reaches the target
+RULE_MIN_JUICE = 0.10        # 1m rule fires: at least +10% at the (small, 3 x 1m ATR) target - never a contract that loses when right
+SURGE_CONFIRM = 3            # FLOW SURGE fires only if price moved WITH the flow over the last 3 five-minute candles + is on the right side of EMA 20
+TP_PCT = 0.40                # take-profit tracking: what +40% (and selling at the target) would have paid - graded, not traded
+# trailing exits, graded on every fire from the real bid every 30 s (never traded):
+#   LOCK  = once it is +15% green, sell if it falls back to +5% (never let a green trade go red)
+#   TRAIL = once it is +20% green, sell if the bid drops 20% from its best (floor: break-even)
+#   TPBE  = sell at +40%, or at break-even once it has been +15%
+LOCK_ARM, LOCK_FLOOR = 0.15, 0.05
+TRAIL_ARM, TRAIL_GIVE = 0.20, 0.20
+AGREE_LOG = True             # log the 1m AGREE FLIP (fear peak -> TTM up + agree up + squeeze fired + green line) - log only, never fires
 
 ET = ZoneInfo("America/New_York")
 KEY = os.getenv("ALPACA_KEY", "").strip()
@@ -429,7 +447,7 @@ def target_of(r, bias, atr5):
     return float(spot + bias * PICK_ATR * atr5), "2.5 ATR"
 
 
-def pick_contract(crow, spot, bias, target, dte=None, dmin=None, hold=None):
+def pick_contract(crow, spot, bias, target, dte=None, dmin=None, hold=None, minj=None):
     """among calls (bias +1) or puts (-1), 0-7 DTE, ask $0.40-$0.80, delta 0.20+, tight enough and traded enough:
     the one with the biggest % gain if price reaches the target in about 30 minutes
     (value at the target = mid + delta x move + 1/2 gamma x move^2 + 30 minutes of time decay, sold at the bid)
@@ -466,6 +484,10 @@ def pick_contract(crow, spot, bias, target, dte=None, dmin=None, hold=None):
             best = dict(o, est=sell, juice=juice)
     PICK_WHY[0] = (f"{why['side']} {'calls' if bias == 1 else 'puts'} 0-{dte}DTE > {why['price']} priced {PICK_MIN:.2f}-{PICK_MAX:.2f} > "
                    f"{why['delta']} delta {dmin}+ > {why['spread']} spread ok > {why['liq']} liquid")
+    minj = PICK_MIN_JUICE if minj is None else minj
+    if best is not None and best["juice"] < minj:
+        PICK_WHY[0] += f" > best one only {best['juice'] * 100:+.0f}% at the target (needs +{minj * 100:.0f}%)"
+        return None
     return best
 
 
@@ -647,12 +669,19 @@ def write_board(rows, prints, t, delay, state=None):
         L += [f"## 1m RULES on SPY / QQQ - loose ({len(rlog)} signals today, last 10)",
               "Whipsaw (R1, +R2 TTM with/turning, +R5 near VWAP, +R6 both) and failed pop (R3, +R4 TTM not turning away). "
               "Every signal fires if a 0-1 DTE contract qualifies. Full list: gex_rules.csv."]
+        hb = (state or {}).get("rule_hb", {})
+        if hb:
+            L.append(f"Last 1m check {hb.get('t', '')[11:19]} ET, last candle " + ", ".join(f"{k} {v}" for k, v in hb.get("last", {}).items())
+                     + (f" | **ERROR: {hb['err']}**" if hb.get("err") else " | no errors"))
         if rlog:
             L += ["| Candle | Ticker | Rule | Tags | Side | TTM | Result |", "|---|---|---|---|---|---|---|"]
             for g in reversed(rlog[-10:]):
-                res = f"**FIRE** {g['contract']}" if g["fired"] else g["why"][:90]
+                res = f"**FIRE** {g['contract']}" if g["fired"] == "FIRE" else ("logged (agree flip)" if g["fired"] == "LOG" else g["why"][:90])
                 L.append(f"| {g['candle']} | {g['sym']} | {g['rule']} | {g['tags']} | {g['side']} | {g['ttm']} | {res} |")
         L.append("")
+    bl = (state or {}).get("blocked", [])
+    if bl:
+        L += [f"## Flow surges NOT fired - price disagreed ({len(bl)} today, last 5)"] + [f"- {b['t'][11:16]} {b['sym']} {b['side']}: {b['why']}" for b in reversed(bl[-5:])] + [""]
     L += ["| # | Ticker | Price | Setup | Bias | Score | Best contract for the move | Gamma | Flip | Call wall | Put wall | Flow today | Big prints 15m | Trend |",
           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for i, r in enumerate(rows, 1):
@@ -710,7 +739,7 @@ def load_state(today):
 
 
 def save_state(s):
-    slim = {"day": s["day"], "flow_delay": s.get("flow_delay", 0), "fires": s.get("fires", []), "last_fire": s.get("last_fire", {}),
+    slim = {"day": s["day"], "flow_delay": s.get("flow_delay", 0), "fires": s.get("fires", []), "last_fire": s.get("last_fire", {}), "blocked": s.get("blocked", []), "rule_hb": s.get("rule_hb", {}),
             "rule_seen": s.get("rule_seen", {}), "rule_log": s.get("rule_log", [])[-30:],
             "tickers": {}}
     for k, v in s["tickers"].items():
@@ -733,12 +762,27 @@ def fire_check(rows, bars, state, t):
         d = d[d.index >= pd.Timestamp(f["t_entry"])]
         if len(d) and ((f["bias"] == 1 and d["high"].max() >= f["target"]) or (f["bias"] == -1 and d["low"].min() <= f["target"])):
             f["target_hit_min"] = round((t - datetime.fromisoformat(f["t_entry"])).total_seconds() / 60)
+            f["pct_at_target"] = round((f["last_bid"] / f["entry_ask"] - 1) * 100, 1) if f["entry_ask"] else None
     for r in rows:
         if r["bias"] == 0 or r["score"] < FIRE_MIN or not r["pick"] or r["setup"].startswith("TREND (flow not") or hhmm(t) > 1530:
             continue
         key = f"{r['sym']}|{r['bias']}"
         if key in last and (t - datetime.fromisoformat(last[key])).total_seconds() < FIRE_COOL * 60:
             continue
+        if r["setup"].startswith("FLOW SURGE"):
+            d = bars.get(r["sym"])
+            mv = float(d["close"].iloc[-1] - d["close"].iloc[-1 - SURGE_CONFIRM]) if d is not None and len(d) > SURGE_CONFIRM else 0.0
+            side_ok = (r["above_ema20"] == 1) if r["bias"] == 1 else (r["above_ema20"] == 0)
+            if mv * r["bias"] <= 0 or not side_ok:
+                bl = state.setdefault("blocked", [])
+                key2 = f"{r['sym']}|{r['bias']}|{t:%H%M}"
+                if not any(b["key"] == key2 for b in bl):
+                    bl.append(dict(key=key2, t=t.isoformat(timespec="seconds"), sym=r["sym"], side="CALLS" if r["bias"] == 1 else "PUTS",
+                                   setup=r["setup"], why=(f"price {mv:+.2f} over the last {SURGE_CONFIRM * 5} min" if mv * r["bias"] <= 0 else "")
+                                   + ("" if side_ok else (" / " if mv * r["bias"] <= 0 else "") + ("under" if r["bias"] == 1 else "over") + " EMA 20")
+                                   + " - flow says one way, price says the other"))
+                    del bl[:-40]
+                continue
         last[key] = t.isoformat()
         f = dict(id=f"{r['sym']}-{t:%H%M}", t_entry=t.isoformat(timespec="seconds"), sym=r["sym"], bias=r["bias"],
                  side="CALLS" if r["bias"] == 1 else "PUTS", setup=r["setup"], score=r["score"], contract=r["pick"],
@@ -773,6 +817,16 @@ def track_fires(oc, state, t):
             for k, lvl_ in (("hit25_min", 0.25), ("hit50_min", 0.5), ("hit100_min", 1.0)):
                 if f[k] is None and pct >= lvl_:
                     f[k] = round(el)
+            if f.get("pct_at_tp") is None and pct >= TP_PCT:
+                f["pct_at_tp"], f["tp_min"] = round(pct * 100, 1), round(el)
+            sx = f.setdefault("sx", {})
+            best_ = f["max_bid"] / f["entry_ask"] - 1
+            if "lock" not in sx and best_ >= LOCK_ARM and pct <= LOCK_FLOOR:
+                sx["lock"] = [round(pct * 100, 1), round(el)]
+            if "trail" not in sx and best_ >= TRAIL_ARM and (bid <= f["max_bid"] * (1 - TRAIL_GIVE) or pct <= 0):
+                sx["trail"] = [round(pct * 100, 1), round(el)]
+            if "tpbe" not in sx and (pct >= TP_PCT or (best_ >= LOCK_ARM and pct <= 0)):
+                sx["tpbe"] = [round(pct * 100, 1), round(el)]
             if f["down30_min"] is None and pct <= -0.30:
                 f["down30_min"] = round(el)
         for k, m_ in (("bid_15", 15), ("bid_20", 20), ("bid_30", 30), ("bid_60", 60)):
@@ -792,7 +846,11 @@ def track_fires(oc, state, t):
                          entry_ask=a, delta=f["delta"], spot=f["spot"], target=f["target"], target_kind=f["target_kind"],
                          est_pct=f["est_juice_pct"], pct_15=pc(f["bid_15"]), pct_20=pc(f.get("bid_20")), pct_30=pc(f["bid_30"]), pct_60=pc(f["bid_60"]),
                          best_pct=pc(f["max_bid"]), best_at_min=f["max_min"], worst_pct=pc(f["min_bid"]), hit25_min=f["hit25_min"],
-                         hit50_min=f["hit50_min"], hit100_min=f["hit100_min"], down30_min=f["down30_min"], target_hit_min=f["target_hit_min"]))
+                         hit50_min=f["hit50_min"], hit100_min=f["hit100_min"], down30_min=f["down30_min"], target_hit_min=f["target_hit_min"],
+                         tp40_pct=f["pct_at_tp"] if f.get("pct_at_tp") is not None else pc(f["bid_60"]), tp40_min=f.get("tp_min"),
+                         sell_at_target_pct=f["pct_at_target"] if f.get("pct_at_target") is not None else pc(f["bid_60"]),
+                         lock_pct=f.get("sx", {}).get("lock", [pc(f["bid_60"])])[0], trail_pct=f.get("sx", {}).get("trail", [pc(f["bid_60"])])[0],
+                         tpbe_pct=f.get("sx", {}).get("tpbe", [pc(f["bid_60"])])[0]))
         log(f"FIRE DONE {f['id']} {f['contract']}: 15m {pc(f['bid_15'])}% | 30m {pc(f['bid_30'])}% | best {pc(f['max_bid'])}% at {f['max_min']}m")
     append_csv(FIRES, rows)
 
@@ -894,20 +952,53 @@ def rule_pick(tc, oc, state, sym, e, t):
     _, _, _, crow, _, filled = parse_chain(chain, day.get("oi", {}), today, spot, t)
     target = spot + e["d"] * RULE_TGT * e["atr"]
     PICK_WHY[0] = ""
-    pk = pick_contract(crow, spot, e["d"], target, dte=RULE_DTE, dmin=RULE_DELTA, hold=RULE_HOLD)
+    pk = pick_contract(crow, spot, e["d"], target, dte=RULE_DTE, dmin=RULE_DELTA, hold=RULE_HOLD, minj=RULE_MIN_JUICE)
     why = PICK_WHY[0] + (f" ({filled} greeks worked out here)" if filled else "")
     return pk, target, why
+
+
+def agree_log(d, sym, seen, rlog, t):
+    """your AGREE FLIP on the 1m chart (fear peak 95+ -> within 20 candles TTM turns up + Vix Fix / TTM agree up + squeeze fired
+    in the last 5 + line green; mirror for puts) - same code as futures_flush.py. LOG ONLY: written to gex_rules.csv, never fired."""
+    import futures_flush as FF
+    pad = d.iloc[[-1]].copy()
+    pad.index = pad.index + pd.Timedelta(minutes=1)
+    df = pd.concat([d, pad])
+    S = FF.build(df)
+    pk, w, cu, cd = FF.variants(S)["FULL p95 w20"]
+    out, key = [], sym + "|agree"
+    prev = seen.get(key, "")
+    for side, cond in ((1, cu), (-1, cd)):
+        for i in FF.detect(S, pk, w, cond, side, 935, 1530):
+            if i >= len(d):
+                continue
+            ts = d.index[i]
+            if ts.date() != t.date() or ts.isoformat() <= prev:
+                continue
+            seen[key] = max(seen.get(key, ""), ts.isoformat())
+            row = dict(t=t.isoformat(timespec="seconds"), candle=ts.strftime("%H:%M"), sym=sym, rule="1m AGREE FLIP", tags="FULL",
+                       side="CALLS" if side == 1 else "PUTS", close=round(float(d["close"].iloc[i]), 2), atr1=round(float(S["atr"][i]), 3),
+                       ttm="up" if side == 1 else "down", vwap_atr="", fear=round(float(S["F"][i])), greed=round(float(S["G"][i])),
+                       seen_after_min=round((t - (ts + pd.Timedelta(minutes=1))).total_seconds() / 60, 1), fired="LOG", contract="",
+                       ask="", delta="", target="", why="log only - your agree flip, graded later, never traded")
+            out.append(row)
+            rlog.append({k: row[k] for k in ("candle", "sym", "rule", "tags", "side", "ttm", "fired", "contract", "why")})
+    return out
 
 
 def rule_check(tc, dc, oc, state, t):
     """runs every minute: new 1m rule signals on SPY / QQQ -> FIRE (loose). Returns how many fired."""
     if not RULE_ON or hhmm(t) < 936 or hhmm(t) > 1532:
         return 0
+    hb = state.setdefault("rule_hb", {})
+    hb.update(t=t.isoformat(timespec="seconds"), err="")
     try:
         bars1 = fetch_1m(dc, RULE_SYMS)
     except Exception as ex:  # noqa: BLE001
         note_err("1m candles", ex)
+        hb["err"] = f"1m candles: {str(ex)[:120]}"
         return 0
+    hb["last"] = {s_: f"{bars1[s_].index[-1]:%H:%M}" for s_ in RULE_SYMS if s_ in bars1 and len(bars1[s_])}
     seen = state.setdefault("rule_seen", {})
     last = state.setdefault("last_fire", {})
     fires = state.setdefault("fires", [])
@@ -921,7 +1012,13 @@ def rule_check(tc, dc, oc, state, t):
             evs = rule_events(d)
         except Exception as ex:  # noqa: BLE001
             note_err(f"{sym} 1m rules", ex)
+            hb["err"] = f"{sym} 1m rules: {str(ex)[:120]}"
             continue
+        if AGREE_LOG:
+            try:
+                rows += agree_log(d, sym, seen, rlog, t)
+            except Exception as ex:  # noqa: BLE001
+                hb["err"] = f"{sym} agree flip: {str(ex)[:120]}"
         prev = seen.get(sym, "")
         for e in evs:
             ts = e["t"].isoformat()
