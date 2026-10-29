@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "mag7").strip().lower() or "mag7"
+MODE = os.getenv("MODE", "panes").strip().lower() or "panes"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -17000,7 +17000,343 @@ def mag7_main():
             fh.write(text + "\n")
 
 
+
+# ================================================================ PANE BACKGROUND COLORS (MODE=panes) - VIX FIX RAINBOW + TTM FLOW
+# Your two bottom panes, colored the same way the indicators color them (same math as the AGREE DOTS port above):
+#   VIX FIX RAINBOW alone: GREEN = up flow (greed avg rising AND fear avg falling, EMA 10 of the 0-100 bars), RED = down flow,
+#                          GRAY = neither (both averages moving the same way).
+#   TTM FLOW alone:        GREEN = TTM bars rising 2 in a row, RED = falling 2 in a row (it holds its color in between, so TTM by
+#                          itself is never gray - it flips straight from one to the other).
+#   BOTH AGREE (the background you see on both panes): GREEN = TTM green AND Vix Fix green, RED = both red, GRAY = they disagree.
+# For each one: how long every color lasts, how far price moves during it, what each color turns into, and the big one -
+#   RED -> GRAY: from the close of the first gray candle, how much LOWER price still goes before GREEN shows (and where price is
+#                when green shows). GREEN -> GRAY is the mirror: how much HIGHER it still goes before RED shows.
+# Then AGREE vs ALONE: every TTM x Vix Fix combination, what price does over the next 5 / 10 / 20 candles. DATA ONLY.
+# Regular hours only (9:30-16:00); indicators run on the extended-hours chart like yours. A color that runs into the close is
+# counted until 16:00. ATR = ATR 14 of the chart; $ = SPY / QQQ dollars.
+PN_TFS = [int(x) for x in os.getenv("PN_TFS", "1,2,3,5").split(",") if x.strip()]
+PN_SPLIT = pd.Timestamp(os.getenv("PN_SPLIT", "2024-01-01"), tz=NY)
+PN_COL = {1: "GREEN", 0: "GRAY", -1: "RED"}
+PN_K = (5, 10, 20)
+
+
+def pn_colors(df, ind):
+    """per candle: Vix Fix color, TTM color, agree color (1 green / 0 gray / -1 red), known at the candle's close"""
+    S = agr_series(df, ind)
+    F, G = vfx_pane(df)
+    F, G = np.nan_to_num(F), np.nan_to_num(G)
+    gA = pd.Series(G).ewm(span=10, adjust=False).mean().to_numpy()
+    fA = pd.Series(F).ewm(span=10, adjust=False).mean().to_numpy()
+    gA1, fA1 = np.r_[np.nan, gA[:-1]], np.r_[np.nan, fA[:-1]]
+    vx = np.where((gA > gA1) & (fA < fA1), 1, np.where((gA < gA1) & (fA > fA1), -1, 0)).astype(np.int8)
+    tt = S["st"].astype(np.int8)
+    ag = np.where((tt == 1) & (vx == 1), 1, np.where((tt == -1) & (vx == -1), -1, 0)).astype(np.int8)
+    return vx, tt, ag
+
+
+def pn_runs(col, dcode):
+    """runs of one color inside one day: arrays start, end (inclusive), color"""
+    n = len(col)
+    brk = np.r_[True, (col[1:] != col[:-1]) | (dcode[1:] != dcode[:-1])]
+    st = np.nonzero(brk)[0]
+    en = np.r_[st[1:] - 1, n - 1]
+    return st, en, col[st]
+
+
+def pn_q(x):
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
+    if not len(x):
+        return dict(n=0)
+    return dict(n=len(x), med=np.median(x), avg=x.mean(), p25=np.quantile(x, .25), p75=np.quantile(x, .75),
+                p90=np.quantile(x, .9))
+
+
+def pn_chart(o, h, l, c, a, dcode, col, ttm, vx, late):
+    """everything for one color series on one RTH chart. late = candle is in the 2024-now half"""
+    st, en, cv = pn_runs(col, dcode)
+    nr = len(st)
+    same_next = np.r_[dcode[st[1:]] == dcode[st[:-1]], False]
+    nxt = np.r_[cv[1:], 9]
+    nxt = np.where(same_next, nxt, 9)                    # 9 = the day ended
+    prv = np.r_[9, cv[:-1]]
+    same_prev = np.r_[False, dcode[st[1:]] == dcode[st[:-1]]]
+    prv = np.where(same_prev, prv, 9)
+    # price move during each run: close of the last candle vs close of the candle before it started (open if first of day)
+    base = np.where(same_prev, c[np.maximum(st - 1, 0)], o[st])
+    A = np.where(a[st] > 0, a[st], np.nan)
+    mv = c[en] - base
+    runs = dict(st=st, en=en, cv=cv, nxt=nxt, prv=prv, ln=en - st + 1, mv=mv, mvA=mv / A, late=late[st])
+    # the day's last candle for every candle
+    n = len(c)
+    dlast = pd.Series(np.arange(n)).groupby(dcode).transform("max").to_numpy()
+    # first candle >= i of each color (inside the day handled by comparing with dlast)
+    nextc = {}
+    for v in (1, 0, -1):
+        idx = np.where(col == v, np.arange(n), n)
+        nextc[v] = np.minimum.accumulate(idx[::-1])[::-1]
+    # fair score: the next 10 candles after the fade (close to close, and the best move), vs the same from EVERY candle
+    k10 = np.minimum(np.arange(n) + 10, dlast)
+    Aall = np.where(a > 0, a, np.nan)
+    r10 = (c[k10] - c) / Aall
+    ar = np.arange(n)
+    hi10 = np.full(n, -np.inf)
+    lo10 = np.full(n, np.inf)
+    for off in range(1, 11):
+        jj = np.minimum(ar + off, dlast)
+        hi10 = np.maximum(hi10, np.where(jj > ar, h[jj], -np.inf))
+        lo10 = np.minimum(lo10, np.where(jj > ar, l[jj], np.inf))
+    up10 = np.where(np.isfinite(hi10), hi10 - c, 0.0) / Aall
+    dn10 = np.where(np.isfinite(lo10), c - lo10, 0.0) / Aall
+    okb = k10 > np.arange(n)
+    base = dict(r=np.nanmean(r10[okb]), up=np.nanmean(up10[okb]), dn=np.nanmean(dn10[okb]))
+    fades = []
+    # FADE = a green (red) run followed by gray (or, for TTM, straight by the other color): from the close of the first candle
+    # after the color ended, track price until the OPPOSITE color shows (or the close).
+    for side in (1, -1):
+        sel = np.nonzero((cv == side) & (nxt != 9))[0]
+        for r in sel:
+            k = en[r] + 1                                   # first candle after the color ended (gray, or the flip)
+            ref = c[k]
+            A_ = a[k] if a[k] > 0 else np.nan
+            if col[k] == -side:                             # straight flip (TTM): follow it while the new color lasts
+                j = en[r + 1]
+                to_close = j == dlast[k]
+                j_end = j
+            else:                                           # gray: follow it until the opposite color shows
+                j = nextc[-side][k + 1] if k + 1 < n else n
+                to_close = j > dlast[k]
+                j_end = dlast[k] if to_close else j
+            if j_end > k:
+                hh, ll = h[k + 1:j_end + 1].max(), l[k + 1:j_end + 1].min()
+            else:
+                hh, ll = h[k], l[k]
+            further = (hh - ref) if side == 1 else (ref - ll)            # how much more it went the old way
+            back = (ref - ll) if side == 1 else (hh - ref)               # how far it went the other way in that time
+            at_end = side * (c[j_end] - ref)                             # where price is when the opposite color shows
+            came_back = (nextc[side][k + 1] < j) if k + 1 < n else False  # the old color came back before the opposite one
+            came_back = bool(came_back and nextc[side][k + 1] <= dlast[k] and col[k] != -side)
+            run_ext = h[st[r]:en[r] + 1].max() if side == 1 else l[st[r]:en[r] + 1].min()
+            new_ext = (hh > run_ext) if side == 1 else (ll < run_ext)    # beat the color run's own high / low
+            kind = "flip" if col[k] == -side else "gray"
+            ttm_k, vx_k = ttm[k], vx[k]
+            if okb[k]:
+                c10 = side * r10[k] - side * base["r"]                               # kept going the old way, vs usual
+                b10 = (up10[k] - base["up"]) if side == 1 else (dn10[k] - base["dn"])  # best move the old way, vs usual
+            else:
+                c10 = b10 = np.nan
+            fades.append((side, kind, further, further / A_, back / A_, at_end, at_end / A_, j_end - k, bool(to_close),
+                          came_back, bool(new_ext), late[k], ttm_k, vx_k, c10, b10))
+    F = pd.DataFrame(fades, columns=["side", "kind", "fur", "furA", "backA", "end", "endA", "cand", "toclose", "cameback",
+                                     "newext", "late", "ttm", "vx", "c10", "b10"])
+    return runs, F
+
+
+def pn_fwd(o, c, a, dcode):
+    """forward result (long, ATR) from the next candle's open to the close k candles later, cut at the day's last candle"""
+    n = len(c)
+    dlast = pd.Series(np.arange(n)).groupby(dcode).transform("max").to_numpy()
+    e = np.minimum(np.arange(n) + 1, n - 1)
+    ok = (np.arange(n) + 1 <= dlast) & (a > 0)
+    out = {}
+    for k in PN_K:
+        j = np.minimum(np.arange(n) + k, dlast)
+        out[k] = np.where(ok, (c[j] - o[e]) / np.where(a > 0, a, np.nan), np.nan)
+    return out, ok
+
+
+def panes_main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    if test:
+        start = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    data = {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        data[sym] = fake_1m(sym, start, end)[0] if test else fetch_1m(sym, start, end)[0]
+    SER = [("vx", "VIX FIX RAINBOW alone"), ("tt", "TTM FLOW alone"), ("ag", "BOTH AGREE (your pane background)")]
+    R = {}      # (tf, ser) -> list of run frames
+    FD = {}     # (tf, ser) -> list of fade frames
+    CB = {}     # tf -> list of combo frames
+    days_n = {}
+    for tf in PN_TFS:
+        for sym, df1 in data.items():
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            vx, tt, ag = pn_colors(df, ind)
+            hm = ind["hm"]
+            rth = (hm >= 930) & (hm < 1600)
+            ix = np.nonzero(rth)[0]
+            o, h, l, c, a = ind["o"][ix], ind["h"][ix], ind["l"][ix], ind["c"][ix], ind["atr"][ix]
+            day = ind["day"][ix]
+            dcode = pd.factorize(day)[0]
+            late = np.asarray(df.index[ix] >= PN_SPLIT)
+            days_n[tf] = days_n.get(tf, 0) + len(np.unique(dcode))
+            cols = dict(vx=vx[ix], tt=tt[ix], ag=ag[ix])
+            for key, _ in SER:
+                runs, F = pn_chart(o, h, l, c, a, dcode, cols[key], cols["tt"], cols["vx"], late)
+                F["sym"] = sym
+                R.setdefault((tf, key), []).append(pd.DataFrame({k: v for k, v in runs.items()}))
+                FD.setdefault((tf, key), []).append(F)
+            fw, ok = pn_fwd(o, c, a, dcode)
+            prevc = np.r_[99, (cols["tt"] * 3 + cols["vx"])[:-1]]
+            prevc = np.where(np.r_[False, dcode[1:] == dcode[:-1]], prevc, 99)
+            comb = cols["tt"] * 3 + cols["vx"]
+            CB.setdefault(tf, []).append(pd.DataFrame({"comb": comb, "start": comb != prevc, "ok": ok, "late": late,
+                                                       **{f"f{k}": fw[k] for k in PN_K}}))
+            print(f"  {sym} {tf}m: {len(ix):,} regular-hours candles", flush=True)
+
+    md = [f"# PANE BACKGROUND COLORS - VIX FIX RAINBOW + TTM FLOW - {', '.join(SYMBOLS)} - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, charts {', '.join(f'{t}m' for t in PN_TFS)}, regular hours (indicators run on "
+          "the extended-hours chart like yours). DATA ONLY.",
+          "**Colors** - VIX FIX RAINBOW: GREEN = greed avg rising + fear avg falling, RED = the mirror, GRAY = neither. "
+          "TTM FLOW: GREEN / RED = bars rising / falling 2 in a row (never gray on its own). **BOTH AGREE** = your pane "
+          "background: green only when both are green, red when both red, gray otherwise.",
+          "**Fade** = the color ends. From the close of the first candle after it ends, price is followed until the OPPOSITE color "
+          "shows (or 16:00). **Still went** = how much further it moved the old way in that time (max high for green, min low for "
+          "red). **Other way** = how far it went against it. **At the flip** = where price closed when the opposite color showed. "
+          "**Next 10 candles vs usual** = the FAIR score: from the fade candle's close, how far price kept going the old way "
+          "after 10 candles (close) and at best, minus what any candle does in 10 candles. About 0 = the fade tells you nothing; "
+          "+ = it really keeps going; - = it really turns. (Still went alone always looks big, because the wait for the opposite "
+          "color lets price wander both ways.) "
+          "ATR = chart ATR 14 at that candle; $ = SPY / QQQ dollars. TTM never goes gray, so for TTM alone the fade is the "
+          "straight flip (green -> red), followed while the new color lasts.", ""]
+
+    def fade_table(F, title):
+        out = [f"#### {title}",
+               "| Fade | Count | Still went: median / avg / 75% / 90% (ATR) | Still went median $ | Went 0.5+ ATR more | 1+ ATR "
+               "more | Beat the color's own extreme | Old color came back first | Other way median (ATR) | **Next 10 candles vs usual: "
+               "close / best (ATR)** | At the flip: median (ATR, + = still the old way) | Candles to the flip (median) | Ran to "
+               "the close |",
+               "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for side in (1, -1):
+            for kind in ("gray", "flip"):
+                x = F[(F.side == side) & (F.kind == kind)]
+                if not len(x):
+                    continue
+                nm = (f"{PN_COL[side]} -> {'GRAY' if kind == 'gray' else PN_COL[-side]}" +
+                      (" (then until " + PN_COL[-side] + ")" if kind == "gray" else ""))
+                q = pn_q(x.furA)
+                out.append(f"| {nm} | {len(x):,} | {q['med']:.2f} / {q['avg']:.2f} / {q['p75']:.2f} / {q['p90']:.2f} | "
+                           f"${np.median(x.fur):.2f} | {100 * (x.furA >= .5).mean():.0f}% | {100 * (x.furA >= 1).mean():.0f}% | "
+                           f"{100 * x.newext.mean():.0f}% | {100 * x.cameback.mean():.0f}% | {np.median(x.backA):.2f} | "
+                           f"**{x.c10.mean():+.3f} / {x.b10.mean():+.3f}** | {np.median(x.endA):+.2f} | {np.median(x.cand):.0f} | {100 * x.toclose.mean():.0f}% |")
+        return out
+
+    def run_table(Rr, tf):
+        out = ["| Color | Runs per day | Candles: median / avg / 90% | Price during it: median / avg (ATR) | Went its way | "
+               "Turns into (next color) |", "|---|---|---|---|---|---|"]
+        for v in (1, 0, -1):
+            x = Rr[Rr.cv == v]
+            if not len(x):
+                continue
+            way = 100 * (np.sign(x.mv) == v).mean() if v != 0 else float("nan")
+            nx = x[x.nxt != 9].nxt.value_counts(normalize=True)
+            tx = ", ".join(f"{PN_COL[int(k)]} {100 * p:.0f}%" for k, p in nx.items())
+            out.append(f"| {PN_COL[v]} | {len(x) / max(days_n[tf], 1):.1f} | {x.ln.median():.0f} / {x.ln.mean():.1f} / "
+                       f"{x.ln.quantile(.9):.0f} | {x.mvA.median():+.2f} / {x.mvA.mean():+.2f} | "
+                       f"{'-' if v == 0 else f'{way:.0f}%'} | {tx} |")
+        return out
+
+    # ---------- summary first
+    summ = ["## The answer in 30 seconds"]
+    for tf in PN_TFS:
+        for key, nm in SER:
+            F = pd.concat(FD[(tf, key)], ignore_index=True)
+            bits = []
+            for side in (1, -1):
+                kind = "gray" if key != "tt" else "flip"
+                x = F[(F.side == side) & (F.kind == kind)]
+                if len(x):
+                    bits.append(f"{PN_COL[side]} -> {kind.upper() if kind == 'gray' else PN_COL[-side]}: still "
+                                f"{'+' if side == 1 else '-'}{np.median(x.furA):.2f} ATR median (${np.median(x.fur):.2f}), "
+                                f"{100 * (x.furA >= .5).mean():.0f}% go 0.5+ ATR more, next 10 candles vs usual {x.c10.mean():+.3f} ATR, "
+                                f"{100 * x.newext.mean():.0f}% beat the run's "
+                                f"{'high' if side == 1 else 'low'}")
+            summ.append(f"- **{tf}m {nm}:** " + " | ".join(bits))
+    md += summ + [""]
+
+    # ---------- agree vs alone (combos)
+    CMB = {(t * 3 + v): f"TTM {PN_COL[t]} + Vix {PN_COL[v]}" for t in (1, -1) for v in (1, 0, -1)}
+    md += ["## Agree vs alone - every TTM x Vix Fix combination",
+           "Each candle's combination, then LONG from the next open: average ATR after 5 / 10 / 20 candles **minus the average of "
+           "all candles** (so + = price tends to go up more than usual, - = down). **Start** = only the first candle of each "
+           "combination (where you'd act). Both halves shown so you can see if it holds (2020-23 / 2024-now).", ""]
+    for tf in PN_TFS:
+        C = pd.concat(CB[tf], ignore_index=True)
+        C = C[C.ok]
+        basek = {k: C[f"f{k}"].mean() for k in PN_K}
+        md += [f"### {tf}m", "| Combination | % of candles | Every candle 5 / 10 / 20 | Start: count | Start 5 / 10 / 20 | "
+               "Start up after 10 | Start 10 candles: 2020-23 / 2024-now |", "|---|---|---|---|---|---|---|"]
+        for cb, nm in CMB.items():
+            x = C[C.comb == cb]
+            if not len(x):
+                continue
+            s = x[x.start]
+            ev = " / ".join(f"{x[f'f{k}'].mean() - basek[k]:+.3f}" for k in PN_K)
+            sv = " / ".join(f"{s[f'f{k}'].mean() - basek[k]:+.3f}" for k in PN_K) if len(s) else "-"
+            h1 = s[~s.late]["f10"].mean() - basek[10]
+            h2 = s[s.late]["f10"].mean() - basek[10]
+            tag = " **(agree)**" if cb in (4, -4) else ""
+            md.append(f"| {nm}{tag} | {100 * len(x) / len(C):.0f}% | {ev} | {len(s):,} | {sv} | "
+                      f"{100 * (s['f10'] > 0).mean():.0f}% | {h1:+.3f} / {h2:+.3f} |")
+        md.append("")
+
+    # ---------- per chart detail
+    for tf in PN_TFS:
+        md += [f"## {tf}m chart", ""]
+        for key, nm in SER:
+            Rr = pd.concat(R[(tf, key)], ignore_index=True)
+            F = pd.concat(FD[(tf, key)], ignore_index=True)
+            md += [f"### {nm}", ""] + run_table(Rr, tf) + [""] + fade_table(F, "When the color ends - how much more?") + [""]
+            # stability: median still-went by half and symbol
+            rows = ["| Fade | 2020-23 still went median (ATR) | 2024-now | Next 10 vs usual (close): 2020-23 / 2024-now | " + " | ".join(f"{s} median $" for s in SYMBOLS) + " |",
+                    "|---|---|---|---|" + "---|" * len(SYMBOLS)]
+            for side in (1, -1):
+                kind = "gray" if key != "tt" else "flip"
+                x = F[(F.side == side) & (F.kind == kind)]
+                if not len(x):
+                    continue
+                cells = " | ".join(f"${np.median(x[x.sym == s].fur):.2f}" if (x.sym == s).any() else "-" for s in SYMBOLS)
+                rows.append(f"| {PN_COL[side]} -> {kind.upper() if kind == 'gray' else PN_COL[-side]} | "
+                            f"{np.median(x[~x.late].furA) if (~x.late).any() else float('nan'):.2f} | "
+                            f"{np.median(x[x.late].furA) if x.late.any() else float('nan'):.2f} | "
+                            f"{x[~x.late].c10.mean():+.3f} / {x[x.late].c10.mean():+.3f} | {cells} |")
+            md += ["#### Does it hold? (still went, by half and ticker)"] + rows + [""]
+            if key == "ag":
+                # which pane broke the agreement first - does it tell you how much is left?
+                rows = ["#### Which pane broke the agreement? (BOTH AGREE -> GRAY)",
+                        "| Fade | What broke it | Count | Still went median / avg (ATR) | Went 0.5+ ATR more | Beat the run's "
+                        "extreme | Old color came back first | At the flip median (ATR) | **Next 10 vs usual: close / best** |",
+                        "|---|---|---|---|---|---|---|---|---|"]
+                for side in (1, -1):
+                    x = F[(F.side == side) & (F.kind == "gray")]
+                    for lab, m in (("Vix Fix cooled, TTM still " + PN_COL[side], x.ttm == side),
+                                   ("TTM turned " + PN_COL[-side] + ", Vix Fix still " + PN_COL[side], (x.ttm == -side) & (x.vx == side)),
+                                   ("Both let go (TTM " + PN_COL[-side] + ", Vix gray)", (x.ttm == -side) & (x.vx == 0))):
+                        y = x[m]
+                        if not len(y):
+                            continue
+                        rows.append(f"| {PN_COL[side]} -> GRAY | {lab} | {len(y):,} | {np.median(y.furA):.2f} / "
+                                    f"{y.furA.mean():.2f} | {100 * (y.furA >= .5).mean():.0f}% | {100 * y.newext.mean():.0f}% | "
+                                    f"{100 * y.cameback.mean():.0f}% | {np.median(y.endA):+.2f} | **{y.c10.mean():+.3f} / {y.b10.mean():+.3f}** |")
+                md += rows + [""]
+    md += [f"Runtime {(time.time() - t0) / 60:.1f} min. This is math/data, not financial advice."]
+    txt = "\n".join(md)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for fn in (f"panes_{stamp}.md", "panes_latest.md"):
+        with open(os.path.join(OUT, fn), "w") as f:
+            f.write(txt)
+    print(txt[:4000])
+    print(f"\nSaved {OUT}/panes_latest.md")
+
 if __name__ == "__main__":
+    if MODE == "panes":
+        panes_main()
+        sys.exit(0)
     if MODE == "mag7":
         mag7_main()
     elif MODE == "blueprint":
