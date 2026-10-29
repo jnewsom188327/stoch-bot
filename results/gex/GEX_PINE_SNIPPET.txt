@@ -1,5 +1,5 @@
 //@version=6
-// GEX levels captured 2026-10-29 13:58:14 ET. Paste onto a SPY or QQQ chart.
+// GEX levels captured 2026-10-29 14:38:17 ET. Paste onto a SPY or QQQ chart.
 // Horizontal lines are the 0DTE gamma flip, call wall, and put wall.
 // Falls back to all-expiry levels when that snapshot had no 0DTE contracts.
 // Convention: dealers long calls, short puts. Not an order signal.
