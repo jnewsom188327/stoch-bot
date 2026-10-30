@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "gap").strip().lower() or "gap"
+MODE = os.getenv("MODE", "avgdn").strip().lower() or "avgdn"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -18106,7 +18106,239 @@ def gap_main():
     print(txt[:5000])
     print(f"\nSaved {OUT}/gap_latest.md")
 
+
+# ================================================================ AVERAGE DOWN vs CUT vs HOLD (MODE=avgdn)
+# The Whipsaw Pro signals (exact backtest rules) traded three ways, in stock terms (ATR of the chart at the signal):
+#   HOLD = 1 unit from the next open, out at the close 20 candles after the signal (or 15:55). No stop, no add.
+#   CUT  = HOLD, but sell everything when price goes K ATR against the entry (K = 1 / 1.5 / 2).
+#   ADD  = HOLD, but when price goes K ATR against, buy a 2nd unit there; then both units are out at the average
+#          + TG ATR (TG = 0.25 / 0.5, or no target = ride to the 20-candle exit), or at a stop SL ATR past the average
+#          (1 / 2, or none), or at the 20-candle exit. ADD results are for BOTH units (2x size after the add).
+# Same candle: the add / cut fills at the trigger (or the open if it gapped through); after an add, the stop is checked
+# before the target in every candle (the cautious way) and the target only from the next candle.
+# Setups: WHIP A = whipsaw + TTM with you / turning your way (the Whipsaw Pro A signal), WHIP B = whipsaw, TTM against,
+# DIP = dip into a green line with fear 91+, POP = failed pop under a red line. SPY + QQQ, 1/2/3/5m, 2020-now.
+# "vs HOLD" = the same trades, plan minus hold, per trade; HELD = t 3+ AND better in 2020-23 AND 2024-now AND on SPY AND QQQ.
+AD_TFS = [int(x) for x in os.getenv("AD_TFS", "1,2,3,5").split(",") if x.strip()]
+AD_SPLIT = pd.Timestamp(os.getenv("AD_SPLIT", "2024-01-01"), tz=NY)
+AD_K = [1.0, 1.5, 2.0]
+AD_TG = [(0.25, "avg +0.25"), (0.5, "avg +0.5"), (None, "ride to 20")]
+AD_SL = [(1.0, "stop 1 past avg"), (2.0, "stop 2 past avg"), (None, "no stop")]
+AD_HOLD = 20
+AD_SETUPS = ["WHIP A", "WHIP B", "DIP", "POP"]
+
+
+def ad_plans():
+    P = [("HOLD", "hold", None, None, None)]
+    for k in AD_K:
+        P.append((f"CUT at {k:g} ATR", "cut", k, None, None))
+    for k in AD_K:
+        for tg, tgn in AD_TG:
+            for sl, sln in AD_SL:
+                P.append((f"ADD at {k:g} ATR, {tgn}, {sln}", "add", k, tg, sl))
+    return P
+
+
+def ad_sim(o, h, l, c, i, xe, d, A, mode, k, tg, sl):
+    """returns (result in ATR, units at the end, trigger hit)"""
+    e = i + 1
+    P0 = o[e]
+    if mode == "hold":
+        return d * (c[xe] - P0) / A, 1, False
+    T = P0 - d * k * A
+    added, avg = False, None
+    for j in range(e, xe + 1):
+        op, hi, lo = o[j], h[j], l[j]
+        if not added:
+            hit = lo <= T if d == 1 else hi >= T
+            if not hit:
+                continue
+            fill = op if (op <= T if d == 1 else op >= T) else T
+            if mode == "cut":
+                return d * (fill - P0) / A, 1, True
+            added, avg = True, (P0 + fill) / 2
+            if sl is not None:
+                S = avg - d * sl * A
+                if (lo <= S) if d == 1 else (hi >= S):
+                    return 2 * d * (S - avg) / A, 2, True
+            continue
+        if sl is not None:
+            S = avg - d * sl * A
+            if (lo <= S) if d == 1 else (hi >= S):
+                px = op if ((op <= S) if d == 1 else (op >= S)) else S
+                return 2 * d * (px - avg) / A, 2, True
+        if tg is not None:
+            G = avg + d * tg * A
+            if (hi >= G) if d == 1 else (lo <= G):
+                px = op if ((op >= G) if d == 1 else (op <= G)) else G
+                return 2 * d * (px - avg) / A, 2, True
+    if added:
+        return 2 * d * (c[xe] - avg) / A, 2, True
+    return d * (c[xe] - P0) / A, 1, False
+
+
+def avgdn_main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    if test:
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    plans = ad_plans()
+    rows = []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1 = fake_1m(sym, start, end)[0] if test else fetch_1m(sym, start, end)[0]
+        for tf in AD_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["day"]
+            ev, F, G, color, ef, dend = vs_events(df, ind)
+            mom, _, _ = cl_ttm(df)
+            mom = np.nan_to_num(mom)
+            momup = mom > np.r_[mom[0], mom[:-1]]
+            ts = df.index
+            n = len(c)
+            nev = 0
+            for nm, i, d in ev:
+                if nm == "VF_WHIP":
+                    ok_ttm = momup[i] if d == 1 else (mom[i] < mom[i - 1])
+                    setup = "WHIP A" if ok_ttm else "WHIP B"
+                elif nm == "TL_DIP_FEAR":
+                    setup = "DIP"
+                elif nm == "TL_FAILPOP":
+                    setup = "POP"
+                else:
+                    continue
+                if i + 1 >= n or not (a[i] > 0):
+                    continue
+                xe = min(i + AD_HOLD, dend[i + 1])
+                if xe < i + 1:
+                    continue
+                A = a[i]
+                e = i + 1
+                seg_adv = (o[e] - l[e:xe + 1].min()) if d == 1 else (h[e:xe + 1].max() - o[e])
+                r = dict(sym=sym, tf=tf, setup=setup, day=day[i], late=bool(ts[i] >= AD_SPLIT), mae=seg_adv / A,
+                         atr_usd=A)
+                for pi, (pn, mode, k, tg, sl) in enumerate(plans):
+                    res, units, trig = ad_sim(o, h, l, c, i, xe, d, A, mode, k, tg, sl)
+                    r[f"p{pi}"] = res
+                    if mode == "cut" or (mode == "add" and tg == AD_TG[0][0] and sl == AD_SL[0][0]):
+                        r[f"trig{k:g}"] = trig
+                rows.append(r)
+                nev += 1
+            print(f"  {sym} {tf}m: {nev:,} signals", flush=True)
+    X = pd.DataFrame(rows)
+    f2 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.2f}"
+    f3 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.3f}"
+    f1 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:.1f}"
+
+    def maxdd(v):
+        cum = np.cumsum(np.asarray(v, dtype=float))
+        return float(np.max(np.maximum.accumulate(np.r_[0.0, cum])[1:] - cum)) if len(cum) else float("nan")
+
+    def pstats(x, col):
+        v = x[col]
+        dif = v - x["p0"]
+        t = on_t(dif, x.day) if col != "p0" else float("nan")
+        h1, h2 = dif[~x.late].mean(), dif[x.late].mean()
+        per = [dif[x.sym == s].mean() for s in SYMBOLS]
+        held = (col != "p0" and np.isfinite(t) and t >= 3 and h1 > 0 and h2 > 0 and all(p > 0 for p in per))
+        return dict(avg=v.mean(), win=(v > 0).mean(), p01=v.quantile(.01), dd=maxdd(v), dif=dif.mean(), t=t, h1=h1, h2=h2,
+                    per=per, held=held, tav=on_t(v, x.day))
+
+    md = [f"# AVERAGE DOWN vs CUT vs HOLD - WHIPSAW PRO SIGNALS - {', '.join(SYMBOLS)} - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, charts {', '.join(f'{t}m' for t in AD_TFS)}, signals 9:35-15:30. DATA ONLY.",
+          "**HOLD** = 1 unit from the next open to the close 20 candles after the signal (or 15:55). **CUT at K** = sell all if "
+          "price goes K ATR against. **ADD at K** = buy a 2nd unit K ATR against, then both out at the average + target, a stop "
+          "past the average, or the 20-candle exit. ADD results count BOTH units (2x size after the add). Results in ATR of the "
+          "chart at the signal (SPY 1m ATR is about $0.25-0.40). **vs HOLD** = the same trades, plan minus hold, per trade. "
+          "**Worst 1%** = the 1-in-100 worst trade. **Max drawdown** = the deepest dip in the running total (ATR). **HELD** = "
+          "better than HOLD with t 3+, in 2020-23 AND 2024-now AND on " + " AND ".join(SYMBOLS) + ".", ""]
+
+    # ---------- summary
+    S = ["## The answer in 30 seconds"]
+    for tf in AD_TFS:
+        x = X[(X.tf == tf) & (X.setup == "WHIP A")]
+        if not len(x):
+            continue
+        st = {pi: pstats(x, f"p{pi}") for pi in range(len(plans))}
+        best_add = max((pi for pi, p in enumerate(plans) if p[1] == "add"), key=lambda pi: st[pi]["avg"])
+        best_cut = max((pi for pi, p in enumerate(plans) if p[1] == "cut"), key=lambda pi: st[pi]["avg"])
+        S.append(f"- **{tf}m WHIP A ({len(x):,} trades):** HOLD {f3(st[0]['avg'])} ATR a trade (worst 1% {f2(st[0]['p01'])}) | "
+                 f"best CUT ({plans[best_cut][0]}) {f3(st[best_cut]['avg'])} (vs hold {f3(st[best_cut]['dif'])}, t "
+                 f"{f1(st[best_cut]['t'])}) | best ADD ({plans[best_add][0]}) {f3(st[best_add]['avg'])} (vs hold "
+                 f"{f3(st[best_add]['dif'])}, t {f1(st[best_add]['t'])}, worst 1% {f2(st[best_add]['p01'])})"
+                 f"{' **HELD**' if st[best_add]['held'] else ''}.")
+    x1 = X[(X.setup == "WHIP A") & (X.tf == AD_TFS[0])]
+    for k in AD_K:
+        hit = x1[x1[f"trig{k:g}"]]
+        if len(hit):
+            ci = next(pi for pi, p in enumerate(plans) if p[1] == "cut" and p[2] == k)
+            ai = next(pi for pi, p in enumerate(plans) if p[1] == "add" and p[2] == k and p[3] is None and p[4] is None)
+            S.append(f"- **{AD_TFS[0]}m WHIP A, the {len(hit):,} trades ({100 * len(hit) / len(x1):.0f}%) that went {k:g} ATR against:** "
+                     f"HOLD {f2(hit.p0.mean())} | CUT {f2(hit[f'p{ci}'].mean())} | ADD and ride {f2(hit[f'p{ai}'].mean())} ATR a trade; "
+                     f"{100 * (hit.p0 > 0).mean():.0f}% still finished green just holding.")
+    nh = []
+    md += S
+
+    # ---------- heat
+    md += ["", "## A) How far do they go against you first? (before the 20-candle exit)", "",
+           "| Chart | Setup | Trades | Heat median / 75% / 90% (ATR) | Went 1 / 1.5 / 2 ATR against | Of the 1.5 ATR ones, still "
+           "green at the exit (just holding) |", "|---|---|---|---|---|---|"]
+    for tf in AD_TFS:
+        for su in AD_SETUPS:
+            x = X[(X.tf == tf) & (X.setup == su)]
+            if not len(x):
+                continue
+            hh = x[x["trig1.5"]]
+            gtxt = f"{100 * (hh.p0 > 0).mean():.0f}%" if len(hh) else "-"
+            md.append(f"| {tf}m | {su} | {len(x):,} | {x.mae.median():.2f} / {x.mae.quantile(.75):.2f} / {x.mae.quantile(.9):.2f} | "
+                      f"{100 * x['trig1'].mean():.0f}% / {100 * x['trig1.5'].mean():.0f}% / {100 * x['trig2'].mean():.0f}% | "
+                      f"{gtxt} |")
+
+    # ---------- every plan
+    for tf in AD_TFS:
+        md += ["", f"## B) {tf}m - every plan", "",
+               "| Plan | " + " | ".join(f"{su}: avg ATR (vs HOLD, t)" for su in AD_SETUPS) +
+               " | WHIP A: win / worst 1% / max drawdown | WHIP A vs HOLD: 2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " | HELD |",
+               "|---|" + "---|" * len(AD_SETUPS) + "---|---|---|---|"]
+        for pi, (pn, mode, k, tg, sl) in enumerate(plans):
+            cells = []
+            sA = None
+            for su in AD_SETUPS:
+                x = X[(X.tf == tf) & (X.setup == su)]
+                if not len(x):
+                    cells.append("-")
+                    continue
+                s_ = pstats(x, f"p{pi}")
+                if su == "WHIP A":
+                    sA = s_
+                cells.append(f"{f3(s_['avg'])}" + ("" if pi == 0 else f" ({f3(s_['dif'])}, {f1(s_['t'])})")
+                             + (" **HELD**" if s_["held"] else ""))
+                if s_["held"]:
+                    nh.append(f"{tf}m {su}: {pn} ({f3(s_['dif'])} vs hold)")
+            if sA:
+                md.append(f"| {pn} | " + " | ".join(cells) + f" | {100 * sA['win']:.0f}% / {f2(sA['p01'])} / {sA['dd']:.0f} | "
+                          f"{f3(sA['h1'])} / {f3(sA['h2'])} | {' / '.join(f3(p) for p in sA['per'])} | "
+                          f"{'**HELD**' if sA['held'] else '-'} |")
+    md.insert(md.index("## A) How far do they go against you first? (before the 20-candle exit)") - 1,
+              "- **Plans that beat HOLD and held up:** " + ("; ".join(nh[:12]) if nh else "**none**") + ".")
+    md += ["", f"{len(plans)} plans x {len(AD_SETUPS)} setups x {len(AD_TFS)} charts are compared, so expect a few t 2-3 cells "
+               f"by luck; trust HELD. Runtime {(time.time() - t0) / 60:.1f} min. This is math/data, not financial advice."]
+    txt = "\n".join(md)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for fn in (f"avgdn_{stamp}.md", "avgdn_latest.md"):
+        with open(os.path.join(OUT, fn), "w") as f:
+            f.write(txt)
+    print(txt[:5000])
+    print(f"\nSaved {OUT}/avgdn_latest.md")
+
 if __name__ == "__main__":
+    if MODE == "avgdn":
+        avgdn_main()
+        sys.exit(0)
     if MODE == "gap":
         gap_main()
         sys.exit(0)
