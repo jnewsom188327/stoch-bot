@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "night").strip().lower() or "night"
+MODE = os.getenv("MODE", "gap").strip().lower() or "gap"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -17815,7 +17815,301 @@ def night_main():
     print(txt[:5000])
     print(f"\nSaved {OUT}/night_latest.md")
 
+
+# ================================================================ GAP FILL FROM 9:45 (MODE=gap)
+# Night vs day showed the gap's SIZE decides whether the day comes back to the prior close. This trades it:
+#   GAP = the 9:30 open vs the prior 16:00 close. Only days where the gap is STILL OPEN at the entry (price has not touched
+#   the prior close since 9:30). Entry at the open of the 9:40 / 9:45 / 10:00 candle (you skip the first 10-15 minutes),
+#   TOWARD the prior close: gap down -> long (calls), gap up -> short (puts).
+#   Targets: $0.50 / $0.75 / $1.00 / $1.50 of stock, or the full fill (touch the prior close). Stops: $0.50 / $1.00 / $2.00, or
+#   just past the 9:30-to-entry low (longs) / high (shorts). Out at 11:00 or 15:55 if neither hits. Target and stop in the same
+#   1-minute candle = the STOP (the cautious way). All $ are at TODAY's SPY / QQQ price.
+#   ~ option $ = stock $ x 0.5 delta - rough: it ignores theta, the spread and gamma, so read it as a guide only.
+#   GO = the same trade the other way (with the gap), for comparison. HELD = t 3+, positive in 2020-23 AND 2024-now AND on
+#   SPY AND QQQ, 200+ days. Filters at the entry: the first minutes moved toward the fill or away, your 5m pane background
+#   (Vix Fix + TTM agree) with the fill / gray / against, the 5m Rainbow alone. DATA ONLY.
+GF_ENTRIES = [(940, "9:40"), (945, "9:45"), (1000, "10:00")]
+GF_TGTS = [(0.50, "$0.50"), (0.75, "$0.75"), (1.00, "$1.00"), (1.50, "$1.50"), (None, "full fill")]
+GF_STOPS = [(0.50, "$0.50"), (1.00, "$1.00"), (2.00, "$2.00"), ("swing", "past the 9:30 low / high")]
+GF_EXITS = [(1100, "11:00"), (1555, "15:55")]
+GF_DIST = [(0, 1, "under $1"), (1, 2, "$1-2"), (2, 4, "$2-4"), (4, 1e9, "$4+")]
+GF_GAP = [(0, 1.73, "small gap (under $1.73)"), (1.73, 4.34, "medium gap ($1.73-4.34)"), (4.34, 1e9, "big gap (over $4.34)")]
+GF_SPLIT = datetime.fromisoformat(os.getenv("GF_SPLIT", "2024-01-01")).date()
+GF_DELTA = 0.5
+
+
+def gf_sim(fav, adv, cl, tdist, sdist, nx):
+    """fav / adv = best move for / against from the entry, per 1m candle; cl = close P&L at the exit candle (index nx)"""
+    f = fav[:nx + 1]
+    a = adv[:nx + 1]
+    hf = f >= tdist
+    ha = a >= sdist
+    ht = int(np.argmax(hf)) if hf.any() else 10 ** 9
+    hs = int(np.argmax(ha)) if ha.any() else 10 ** 9
+    if ht == hs == 10 ** 9:
+        return cl
+    return -sdist if hs <= ht else tdist
+
+
+def gap_main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    if test:
+        start = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    recs, LPs, already, ndays = [], {}, {E: 0 for E, _ in GF_ENTRIES}, 0
+    combos = [(ti, si, xi) for ti in range(len(GF_TGTS)) for si in range(len(GF_STOPS)) for xi in range(len(GF_EXITS))]
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1 = fake_1m(sym, start, end)[0] if test else fetch_1m(sym, start, end)[0]
+        LP = float(df1["close"].iloc[-1])
+        LPs[sym] = LP
+        df5 = to_tf(df1, rth_only=False, mins=5)
+        vx5, tt5, ag5 = pn_colors(df5, indicators(df5, 13, 34, True))
+        pos5 = pd.Series(np.arange(len(df5)), index=df5.index)
+        hm_all = df1.index.hour * 100 + df1.index.minute
+        r = df1[(hm_all >= 930) & (hm_all < 1600)]
+        days = np.array(r.index.date)
+        HM = np.asarray(r.index.hour * 100 + r.index.minute)
+        O, H, L, C = (r[k].to_numpy() for k in ("open", "high", "low", "close"))
+        brk = np.r_[0, np.nonzero(days[1:] != days[:-1])[0] + 1, len(r)]
+        prev_close = None
+        for bi in range(len(brk) - 1):
+            a_, b_ = brk[bi], brk[bi + 1]
+            dd = days[a_]
+            hmd = HM[a_:b_]
+            pc = prev_close
+            prev_close = C[b_ - 1]
+            if hmd[0] > 931 or b_ - a_ < 150 or pc is None:
+                continue
+            o_, h_, l_, c_ = O[a_:b_], H[a_:b_], L[a_:b_], C[a_:b_]
+            op = o_[0]
+            if op == pc:
+                continue
+            ndays += 1
+            d = 1 if op < pc else -1
+            gapsz = abs(op - pc) / pc * LP
+            for E, elab in GF_ENTRIES:
+                e = int(np.searchsorted(hmd, E))
+                if e <= 0 or e >= len(hmd) - 5:
+                    continue
+                pre_h, pre_l = h_[:e].max(), l_[:e].min()
+                if (d == 1 and pre_h >= pc) or (d == -1 and pre_l <= pc):
+                    already[E] += 1
+                    continue
+                en = o_[e]
+                if d * (pc - en) <= 0:
+                    already[E] += 1
+                    continue
+                k = en / LP
+                dist_raw = abs(pc - en)
+                hh, ll, cc = h_[e:], l_[e:], c_[e:]
+                up, dn = hh - en, en - ll
+                fav, adv = (up, dn) if d == 1 else (dn, up)
+                # does it fill (no stop)?
+                hit = fav >= dist_raw
+                fi = int(np.argmax(hit)) if hit.any() else -1
+                fhm = hmd[e + fi] if fi >= 0 else 9999
+                heat = (adv[:fi + 1].max() if fi >= 0 else adv.max()) / k
+                prog = fav.max() / dist_raw if fi < 0 else 1.0
+                # 5m pane colors at the entry (the last CLOSED 5m candle)
+                bt = pd.Timestamp(datetime.combine(dd, datetime.min.time()), tz=NY) + pd.Timedelta(
+                    hours=E // 100, minutes=E % 100) - pd.Timedelta(minutes=5)
+                p5 = pos5.get(bt, None)
+                bg = int(ag5[p5]) * d if p5 is not None else 9
+                vxr = int(vx5[p5]) * d if p5 is not None else 9
+                rec = dict(sym=sym, day=dd, late=dd >= GF_SPLIT, E=E, d=d, dist=dist_raw / k, gapsz=gapsz,
+                           toward=int(np.sign(en - op) == d), bg=bg, vx=vxr, filled=int(fi >= 0),
+                           fmin=(fi if fi >= 0 else np.nan), f1015=int(fhm < 1015), f1100=int(fhm < 1100),
+                           f1200=int(fhm < 1200), fclose=int(fi >= 0), heat=heat, prog=prog)
+                buf = 0.05 * k
+                xs = [max(int(np.searchsorted(hmd, X)) - 1 - e, 0) for X, _ in GF_EXITS]
+                for dirn, tag in ((d, "t"), (-d, "g")):
+                    fv, av = (up, dn) if dirn == 1 else (dn, up)
+                    sw = (en - pre_l if dirn == 1 else pre_h - en) + buf
+                    sw = max(sw, buf)
+                    for ti, si, xi in combos:
+                        tg = GF_TGTS[ti][0]
+                        if tg is None and tag == "g":
+                            continue
+                        tdist = dist_raw if tg is None else tg * k
+                        sg = GF_STOPS[si][0]
+                        sdist = sw if sg == "swing" else sg * k
+                        nx = xs[xi]
+                        cl = dirn * (cc[nx] - en)
+                        rec[f"{tag}{ti}{si}{xi}"] = gf_sim(fv, av, cl, tdist, sdist, nx) / k
+                recs.append(rec)
+        print(f"  {sym}: {len(recs):,} entries so far", flush=True)
+    X = pd.DataFrame(recs)
+    nd_sym = ndays / max(len(SYMBOLS), 1)
+    f2 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.2f}"
+    f1 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:.1f}"
+    pc_ = lambda v: "-" if v is None or not np.isfinite(v) else f"{100 * v:.0f}%"
+
+    def gs(x, col):
+        if col not in x:
+            return None
+        v = x[col].dropna()
+        if len(v) < 20:
+            return None
+        w, l_ = v[v > 0], v[v < 0]
+        be = (-l_.mean()) / (w.mean() - l_.mean()) if len(w) and len(l_) else float("nan")
+        xs_ = x.loc[v.index]
+        h1, h2 = v[~xs_.late].mean() if (~xs_.late).any() else float("nan"), v[xs_.late].mean() if xs_.late.any() else float("nan")
+        per = [v[xs_.sym == s].mean() if (xs_.sym == s).any() else float("nan") for s in SYMBOLS]
+        t = on_t(v, xs_.day)
+        held = (np.isfinite(t) and t >= 3 and xs_.day.nunique() >= 200 and h1 > 0 and h2 > 0 and all(p > 0 for p in per))
+        return dict(n=len(v), win=(v > 0).mean(), be=be, avg=v.mean(), t=t, h1=h1, h2=h2, per=per, held=held)
+
+    def cname(ti, si, xi):
+        return f"target {GF_TGTS[ti][1]}, stop {GF_STOPS[si][1]}, out {GF_EXITS[xi][1]}"
+
+    md = [f"# GAP FILL FROM 9:45 - {', '.join(SYMBOLS)} - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, about {nd_sym:,.0f} gap days per ticker. Regular-hours 1-minute candles. "
+          "DATA ONLY.",
+          "**Gap** = 9:30 open vs the prior 16:00 close. Only days the gap is **still open at the entry** (not touched since "
+          "9:30). The trade goes **toward the prior close**: gap down -> long, gap up -> short. Entry at the open of the "
+          "9:40 / 9:45 / 10:00 candle. **$ = stock dollars at today's price** (" +
+          ", ".join(f"{s} ${p:,.0f}" for s, p in LPs.items()) + "). **~option $** = stock $ x 0.5 delta (rough: no theta, "
+          "spread or gamma). Target and stop in the same minute = counted as the stop. **Breakeven win** = the win rate this "
+          "row needs to make money, from its own average win and loss. **GO** = the same trade WITH the gap, for comparison. "
+          "**HELD** = t 3+, positive in 2020-23 and 2024-now and on " + " and ".join(SYMBOLS) + ", 200+ days.", ""]
+    x45 = X[X.E == 945]
+
+    # ---------- A) does it fill
+    A = ["## A) Does the gap fill? (entry 9:45, no stop - just watching)",
+         f"Gap still open at 9:45 on {100 * len(x45) / max(ndays, 1):.0f}% of gap days (it already filled in the first 15 "
+         f"minutes on {100 * already[945] / max(ndays, 1):.0f}%). **Distance left** = 9:45 price to the prior close. **Heat** = "
+         "the worst move against you before it filled (or by the close if it never did) - the stop room you'd need.", "",
+         "| Distance left at 9:45 | Gap | Days | Filled by 10:15 / 11:00 / 12:00 / close | Minutes to fill (median, when "
+         "it fills) | Heat before the fill: median / 75% / 90% | Never filled: got this far (median) | Filled by close: "
+         "2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " |",
+         "|---|---|---|---|---|---|---|---|---|"]
+    for lo_, hi_, dn_ in [(0, 1e9, "ALL")] + GF_DIST:
+        for gname, gd in (("both", 0), ("gap down (long)", 1), ("gap up (short)", -1)):
+            x = x45[(x45.dist >= lo_) & (x45.dist < hi_)]
+            if gd:
+                x = x[x.d == gd]
+            if len(x) < 10:
+                continue
+            nf = x[x.filled == 0]
+            A.append(f"| {dn_} | {gname} | {len(x):,} | {pc_(x.f1015.mean())} / {pc_(x.f1100.mean())} / "
+                     f"{pc_(x.f1200.mean())} / **{pc_(x.fclose.mean())}** | {f1(x.fmin.median())} | "
+                     f"${x.heat.median():.2f} / ${x.heat.quantile(.75):.2f} / ${x.heat.quantile(.9):.2f} | "
+                     f"{pc_(nf.prog.median()) if len(nf) else '-'} of the way | "
+                     f"{pc_(x[~x.late].fclose.mean())} / {pc_(x[x.late].fclose.mean())} | "
+                     f"{' / '.join(pc_(x[x.sym == s].fclose.mean()) for s in SYMBOLS)} |")
+    A.append("")
+    for E, elab in GF_ENTRIES:
+        x = X[X.E == E]
+        if len(x):
+            A.append(f"- Entry {elab}: gap still open on {100 * len(x) / max(ndays, 1):.0f}% of gap days; filled by the close "
+                     f"{pc_(x.fclose.mean())}, median heat ${x.heat.median():.2f}.")
+    A.append("")
+
+    # ---------- B) the trade grid at 9:45
+    B = ["## B) Trading the fill from 9:45 - every target x stop x exit",
+         "Each cell = average stock $ per trade (win %). **All** also shows the breakeven win, ~option $ and t.", "",
+         "| Trade | Trades | Win / breakeven | Avg $ | ~option $ | t | " + " | ".join(f"Left {dn_}" for _, _, dn_ in GF_DIST) +
+         " | GO (with the gap) | 2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " | HELD |",
+         "|---|---|---|---|---|---|" + "---|" * len(GF_DIST) + "---|---|---|---|"]
+    ranked = []
+    for ti, si, xi in combos:
+        col = f"t{ti}{si}{xi}"
+        s = gs(x45, col)
+        if not s:
+            continue
+        cells = []
+        for lo_, hi_, _ in GF_DIST:
+            sb = gs(x45[(x45.dist >= lo_) & (x45.dist < hi_)], col)
+            cells.append(f"{f2(sb['avg'])} ({100 * sb['win']:.0f}%)" if sb else "-")
+        sg = gs(x45, f"g{ti}{si}{xi}")
+        gtxt = f"{f2(sg['avg'])} ({100 * sg['win']:.0f}%)" if sg else "-"
+        B.append(f"| {cname(ti, si, xi)} | {s['n']:,} | {100 * s['win']:.0f}% / {pc_(s['be'])} | **{f2(s['avg'])}** | "
+                 f"{f2(s['avg'] * GF_DELTA)} | {f1(s['t'])} | " + " | ".join(cells) + f" | {gtxt} | {f2(s['h1'])} / "
+                 f"{f2(s['h2'])} | {' / '.join(f2(p) for p in s['per'])} | {'**HELD**' if s['held'] else '-'} |")
+        ranked.append((s["avg"], ti, si, xi, s))
+    B.append("")
+
+    # ---------- C) entry time
+    C = ["## C) 9:40 vs 9:45 vs 10:00", "Same trades, three entry times (avg stock $ per trade, win %, t).", "",
+         "| Trade | " + " | ".join(f"Entry {lab}" for _, lab in GF_ENTRIES) + " |", "|---|" + "---|" * len(GF_ENTRIES)]
+    for ti, si, xi in combos:
+        if GF_EXITS[xi][0] != 1555 and GF_TGTS[ti][0] is None:
+            continue
+        cells = []
+        for E, _ in GF_ENTRIES:
+            s = gs(X[X.E == E], f"t{ti}{si}{xi}")
+            cells.append(f"{f2(s['avg'])} ({100 * s['win']:.0f}%, t {f1(s['t'])}){' HELD' if s['held'] else ''}" if s else "-")
+        C.append(f"| {cname(ti, si, xi)} | " + " | ".join(cells) + " |")
+    C.append("")
+
+    # ---------- D) filters
+    ranked.sort(key=lambda z: -z[0])
+    picks = [(z[1], z[2], z[3]) for z in ranked[:2]]
+    for want in ((4, 3, 1), (2, 1, 0)):
+        if want not in picks:
+            picks.append(want)
+    picks = picks[:4]
+    rel = {1: "WITH the fill", 0: "gray", -1: "AGAINST the fill"}
+    splits = [("ALL", x45)]
+    splits += [(nm, x45[(x45.gapsz >= lo_) & (x45.gapsz < hi_)]) for lo_, hi_, nm in GF_GAP]
+    splits += [("gap down (long)", x45[x45.d == 1]), ("gap up (short)", x45[x45.d == -1])]
+    splits += [("first 15 min moved TOWARD the fill", x45[x45.toward == 1]),
+               ("first 15 min moved AWAY from it", x45[x45.toward == 0])]
+    splits += [(f"5m pane background {v}", x45[x45.bg == k_]) for k_, v in rel.items()]
+    splits += [(f"5m Rainbow alone {v}", x45[x45.vx == k_]) for k_, v in rel.items()]
+    D = ["## D) What helps at 9:45?",
+         "The best trades from B plus two plain ones, split by what you can see at 9:45. Cells = avg stock $ (win %, t). "
+         "**Fills** = filled by the close (no stop).", "",
+         "| At 9:45 | Days | Fills | " + " | ".join(cname(*p) for p in picks) + " |", "|---|---|---|" + "---|" * len(picks)]
+    held_f = []
+    for nm, x in splits:
+        if len(x) < 20:
+            continue
+        cells = []
+        for p in picks:
+            s = gs(x, f"t{p[0]}{p[1]}{p[2]}")
+            if s and s["held"]:
+                held_f.append(f"{nm}: {cname(*p)} {f2(s['avg'])}")
+            cells.append(f"{f2(s['avg'])} ({100 * s['win']:.0f}%, t {f1(s['t'])}){' **HELD**' if s and s['held'] else ''}"
+                         if s else "-")
+        D.append(f"| {nm} | {len(x):,} | {pc_(x.fclose.mean())} | " + " | ".join(cells) + " |")
+    D.append("")
+
+    # ---------- summary
+    S = ["## The answer in 30 seconds"]
+    S.append(f"- **The gap is still open at 9:45 on {100 * len(x45) / max(ndays, 1):.0f}% of gap days.** Then it fills by the "
+             f"close {pc_(x45.fclose.mean())} of the time; by 11:00 {pc_(x45.f1100.mean())}.")
+    for lo_, hi_, dn_ in GF_DIST:
+        x = x45[(x45.dist >= lo_) & (x45.dist < hi_)]
+        if len(x):
+            S.append(f"- **{dn_} left at 9:45** ({len(x):,} days): fills by 11:00 {pc_(x.f1100.mean())}, by the close "
+                     f"{pc_(x.fclose.mean())}; typical heat first ${x.heat.median():.2f} (1 in 4 days ${x.heat.quantile(.75):.2f}+).")
+    for avg, ti, si, xi, s in ranked[:3]:
+        sg = gs(x45, f"g{ti}{si}{xi}")
+        S.append(f"- **Best: {cname(ti, si, xi)}** - {f2(avg)} stock $ a trade (~{f2(avg * GF_DELTA)} option), win "
+                 f"{100 * s['win']:.0f}% vs {pc_(s['be'])} needed, t {f1(s['t'])}, 2020-23 {f2(s['h1'])} / 2024-now "
+                 f"{f2(s['h2'])}{' - **HELD**' if s['held'] else ' - not held'}. With the gap instead: "
+                 f"{f2(sg['avg']) if sg else '-'}.")
+    nh = sum(1 for z in ranked if z[4]["held"])
+    S.append(f"- **HELD trades at 9:45: {nh} of {len(ranked)}.** Filters that held: " + ("; ".join(held_f[:8]) if held_f else "none") + ".")
+    md += S + [""] + A + B + C + D
+    md += [f"Runtime {(time.time() - t0) / 60:.1f} min. This is math/data, not financial advice."]
+    txt = "\n".join(md)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for fn in (f"gap_{stamp}.md", "gap_latest.md"):
+        with open(os.path.join(OUT, fn), "w") as f:
+            f.write(txt)
+    print(txt[:5000])
+    print(f"\nSaved {OUT}/gap_latest.md")
+
 if __name__ == "__main__":
+    if MODE == "gap":
+        gap_main()
+        sys.exit(0)
     if MODE == "night":
         night_main()
         sys.exit(0)
