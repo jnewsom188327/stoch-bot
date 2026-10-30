@@ -8,3 +8,5 @@ t,candle,sym,rule,tags,side,close,atr1,ttm,vwap_atr,fear,greed,seen_after_min,fi
 2026-10-29T14:24:08-04:00,14:23,QQQ,1m FAILED POP,R3 R4,PUTS,713.21,0.226,TURNING your way,7.43,21,69,0.1,,,,,712.53,no contract: 86 puts 0-1DTE > 5 priced 0.40-0.80 > 1 delta 0.15+ > 1 spread ok > 1 liquid > best one only -58% at the target (needs +10%) (76 greeks worked out here)
 2026-10-29T14:32:08-04:00,14:31,SPY,1m AGREE FLIP,FULL,PUTS,766.82,0.19,down,,54,32,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
 2026-10-30T11:06:08-04:00,11:05,SPY,1m AGREE FLIP,FULL,PUTS,758.82,0.311,down,,44,8,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
+2026-10-30T12:32:08-04:00,12:31,SPY,1m FAILED POP,R3 R4,PUTS,757.25,0.223,TURNING your way,8.37,27,76,0.1,,,,,756.58,no contract: 45 puts 0-1DTE > 1 priced 0.40-0.80 > 1 delta 0.15+ > 1 spread ok > 1 liquid > best one only -4% at the target (needs +10%) (84 greeks worked out here)
+2026-10-30T12:33:08-04:00,12:32,SPY,1m AGREE FLIP,FULL,PUTS,757.26,0.217,down,,31,61,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
