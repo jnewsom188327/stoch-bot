@@ -12,8 +12,11 @@ YOUR PLAN (settings below):
   AVERAGED   : sell all 20 at +10% over the new average price, or all at -30% from the average,
                or at 30 minutes after entry.
   ALSO   : nothing sold yet at 30 minutes -> sell all | flat 5 min before the close.
-SHADOW : every trade also logs what would have happened with NO averaging down
-         (all 10 sold at the moment the 1.5 ATR trigger hit), so you can compare the two plans.
+SHADOW : every trade also logs two other plans so you can compare all three:
+         no_avg_down_pnl_usd  = CUT: all 10 sold at the moment the 1.5 ATR trigger hit.
+         hold_no_add_pnl_usd  = HOLD: keep the original 10, add nothing, run the normal (not averaged) exits:
+                                +25% sell 7, runners -15% / 3 min stall, 30-minute cap, flat before the close.
+         (On trades that never averaged, all three are the same number.)
 Option prices for the % rules = middle of bid/ask. Orders are market orders (paper fills).
 Data = Alpaca's free IEX feed, so a fire can occasionally differ from the TradingView chart.
 Logs: fear_trades.csv (one row per finished trade), fear_fills.csv (every buy/sell), fear_state.json (open trades).
@@ -81,6 +84,19 @@ def hhmm(dt):
 
 def append_csv(path, row):
     new = not os.path.exists(path)
+    if not new:                                   # a new column was added: rewrite the old rows with it (blank)
+        with open(path, newline="") as f:
+            rd = csv.DictReader(f)
+            old_fields, old_rows = rd.fieldnames or [], list(rd)
+        if old_fields and list(row.keys()) != old_fields:
+            fields = old_fields + [k for k in row.keys() if k not in old_fields]
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                for r in old_rows:
+                    w.writerow({k: r.get(k, "") for k in fields})
+                w.writerow({k: row.get(k, "") for k in fields})
+            return
     with open(path, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(row.keys()))
         if new:
@@ -88,9 +104,12 @@ def append_csv(path, row):
         w.writerow(row)
 
 
+PEND = []   # finished averaged trades whose HOLD shadow (original 10, no add) is still being followed
+
+
 def save_state(trades, day):
     with open(STATE, "w") as f:
-        json.dump(dict(day=day.isoformat(), trades=trades), f, indent=1, default=str)
+        json.dump(dict(day=day.isoformat(), trades=trades, pend=PEND), f, indent=1, default=str)
 
 
 def load_state(day):
@@ -98,6 +117,7 @@ def load_state(day):
         with open(STATE) as f:
             s = json.load(f)
         if s.get("day") == day.isoformat():
+            PEND[:] = s.get("pend", [])
             return s.get("trades", {})
     except Exception:
         pass
@@ -423,33 +443,90 @@ def sell(tc, tr, qty, reason):
     return True
 
 
+def hold_step(h, m, now, flat_dt, t0):
+    """HOLD shadow: the original 10 contracts with the normal (not averaged) exits, priced at the option mid m."""
+    if h["done"]:
+        return
+    age = (now - t0).total_seconds() / 60
+
+    def out(qty, reason):
+        h["realized"] += (m - h["fill"]) * 100 * qty
+        h["qty"] -= qty
+        h["reason"] = reason
+        if h["qty"] <= 0:
+            h["done"] = True
+
+    if now >= flat_dt:
+        out(h["qty"], "FLAT before the close")
+    elif not h["partial"]:
+        if m >= h["fill"] * (1 + TP_PCT / 100) and h["qty"] > PARTIAL_QTY:
+            out(PARTIAL_QTY, f"TARGET +{TP_PCT}%")
+            h["partial"], h["peak"], h["peak_t"] = True, m, now.isoformat()
+        elif age >= MAX_HOLD_MIN:
+            out(h["qty"], f"TIME {MAX_HOLD_MIN} min")
+    else:
+        if m > h["peak"]:
+            h["peak"], h["peak_t"] = m, now.isoformat()
+        stall = (now - datetime.fromisoformat(h["peak_t"])).total_seconds() / 60
+        if m <= h["peak"] * (1 - TRAIL_PCT / 100):
+            out(h["qty"], f"RUNNERS: -{TRAIL_PCT}% from best")
+        elif stall >= STALL_MIN:
+            out(h["qty"], f"RUNNERS: no new high for {STALL_MIN} min")
+        elif age >= MAX_HOLD_MIN:
+            out(h["qty"], f"TIME {MAX_HOLD_MIN} min")
+
+
 def finish(tr):
+    """Log the trade. An averaged trade whose HOLD shadow is still running waits in PEND until it ends."""
+    h = tr.get("hold")
+    if tr["averaged"] and h and not h["done"]:
+        tr["end_t"] = now_et().isoformat()
+        PEND.append(tr)
+        log(f"{tr['sym']} trade closed ${tr['realized']:+.2f} - following the HOLD plan (original 10, no add) until it ends")
+        return
+    write_row(tr)
+
+
+def write_row(tr):
     t0 = datetime.fromisoformat(tr["t"])
+    t1 = datetime.fromisoformat(tr["end_t"]) if tr.get("end_t") else now_et()
     shadow = tr["shadow"] if tr["averaged"] else tr["realized"]
+    h = tr.get("hold")
+    hold = h["realized"] if (tr["averaged"] and h) else tr["realized"]
     append_csv(TRADES_LOG, dict(
         date=now_et().strftime("%Y-%m-%d"), ticker=tr["sym"], side="CALL" if tr["side"] == 1 else "PUT",
         trigger=tr["trigger"], stretch=tr["score"], contract=tr["contract"],
-        entry_time=t0.strftime("%H:%M"), exit_time=now_et().strftime("%H:%M"),
-        minutes=round((now_et() - t0).total_seconds() / 60, 1), entry_fill=tr["fill"], avg_cost=round(tr["avg"], 3),
+        entry_time=t0.strftime("%H:%M"), exit_time=t1.strftime("%H:%M"),
+        minutes=round((t1 - t0).total_seconds() / 60, 1), entry_fill=tr["fill"], avg_cost=round(tr["avg"], 3),
         contracts=tr["max_qty"], averaged_down="YES" if tr["averaged"] else "no", exit_reason=tr["last_reason"],
         pnl_usd=round(tr["realized"], 2), no_avg_down_pnl_usd=round(shadow, 2),
         best_pct=round(tr["best"], 1), worst_pct=round(tr["worst"], 1),
-        spot_entry=round(tr["spot"], 2), atr=round(tr["atr"], 3)))
-    log(f"{tr['sym']} TRADE DONE: ${tr['realized']:+.2f} (without averaging down: ${shadow:+.2f})")
+        spot_entry=round(tr["spot"], 2), atr=round(tr["atr"], 3), hold_no_add_pnl_usd=round(hold, 2)))
+    log(f"{tr['sym']} TRADE DONE: ${tr['realized']:+.2f} (cut at the trigger: ${shadow:+.2f} | hold 10, no add: ${hold:+.2f})")
 
 
 def manage(tc, oc, dc, trades, flat_dt):
     """Every few seconds: average-down trigger, +25% sale, runners, averaged exits, 30-minute cap."""
-    if not trades:
+    if not trades and not PEND:
         return False
-    q = mids(oc, {t["contract"] for t in trades.values()})
-    spots = stock_prices(dc, {t["sym"] for t in trades.values()})
+    q = mids(oc, {t["contract"] for t in trades.values()} | {t["contract"] for t in PEND})
+    spots = stock_prices(dc, {t["sym"] for t in trades.values()}) if trades else {}
     now = now_et()
     changed = False
+    for tr in list(PEND):                                   # HOLD shadows of trades that already closed
+        m = q.get(tr["contract"])
+        if m:
+            hold_step(tr["hold"], m, now, flat_dt, datetime.fromisoformat(tr["t"]))
+        if tr["hold"]["done"]:
+            write_row(tr)
+            PEND.remove(tr)
+            changed = True
     for sym, tr in list(trades.items()):
         m = q.get(tr["contract"])
         if not m:
             continue
+        if tr.get("hold"):
+            hold_step(tr["hold"], m, now, flat_dt, datetime.fromisoformat(tr["t"]))
         pct = (m / tr["avg"] - 1) * 100
         tr["best"], tr["worst"] = max(tr["best"], pct), min(tr["worst"], pct)
         age = (now - datetime.fromisoformat(tr["t"])).total_seconds() / 60
@@ -478,6 +555,8 @@ def manage(tc, oc, dc, trades, flat_dt):
             against = None if s is None else ((tr["spot"] - s) if tr["side"] == 1 else (s - tr["spot"]))
             if AVG_DOWN and against is not None and against >= ADD_ATR * tr["atr"]:
                 tr["shadow"] = (m - tr["fill"]) * 100 * tr["qty"]          # the no-average-down plan exits here
+                tr["hold"] = dict(qty=QTY, fill=tr["fill"], partial=False, peak=m, peak_t=now.isoformat(),
+                                  realized=0.0, done=False, reason="")      # the hold-10-no-add plan starts here
                 px = market(tc, tr["contract"], ADD_QTY, True)
                 if px is not None:
                     tr["avg"] = (tr["avg"] * tr["qty"] + px * ADD_QTY) / (tr["qty"] + ADD_QTY)
@@ -491,6 +570,7 @@ def manage(tc, oc, dc, trades, flat_dt):
                     changed = True
                 else:
                     tr["shadow"] = None
+                    tr["hold"] = None
             elif m >= tr["fill"] * (1 + TP_PCT / 100) and tr["qty"] > PARTIAL_QTY:
                 if sell(tc, tr, PARTIAL_QTY, f"TARGET +{TP_PCT}%"):
                     tr["partial"], tr["peak"], tr["peak_t"] = True, m, now.isoformat()
@@ -611,13 +691,13 @@ def run_loop(tc, dc, oc):
             rem = (target - now_et()).total_seconds()
             if rem <= 0:
                 break
-            if trades and manage(tc, oc, dc, trades, flat_dt):
+            if (trades or PEND) and manage(tc, oc, dc, trades, flat_dt):
                 save_state(trades, today)
-            time.sleep(min(rem, CHECK_SECS) if trades else rem)
+            time.sleep(min(rem, CHECK_SECS) if (trades or PEND) else rem)
 
         now = now_et()
         if now >= flat_dt:
-            if trades and manage(tc, oc, dc, trades, flat_dt):
+            if (trades or PEND) and manage(tc, oc, dc, trades, flat_dt):
                 save_state(trades, today)
             continue
         try:
@@ -664,17 +744,27 @@ def summary(today):
     td = [r for r in rows if r["date"] == today.isoformat()]
 
     def tot(rs, k):
-        return sum(float(r[k]) for r in rs if r[k] not in ("", "nan"))
+        return sum(float(r[k]) for r in rs if r.get(k) not in (None, "", "nan"))
+
+    def hd(rs):
+        return [r for r in rs if r.get("hold_no_add_pnl_usd") not in (None, "", "nan")]
+
+    def hcell(r):
+        v = r.get("hold_no_add_pnl_usd")
+        return "-" if v in (None, "", "nan") else f"{float(v):+.2f}"
 
     lines = [f"## Fear Snap bot - {today}",
-             f"Today: {len(td)} trades, **${tot(td, 'pnl_usd'):+,.2f}** (without averaging down: ${tot(td, 'no_avg_down_pnl_usd'):+,.2f})",
-             f"All time: {len(rows)} trades, **${tot(rows, 'pnl_usd'):+,.2f}** (without averaging down: ${tot(rows, 'no_avg_down_pnl_usd'):+,.2f})",
-             "", "| Ticker | Side | Trigger | In | Out | Contracts | Avg down | Exit | $ | $ no avg down |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             f"Today: {len(td)} trades, **${tot(td, 'pnl_usd'):+,.2f}** (cut at the trigger: ${tot(td, 'no_avg_down_pnl_usd'):+,.2f}"
+             f" | hold 10, no add: ${tot(hd(td), 'hold_no_add_pnl_usd'):+,.2f} on {len(hd(td))} trades)",
+             f"All time: {len(rows)} trades, **${tot(rows, 'pnl_usd'):+,.2f}** (cut at the trigger: ${tot(rows, 'no_avg_down_pnl_usd'):+,.2f}"
+             f" | hold 10, no add: ${tot(hd(rows), 'hold_no_add_pnl_usd'):+,.2f} on the {len(hd(rows))} trades logged since it was added,"
+             f" vs ${tot(hd(rows), 'pnl_usd'):+,.2f} averaging on those)",
+             "", "| Ticker | Side | Trigger | In | Out | Contracts | Avg down | Exit | $ | $ cut at trigger | $ hold 10 no add |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in td:
         lines.append(f"| {r['ticker']} | {r['side']} | {r['trigger']} | {r['entry_time']} | {r['exit_time']} | "
                      f"{r['contracts']} | {r['averaged_down']} | {r['exit_reason']} | {float(r['pnl_usd']):+.2f} | "
-                     f"{float(r['no_avg_down_pnl_usd']):+.2f} |")
+                     f"{float(r['no_avg_down_pnl_usd']):+.2f} | {hcell(r)} |")
     text = "\n".join(lines)
     log("\n" + text)
     s = os.getenv("GITHUB_STEP_SUMMARY")
