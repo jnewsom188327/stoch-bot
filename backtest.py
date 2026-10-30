@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "panes").strip().lower() or "panes"
+MODE = os.getenv("MODE", "night").strip().lower() or "night"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -17333,7 +17333,492 @@ def panes_main():
     print(txt[:4000])
     print(f"\nSaved {OUT}/panes_latest.md")
 
+
+# ================================================================ OVERNIGHT MAXES (MODE=night) - PRE-MARKET + AFTER-HOURS
+# Your Vix Fix pane (VIX FIX RAINBOW math: 22 / 50, 0-100) running on the extended-hours chart (4:00-20:00 ET, the data
+# has nothing from 20:00 to 4:00). EVENT = the first candle of a max streak (fear or greed reaches 95+ / 100) in each session:
+#   PRE-MARKET 4:00-9:30 | REGULAR HOURS 9:30-16:00 (the comparison) | AFTER-HOURS 16:00-20:00.
+# Everything is measured the REVERSAL way, like you trade it: + = price went back against the max (UP after fear, DOWN after
+# greed), - = it kept going the max's way. Always shown as "vs usual" = minus what any candle / any day does the same way.
+#   IN-SESSION: from the next candle's open, 5 / 10 / 20 candles later (cut at the session's end), best snap-back and further
+#               push in 10 candles. ATR = the chart's ATR 14 at the max.
+#   INTO REGULAR HOURS (pre-market -> the same day, after-hours -> the next day): event close -> 9:30 open, the gap (open vs
+#               the prior close), open -> 9:45, then from 9:45 (you skip the first 15 min) -> 10:15 / 11:00 / close, open ->
+#               close, the day's range, how often 9:45 -> close went the reversal way. $ = dollars at TODAY's SPY / QQQ price.
+# t = edge / noise with one cluster per DAY (SPY and QQQ move together). HELD = |t| 3+, same sign in 2020-23 and 2024-now and on
+# SPY and QQQ, 100+ days. DATA ONLY.
+ON_TFS = [int(x) for x in os.getenv("ON_TFS", "1,2,3,5").split(",") if x.strip()]
+ON_SPLIT = datetime.fromisoformat(os.getenv("ON_SPLIT", "2024-01-01")).date()
+ON_LV = [(95.0, "95+"), (99.999, "100")]
+ON_K = (5, 10, 20)
+ON_SESS = {0: "PRE-MARKET", 1: "REGULAR HOURS", 2: "AFTER-HOURS"}
+ON_SIDE = {1: "FEAR maxed", -1: "GREED maxed"}
+ON_D = [("open", "to the 9:30 open"), ("gap", "gap (open vs prior close)"), ("o945", "open -> 9:45"),
+        ("e1015", "9:45 -> 10:15"), ("e1100", "9:45 -> 11:00"), ("eclose", "9:45 -> close"), ("oclose", "open -> close")]
+ON_BUCKETS = {0: [(400, 600, "4:00-6:00"), (600, 800, "6:00-8:00"), (800, 900, "8:00-9:00"), (900, 930, "9:00-9:30")],
+              2: [(1600, 1700, "16:00-17:00"), (1700, 1800, "17:00-18:00"), (1800, 2000, "18:00-20:00")]}
+
+
+def on_refs(df1):
+    """regular-hours reference prices per trading day (from 1m bars)"""
+    hm = df1.index.hour * 100 + df1.index.minute
+    r = df1[(hm >= 930) & (hm < 1600)]
+    d = np.array(r.index.date)
+    hmr = np.asarray(r.index.hour * 100 + r.index.minute)
+    g = r.groupby(d)
+    R = pd.DataFrame({"o": g["open"].first(), "c": g["close"].last(), "hi": g["high"].max(), "lo": g["low"].min(),
+                      "n": g["close"].size(), "t0": pd.Series(hmr, index=r.index).groupby(d).first()})
+    for X in (945, 1015, 1100):
+        m = hmr < X
+        sub = r[m]
+        R[f"p{X}"] = sub.groupby(d[m])["close"].last()
+    R["pc"] = R["c"].shift(1)
+    R = R[(R.t0 <= 935) & (R.n >= 150)].copy()
+    o, c, pc = R.o.to_numpy(), R.c.to_numpy(), R.pc.to_numpy()
+    p945, p1015, p1100 = R.p945.to_numpy(), R.p1015.to_numpy(), R.p1100.to_numpy()
+    M = dict(gap=(o - pc) / pc, o945=(p945 - o) / o, e1015=(p1015 - p945) / p945, e1100=(p1100 - p945) / p945,
+             eclose=(c - p945) / p945, oclose=(c - o) / o, rng=(R.hi.to_numpy() - R.lo.to_numpy()) / o)
+    ords = np.array([x.toordinal() for x in R.index])
+    return R, M, ords
+
+
+def on_t(v, days):
+    s = pd.Series(np.asarray(v, dtype=float)).groupby(np.asarray(days)).mean().dropna()
+    if len(s) < 5 or s.std(ddof=1) == 0:
+        return float("nan")
+    return s.mean() / (s.std(ddof=1) / np.sqrt(len(s)))
+
+
+def on_events(df1, df, tf, sym, R, M, ords, LP):
+    """every max-streak start on this chart, with its in-session and regular-hours outcomes"""
+    o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
+    n = len(c)
+    ar = np.arange(n)
+    pc_ = np.r_[c[0], c[:-1]]
+    tr = np.maximum(h - l, np.maximum(np.abs(h - pc_), np.abs(l - pc_)))
+    a = pd.Series(tr).ewm(alpha=1 / 14, adjust=False).mean().to_numpy()
+    A = np.where(a > 0, a, np.nan)
+    F, G = vfx_pane(df)
+    F, G = np.nan_to_num(F), np.nan_to_num(G)
+    ts = df.index
+    hm = np.asarray(ts.hour * 100 + ts.minute)
+    day = np.array(ts.date)
+    dord = np.array([x.toordinal() for x in day])
+    sess = np.where(hm < 930, 0, np.where(hm < 1600, 1, 2))
+    dcode = pd.factorize(day)[0]
+    key = dcode * 3 + sess
+    slast = pd.Series(ar).groupby(key).transform("max").to_numpy()
+    # ---- in-session outcomes for every candle (ATR units, long)
+    e_ok = ar + 1 <= slast
+    entry = o[np.minimum(ar + 1, n - 1)]
+    RK = {}
+    for k in ON_K:
+        j = np.minimum(ar + k, slast)
+        RK[k] = np.where(e_ok, (c[j] - entry) / A, np.nan)
+    hi10 = np.full(n, -np.inf)
+    lo10 = np.full(n, np.inf)
+    for off in range(1, 11):
+        jj = ar + off
+        okj = jj <= slast
+        jj2 = np.minimum(jj, n - 1)
+        hi10 = np.where(okj, np.maximum(hi10, h[jj2]), hi10)
+        lo10 = np.where(okj, np.minimum(lo10, l[jj2]), lo10)
+    up10 = np.where(e_ok & np.isfinite(hi10), (hi10 - entry) / A, np.nan)
+    dn10 = np.where(e_ok & np.isfinite(lo10), (entry - lo10) / A, np.nan)
+    B = {}
+    for s in (0, 1, 2):
+        m = (sess == s) & e_ok
+        B[s] = {k: np.nanmean(RK[k][m]) if m.any() else 0.0 for k in ON_K}
+        B[s]["up"] = np.nanmean(up10[m]) if m.any() else 0.0
+        B[s]["dn"] = np.nanmean(dn10[m]) if m.any() else 0.0
+    # ---- target regular-hours day: pre-market -> same day, after-hours -> next day, regular -> same day
+    p_same = np.searchsorted(ords, dord, "left")
+    p_next = np.searchsorted(ords, dord, "right")
+    ok_same = (p_same < len(ords)) & (ords[np.minimum(p_same, len(ords) - 1)] == dord)
+    ok_next = (p_next < len(ords)) & (ords[np.minimum(p_next, len(ords) - 1)] - dord <= 4)
+    tp = np.where(sess == 2, np.where(ok_next, p_next, -1), np.where(ok_same, p_same, -1))
+    tpc = np.maximum(tp, 0)
+    Ro, Rc = R.o.to_numpy(), R.c.to_numpy()
+    to_open = np.where((tp >= 0) & (sess != 1), (Ro[tpc] - c) / c, np.nan)
+    to_close = np.where((tp >= 0) & (sess == 1), (Rc[tpc] - c) / c, np.nan)
+    b_open = {s: np.nanmean(to_open[sess == s]) if np.isfinite(to_open[sess == s]).any() else 0.0 for s in (0, 2)}
+    b_close = np.nanmean(to_close[sess == 1]) if np.isfinite(to_close[sess == 1]).any() else 0.0
+    valid_day = np.isfinite(M["gap"])
+    Rb = {k: np.nanmean(v[valid_day]) for k, v in M.items()}
+    ec = M["eclose"][valid_day]
+    b_up, b_dn = np.nanmean(ec > 0), np.nanmean(ec < 0)
+    rows = []
+    for sd, X, Y in ((1, F, G), (-1, G, F)):
+        for lv, lvn in ON_LV:
+            mx = X >= lv
+            st = mx & ~np.r_[False, mx[:-1]]
+            idx = np.nonzero(st)[0]
+            if not len(idx):
+                continue
+            s_ = sess[idx]
+            bk = {k: np.array([B[s][k] for s in s_]) for k in ON_K}
+            bup = np.array([B[s]["up"] for s in s_])
+            bdn = np.array([B[s]["dn"] for s in s_])
+            t_ = tp[idx]
+            tc = np.maximum(t_, 0)
+            okd = (t_ >= 0) & (s_ != 1)
+            d = dict(sym=sym, tf=tf, lv=lvn, side=sd, sess=s_, i=idx, tpos=t_, day=day[idx], hm=hm[idx],
+                     late=day[idx] >= ON_SPLIT, os60=Y[idx] >= 60, atr_usd=a[idx] / c[idx] * LP)
+            for k in ON_K:
+                d[f"r{k}"] = sd * (RK[k][idx] - bk[k])
+            d["win10"] = np.where(np.isfinite(RK[10][idx]), (sd * RK[10][idx] > 0).astype(float), np.nan)
+            d["snap"] = np.where(sd == 1, up10[idx] - bup, dn10[idx] - bdn)
+            d["furth"] = np.where(sd == 1, dn10[idx] - bdn, up10[idx] - bup)
+            d["usd10"] = sd * RK[10][idx] * a[idx] / c[idx] * LP
+            bo = np.array([b_open.get(s, 0.0) for s in s_])
+            d["d_open"] = np.where(okd, sd * (to_open[idx] - bo) * LP, np.nan)
+            for k in ("gap", "o945", "e1015", "e1100", "eclose", "oclose"):
+                d[f"d_{k}"] = np.where(okd, sd * (M[k][tc] - Rb[k]) * LP, np.nan)
+            d["d_rng"] = np.where(okd, (M["rng"][tc] - Rb["rng"]) * LP, np.nan)
+            ecv = M["eclose"][tc]
+            d["d_win"] = np.where(okd & np.isfinite(ecv), (sd * ecv > 0).astype(float) - (b_up if sd == 1 else b_dn), np.nan)
+            gp = M["gap"][tc]
+            d["gap_agree"] = np.where(okd & np.isfinite(gp), ((sd == 1) & (gp < 0)) | ((sd == -1) & (gp > 0)), False)
+            d["tclose"] = np.where(s_ == 1, sd * (to_close[idx] - b_close) * LP, np.nan)
+            rows.append(pd.DataFrame(d))
+    if not rows:
+        return pd.DataFrame()
+    E = pd.concat(rows, ignore_index=True).sort_values("i", kind="stable")
+    E["first"] = E.groupby(["lv", "sess", "side", "day"]).cumcount() == 0
+    E["last"] = E["i"] == E.groupby(["lv", "sess", "day"])["i"].transform("max")
+    E["only"] = E.groupby(["lv", "sess", "day"])["side"].transform("nunique") == 1
+    return E
+
+
+def on_held(x, col):
+    v = x[col].dropna()
+    if x.loc[v.index, "day"].nunique() < 100:
+        return False
+    t = on_t(v, x.loc[v.index, "day"])
+    if not np.isfinite(t) or abs(t) < 3:
+        return False
+    sg = np.sign(v.mean())
+    for part in (x[~x.late], x[x.late], *(x[x.sym == s] for s in SYMBOLS)):
+        pv = part[col].dropna()
+        if not len(pv) or np.sign(pv.mean()) != sg:
+            return False
+    return True
+
+
+def night_main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    if test:
+        start = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    allE, LPs, ndays, ND = [], {}, {}, []
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1 = fake_1m(sym, start, end)[0] if test else fetch_1m(sym, start, end)[0]
+        R, M, ords = on_refs(df1)
+        LP = float(df1["close"].iloc[-1])
+        okn = np.isfinite(M["gap"])
+        pcv, hiv, lov = R.pc.to_numpy(), R.hi.to_numpy(), R.lo.to_numpy()
+        ND.append(pd.DataFrame({"sym": sym, "tpos": np.arange(len(R))[okn], "day": np.array(R.index)[okn],
+                                "night": M["gap"][okn] * LP, "dayv": M["oclose"][okn] * LP, "rng": M["rng"][okn] * LP,
+                                "fill": np.where(M["gap"][okn] > 0, lov[okn] <= pcv[okn], hiv[okn] >= pcv[okn])}))
+        LPs[sym] = LP
+        ndays[sym] = len(R)
+        for tf in ON_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            E = on_events(df1, df, tf, sym, R, M, ords, LP)
+            allE.append(E)
+            print(f"  {sym} {tf}m: {len(df):,} candles, {len(E):,} max starts", flush=True)
+    E = pd.concat(allE, ignore_index=True)
+    nd = np.mean(list(ndays.values()))
+    f2 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.2f}"
+    f3 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.3f}"
+    f1 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:.1f}"
+
+    def drow(x, lab, cols=("open", "gap", "o945", "e1015", "e1100", "eclose", "oclose")):
+        x = x[x.d_eclose.notna() | x.d_open.notna()]
+        if not len(x):
+            return None
+        ndy = x.day.nunique()
+        vals = " | ".join(f2(x[f"d_{k}"].mean()) for k in cols)
+        tt = " / ".join(f1(on_t(x[f"d_{k}"].dropna(), x.loc[x[f"d_{k}"].notna(), "day"])) for k in ("open", "eclose", "oclose"))
+        h = " / ".join(f2(p.d_eclose.mean()) for p in (x[~x.late], x[x.late]))
+        ss = " / ".join(f2(x[x.sym == s].d_eclose.mean()) for s in SYMBOLS)
+        held = [nm for k, nm in (("open", "to open"), ("eclose", "9:45->close"), ("oclose", "open->close"), ("gap", "gap"))
+                if on_held(x, f"d_{k}")]
+        return (f"| {lab} | {ndy:,} | {vals} | {tt} | {100 * x.d_win.mean():+.0f} | {f2(x.d_rng.mean())} | {h} | {ss} | "
+                f"{'**' + ', '.join(held) + '**' if held else '-'} |"), held
+
+    DHEAD = ("| Event | Days | " + " | ".join(nm for _, nm in ON_D) + " | t: open / 9:45->close / open->close | 9:45->close "
+             "reversal way, pts vs usual | Day range vs usual | 9:45->close 2020-23 / 2024-now | " +
+             " / ".join(SYMBOLS) + " (9:45->close) | HELD |")
+    DSEP = "|---|---|" + "---|" * len(ON_D) + "---|---|---|---|---|---|"
+    md = [f"# OVERNIGHT MAXES - PRE-MARKET + AFTER-HOURS VIX FIX FEAR / GREED - {', '.join(SYMBOLS)} - "
+          f"{datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d} (4:00-20:00 ET; nothing exists 20:00-4:00), charts {', '.join(f'{t}m' for t in ON_TFS)}, "
+          f"about {nd:,.0f} trading days. Your Vix Fix pane (22 / 50, 0-100) on the extended-hours chart. DATA ONLY.",
+          "**Event** = the first candle of a max streak (fear or greed reaches 95+ / 100). **Sessions**: PRE-MARKET 4:00-9:30, "
+          "REGULAR 9:30-16:00, AFTER-HOURS 16:00-20:00. **Everything is the REVERSAL way**: + = price went back against the max "
+          "(UP after fear, DOWN after greed); - = it kept going the max's way. **vs usual** = minus what any candle / any day "
+          "does the same way, so 0 = the max tells you nothing.",
+          f"**$** = dollars at TODAY's price ({', '.join(f'{s} ${p:,.0f}' for s, p in LPs.items())}). **First** = the first fear "
+          "(or greed) max of that session that day. Pre-market maxes are scored on the SAME day's regular session; after-hours "
+          "maxes on the NEXT day's. **t** = edge / noise, one cluster per day. **HELD** = |t| 3+, same sign in 2020-23 and "
+          "2024-now and on " + " and ".join(SYMBOLS) + ", 100+ days.", ""]
+
+    # ---------- NIGHT vs DAY
+    N = pd.concat(ND, ignore_index=True)
+    N["late"] = N.day >= ON_SPLIT
+    N["ndir"] = np.sign(N.night)
+    N = N[N.ndir != 0]
+    N["follow"] = N.ndir * N.dayv                  # day move in the night's direction ($)
+    N["cont"] = (N.follow > 0).astype(float)
+
+    def nrow(x, lab, base=None):
+        if len(x) < 5:
+            return None
+        cc = 100 * x.cont.mean()
+        h = " / ".join(f"{100 * p.cont.mean():.0f}%" if len(p) else "-" for p in (x[~x.late], x[x.late]))
+        ss = " / ".join(f"{100 * x[x.sym == s_].cont.mean():.0f}%" if (x.sym == s_).any() else "-" for s_ in SYMBOLS)
+        ratio = (x.dayv.abs() / x.night.abs().clip(lower=1e-9)).median()
+        cor = np.corrcoef(x.night, x.dayv)[0, 1] if len(x) > 10 else float("nan")
+        tt = on_t(x.follow - (base if base is not None else 0.0), x.day) if base is not None else float("nan")
+        return (f"| {lab} | {x.day.nunique():,} | ${x.night.mean():+.2f} (${x.night.abs().median():.2f}) | "
+                f"${x.dayv.mean():+.2f} (${x.dayv.abs().median():.2f}) | **{cc:.0f}%** / {100 - cc:.0f}% | "
+                f"${x.follow.mean():+.2f} | {f1(tt)} | {100 * x['fill'].mean():.0f}% | {ratio:.1f}x | {f2(cor)} | "
+                f"${x.rng.mean():.2f} | {h} | {ss} |")
+
+    NHEAD = ("| Nights | Days | Night move avg (typical size) | Day move avg (typical size) | Day KEPT the night's direction / "
+             "REVERSED it | Day $ the night's way (avg) | t vs all nights | Gap filled | Day size / night size (median) | "
+             "Correlation night vs day | Day range | Kept going: 2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " |")
+    NSEP = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    base_all = N.follow.mean()
+    nmd = ["## NIGHT vs DAY - the short answer to your question",
+           "**Night** = the 16:00 close to the next 9:30 open (after-hours + overnight + pre-market). **Day** = 9:30 open to "
+           "16:00 close. **Kept the night's direction** = the day closed further the same way the night went (night down -> "
+           "day down). **Gap filled** = the day traded back to the prior close. $ = today's prices. "
+           "**Fear / greed maxed** = your Vix Fix pane hit 95+ at least once that night (after-hours or pre-market).", "",
+           "### Every night, by how big the night move was", "", NHEAD, NSEP]
+    r = nrow(N, "ALL nights", base_all)
+    nmd.append(r)
+    q1, q2 = N.night.abs().quantile([1 / 3, 2 / 3])
+    for dname, dd in (("DOWN", -1), ("UP", 1)):
+        for nm, lo_, hi_ in (("small", 0, q1), ("medium", q1, q2), ("big", q2, np.inf)):
+            x = N[(N.ndir == dd) & (N.night.abs() >= lo_) & (N.night.abs() < hi_)]
+            r = nrow(x, f"Night {dname}, {nm} (${lo_:.2f}-{'' if not np.isfinite(hi_) else f'${hi_:.2f}'})", base_all)
+            if r:
+                nmd.append(r)
+    nmd.append("")
+    nsum = []
+    for tf in ON_TFS:
+        x = E[(E.tf == tf) & (E.lv == "95+") & (E.sess != 1) & (E.tpos >= 0)]
+        fl = x.groupby(["sym", "tpos"]).side.agg(lambda v: (int((v == 1).any()), int((v == -1).any())))
+        Nt = N.copy()
+        kk = list(zip(Nt.sym, Nt.tpos))
+        fv = [fl.get(k, (0, 0)) for k in kk]
+        Nt["fear"] = [f_ for f_, _ in fv]
+        Nt["greed"] = [g_ for _, g_ in fv]
+        grp = {"fear only": (Nt.fear == 1) & (Nt.greed == 0), "greed only": (Nt.fear == 0) & (Nt.greed == 1),
+               "both": (Nt.fear == 1) & (Nt.greed == 1), "neither": (Nt.fear == 0) & (Nt.greed == 0)}
+        nmd += [f"### {tf}m chart: nights by what your Vix Fix did", "", NHEAD, NSEP]
+        for dname, dd in (("DOWN", -1), ("UP", 1)):
+            for gname, gm in grp.items():
+                xx = Nt[(Nt.ndir == dd) & gm]
+                r = nrow(xx, f"Night {dname}, {gname} maxed" if gname != "neither" else f"Night {dname}, nothing maxed",
+                         base_all)
+                if r:
+                    nmd.append(r)
+        nmd.append("")
+        for dname, dd, gname in (("down", -1, "fear only"), ("up", 1, "greed only")):
+            xx = Nt[(Nt.ndir == dd) & grp[gname]]
+            if len(xx):
+                nsum.append((tf, dname, gname, 100 * xx.cont.mean(), xx.follow.mean(), len(xx)))
+    allc = 100 * N.cont.mean()
+    s1 = [f"- **All nights:** the day kept the night's direction **{allc:.0f}%** of the time (reversed {100 - allc:.0f}%), "
+          f"the gap filled {100 * N['fill'].mean():.0f}% of days, and the day moved {(N.dayv.abs() / N.night.abs()).median():.1f}x "
+          f"the night's size (median)."]
+    for dname, gname in (("down", "fear only"), ("up", "greed only")):
+        vv = [f"{c_:.0f}% (${f_:+.2f}, {n_:,} days)" for tf_, dn, gn, c_, f_, n_ in nsum if dn == dname]
+        s1.append(f"- **Night {dname.upper()} with {gname.replace(' only', '')} maxed:** the day kept going {dname} "
+                  + " / ".join(vv) + f" on {'/'.join(str(t) + 'm' for t in ON_TFS)} (vs {allc:.0f}% for all nights).")
+    # ---------- summary
+    summ = ["## The detail in 30 seconds"]
+    for s in (0, 2):
+        for sd in (1, -1):
+            parts = []
+            for k, nm in (("open", "to the open"), ("eclose", "9:45 -> close"), ("oclose", "open -> close")):
+                vv = []
+                for tf in ON_TFS:
+                    x = E[(E.tf == tf) & (E.sess == s) & (E.side == sd) & (E.lv == "95+") & E["first"]]
+                    vv.append(f2(x[f"d_{k}"].mean()) if len(x) else "-")
+                parts.append(f"{nm} {' / '.join(vv)}")
+            x1 = E[(E.tf == ON_TFS[0]) & (E.sess == s) & (E.side == sd) & (E.lv == "95+") & E["first"]]
+            pct = 100 * x1.groupby("sym").day.nunique().mean() / nd if len(x1) else 0
+            summ.append(f"- **{ON_SIDE[sd]} in the {ON_SESS[s].lower()}** (first of the session, 95+, on {pct:.0f}% of days on "
+                        f"{ON_TFS[0]}m): $ vs usual on {'/'.join(str(t) + 'm' for t in ON_TFS)} - " + " | ".join(parts))
+    for s in (0, 2):
+        for sd in (1, -1):
+            vv = []
+            for tf in ON_TFS:
+                x = E[(E.tf == tf) & (E.sess == s) & (E.side == sd) & (E.lv == "95+")]
+                vv.append(f"{f3(x.r10.mean())} (t {f1(on_t(x.r10.dropna(), x.loc[x.r10.notna(), 'day']))})")
+            summ.append(f"- **{ON_SIDE[sd]} in the {ON_SESS[s].lower()}, the next 10 candles** (every max, 95+, ATR vs usual, "
+                        f"+ = snaps back): " + " / ".join(vv))
+    held_list = []
+    md += ["## The answer in 30 seconds - night vs day"] + s1 + [""] + nmd
+    md += ["# DETAIL - the move right after each overnight max", ""]
+    md += summ + ["", "HELD rows (see the tables): HELDLIST", ""]
+
+    # ---------- how often + when
+    md += ["## How often and when (95+, first candle of each max streak, per trading day, SPY + QQQ averaged)", ""]
+    tfs2 = [t for t in (ON_TFS[0], ON_TFS[-1])]
+    hdr = "| Hour (ET) | " + " | ".join(f"{t}m fear | {t}m greed" for t in tfs2) + " |"
+    md += [hdr, "|---|" + "---|---|" * len(tfs2)]
+    for hr in range(4, 20):
+        cells = []
+        for t in tfs2:
+            for sd in (1, -1):
+                x = E[(E.tf == t) & (E.side == sd) & (E.lv == "95+") & (E.hm // 100 == hr)]
+                cells.append(f"{len(x) / len(SYMBOLS) / nd:.2f}")
+        md.append(f"| {hr}:00 | " + " | ".join(cells) + " |")
+    md.append("")
+    rowsd = ["| Session | " + " | ".join(f"{t}m: days with a fear max / greed max / both" for t in ON_TFS) + " |",
+             "|---|" + "---|" * len(ON_TFS)]
+    for s in (0, 1, 2):
+        cells = []
+        for t in ON_TFS:
+            x = E[(E.tf == t) & (E.sess == s) & (E.lv == "95+")]
+            fd = x[x.side == 1].groupby("sym").day.nunique().mean() if len(x) else 0
+            gd = x[x.side == -1].groupby("sym").day.nunique().mean() if len(x) else 0
+            bd = x.groupby(["sym", "day"]).side.nunique()
+            bd = (bd == 2).groupby(level=0).sum().mean() if len(bd) else 0
+            cells.append(f"{100 * fd / nd:.0f}% / {100 * gd / nd:.0f}% / {100 * bd / nd:.0f}%")
+        rowsd.append(f"| {ON_SESS[s]} | " + " | ".join(cells) + " |")
+    md += rowsd + [""]
+
+    # ---------- in-session
+    md += ["## A) The move right after, inside the same session (every max)",
+           "From the next candle's open; ATR vs usual for that session; + = snapped back, - = kept going. Snap / push = best "
+           "move each way in 10 candles vs usual. $ at 10 = the raw average (not vs usual).", "",
+           "| Chart | Session | Max | Level | Events | Per day | 5 / 10 / 20 candles (ATR vs usual) | t at 10 | Snap back / "
+           "push further (10 c, vs usual) | Reversal way at 10 | 10 c: 2020-23 / 2024-now | " + " / ".join(SYMBOLS) +
+           " (10 c) | $ at 10 | Typical ATR $ |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for tf in ON_TFS:
+        for s in (0, 1, 2):
+            for sd in (1, -1):
+                for _, lvn in ON_LV:
+                    x = E[(E.tf == tf) & (E.sess == s) & (E.side == sd) & (E.lv == lvn)]
+                    x = x[x.r10.notna()]
+                    if not len(x):
+                        continue
+                    t10 = on_t(x.r10, x.day)
+                    held = on_held(x, "r10")
+                    if held:
+                        held_list.append(f"{tf}m {ON_SESS[s].lower()} {ON_SIDE[sd].lower()} {lvn}: next 10 candles "
+                                         f"{f3(x.r10.mean())} ATR")
+                    md.append(f"| {tf}m | {ON_SESS[s]} | {ON_SIDE[sd]} | {lvn} | {len(x):,} | {len(x) / len(SYMBOLS) / nd:.1f} | "
+                              f"{' / '.join(f3(x[f'r{k}'].mean()) for k in ON_K)} | {f1(t10)}{' **HELD**' if held else ''} | "
+                              f"{f3(x.snap.mean())} / {f3(x.furth.mean())} | {100 * x.win10.mean():.0f}% | "
+                              f"{f3(x[~x.late].r10.mean())} / {f3(x[x.late].r10.mean())} | "
+                              f"{' / '.join(f3(x[x.sym == s_].r10.mean()) for s_ in SYMBOLS)} | ${x.usd10.mean():+.2f} | "
+                              f"${x.atr_usd.median():.2f} |")
+    md.append("")
+
+    # ---------- into regular hours
+    def dtable(title, note, sel_fn, variants):
+        out = [f"## {title}", note, "", DHEAD, DSEP]
+        for tf in ON_TFS:
+            for s in (0, 2):
+                for vname, vfn in variants:
+                    for sd in (1, -1):
+                        for _, lvn in ON_LV:
+                            x = E[(E.tf == tf) & (E.sess == s) & (E.side == sd) & (E.lv == lvn)]
+                            x = vfn(x)
+                            if x is None or not len(x):
+                                continue
+                            lab = f"{tf}m {ON_SESS[s].lower()} {ON_SIDE[sd].lower()} {lvn}{(' ' + vname) if vname else ''}"
+                            r = drow(x, lab)
+                            if r:
+                                out.append(r[0])
+                                held_list.extend(f"{lab}: {hh}" for hh in r[1])
+        return out + [""]
+
+    md += dtable("B) Into the regular session - the FIRST max of the session",
+                 "One per day per side (the first fear max, the first greed max). Pre-market -> today's session, after-hours -> "
+                 "tomorrow's. All $ vs usual, the reversal way.", None,
+                 [("", lambda x: x[x["first"]])])
+    md += dtable("C) The LAST max before the open, and days only ONE side maxed (95+)",
+                 "LAST = whichever side maxed last in that session (one per day). ONLY = only fear or only greed maxed in that "
+                 "session that day (first one).", None,
+                 [("(last)", lambda x: x[x["last"]] if (x.lv == "95+").all() else None),
+                  ("(only)", lambda x: x[x["first"] & x["only"]] if (x.lv == "95+").all() else None)])
+
+    # ---------- splits
+    out = ["## D) What changes it? (first max of the session, 95+)",
+           "Pre-market by time / the other side / the gap; after-hours by time / the other side. Other side 60+ = the "
+           "opposite Vix Fix bar was 60+ on the max candle (your whipsaw idea). In the gap rows, the gap and to-the-open columns "
+           "are partly how the rows were picked; read the columns from 9:45 on.", "", DHEAD, DSEP]
+    for tf in ON_TFS:
+        for s in (0, 2):
+            for sd in (1, -1):
+                every = E[(E.tf == tf) & (E.sess == s) & (E.side == sd) & (E.lv == "95+")]
+                base = every[every["first"]]
+                if not len(base):
+                    continue
+                firstof = lambda x: x.groupby(["sym", "day"], sort=False).head(1)   # the first max inside that slice, per day
+                splits = [(nm + " (first max in that window)", firstof(every[(every.hm >= a_) & (every.hm < b_)]))
+                          for a_, b_, nm in ON_BUCKETS[s]]
+                splits += [("other side 60+ (first such max)", firstof(every[every.os60])),
+                           ("other side under 60 (first such max)", firstof(every[~every.os60]))]
+                if s == 0:
+                    splits += [("max WITH the gap (fear + gap down / greed + gap up)", base[base.gap_agree]),
+                               ("max AGAINST the gap", base[~base.gap_agree])]
+                for nm, x in splits:
+                    lab = f"{tf}m {ON_SESS[s].lower()} {ON_SIDE[sd].lower()}: {nm}"
+                    r = drow(x, lab)
+                    if r:
+                        out.append(r[0])
+                        held_list.extend(f"{lab}: {hh}" for hh in r[1])
+    md += out + [""]
+
+    # ---------- regular-hours comparison
+    md += ["## E) For comparison - maxes during REGULAR hours, to the 16:00 close",
+           "First fear / greed max of the regular session each day, from its close to the 16:00 close, $ vs usual, the "
+           "reversal way.", "",
+           "| Chart | Max | Level | Days | To the close ($ vs usual) | t | 2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " | HELD |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for tf in ON_TFS:
+        for sd in (1, -1):
+            for _, lvn in ON_LV:
+                x = E[(E.tf == tf) & (E.sess == 1) & (E.side == sd) & (E.lv == lvn) & E["first"]]
+                x = x[x.tclose.notna()]
+                if not len(x):
+                    continue
+                held = on_held(x, "tclose")
+                if held:
+                    held_list.append(f"{tf}m regular {ON_SIDE[sd].lower()} {lvn}: to the close {f2(x.tclose.mean())}")
+                md.append(f"| {tf}m | {ON_SIDE[sd]} | {lvn} | {x.day.nunique():,} | {f2(x.tclose.mean())} | "
+                          f"{f1(on_t(x.tclose, x.day))} | {f2(x[~x.late].tclose.mean())} / {f2(x[x.late].tclose.mean())} | "
+                          f"{' / '.join(f2(x[x.sym == s_].tclose.mean()) for s_ in SYMBOLS)} | {'**HELD**' if held else '-'} |")
+    md += ["", f"Luck check: roughly 400 rows are tested here. With |t| 3+ AND the same sign in both halves AND on both "
+               f"tickers, pure luck passes maybe 1 or 2. Runtime {(time.time() - t0) / 60:.1f} min. This is math/data, not "
+               "financial advice."]
+    txt = "\n".join(md).replace("HELDLIST", ("; ".join(held_list[:40]) + (" ..." if len(held_list) > 40 else ""))
+                                 if held_list else "**none**")
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for fn in (f"night_{stamp}.md", "night_latest.md"):
+        with open(os.path.join(OUT, fn), "w") as f:
+            f.write(txt)
+    print(txt[:5000])
+    print(f"\nSaved {OUT}/night_latest.md")
+
 if __name__ == "__main__":
+    if MODE == "night":
+        night_main()
+        sys.exit(0)
     if MODE == "panes":
         panes_main()
         sys.exit(0)
