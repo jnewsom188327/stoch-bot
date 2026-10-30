@@ -165,7 +165,7 @@ SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "SPY,QQQ").split(",")
 START = os.getenv("START", "2020-01-01").strip() or "2020-01-01"
 DELTA = 0.6          # option delta for the rough $ estimate
 TFS = [int(x) for x in os.getenv("TFS", "2,3").split(",") if x.strip()]
-MODE = os.getenv("MODE", "avgdn").strip().lower() or "avgdn"
+MODE = os.getenv("MODE", "swing").strip().lower() or "swing"
 SPLIT = os.getenv("SPLIT", "2024-01-01")   # TRAIN = before this date, TEST = from this date
 OUT = "results"
 
@@ -18335,7 +18335,250 @@ def avgdn_main():
     print(txt[:5000])
     print(f"\nSaved {OUT}/avgdn_latest.md")
 
+
+# ================================================================ 100 TO 100 - THE PING-PONG (MODE=swing)
+# Your Vix Fix pane (22 / 50, 0-100) at exactly 100. A RUN = candles in a row at 100 (starting 9:30-15:40, same day).
+# For every run that BREAKS (first candle back under 100), by the OTHER side at the break (under 10 = single digits,
+# 10-30, 30-60, 60+), follow it to the 16:00 close and record which comes FIRST:
+#   OPPOSITE MAX = the other side hits 100 (fear max -> greed max, the full swing) | SAME SIDE AGAIN = this side hits 100
+#   again (price made a new extreme) | NEITHER by the close.
+# Price is measured the reversal way (+ = toward the opposite side: UP after a fear max, DOWN after a greed max), in ATR of
+# the chart at the break and in $ at TODAY's SPY / QQQ price:
+#   break -> opposite max (close to close), extreme -> extreme (the run's low to the opposite run's high = the whole swing),
+#   heat before it (worst move against from the break close), and for SAME SIDE AGAIN how far the new extreme went.
+#   RIDE = a trade: in at the next open after the break, out at the opposite max (close of its first 100 candle), or at
+#   the same side's next 100 (close), or 15:55 - no other stop. vs random = minus random entries the same way.
+# PING-PONG: per day, runs merged into turns (fear, greed, fear...) - how many turns a day, the size of each leg
+# (extreme to the next opposite extreme) and how long a leg takes. DATA ONLY.
+SW_TFS = [int(x) for x in os.getenv("SW_TFS", "1,2,3,5").split(",") if x.strip()]
+SW_SPLIT = pd.Timestamp(os.getenv("SW_SPLIT", "2024-01-01"), tz=NY)
+SW_BUCKETS = [(0, 10, "under 10 (single digits)"), (10, 30, "10-30"), (30, 60, "30-60"), (60, 101, "60+")]
+
+
+def swing_main():
+    test = os.getenv("TEST", "") == "1"
+    end = datetime.now(timezone.utc) - timedelta(days=1)
+    start = datetime.fromisoformat(START).replace(tzinfo=timezone.utc)
+    if test:
+        start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    os.makedirs(OUT, exist_ok=True)
+    t0 = time.time()
+    rng = np.random.default_rng(23)
+    E, L, R, LPs = [], [], [], {}
+    for sym in SYMBOLS:
+        print(f"\n=== {sym} ===", flush=True)
+        df1 = fake_1m(sym, start, end)[0] if test else fetch_1m(sym, start, end)[0]
+        LP = float(df1["close"].iloc[-1])
+        LPs[sym] = LP
+        for tf in SW_TFS:
+            df = to_tf(df1, rth_only=False, mins=tf)
+            ind = indicators(df, 13, 34, True)
+            o, h, l, c, a, hm, day = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr"], ind["hm"], ind["day"]
+            n = len(c)
+            ts = df.index
+            F, G = vfx_pane(df)
+            F, G = np.nan_to_num(F), np.nan_to_num(G)
+            idx = np.arange(n)
+            dend = pd.Series(np.where(hm < 1556, idx, -1)).groupby(day).transform("max").to_numpy()
+            runs = []
+            for side, X in ((1, F), (-1, G)):
+                for s, j, b in mx_runs(X, day, hm, 100.0):
+                    runs.append((s, j, b, side))
+            runs.sort()
+            starts = {1: np.array([r[0] for r in runs if r[3] == 1]), -1: np.array([r[0] for r in runs if r[3] == -1])}
+
+            def next_start(side, after):
+                arr = starts[side]
+                k = np.searchsorted(arr, after, "right")
+                return int(arr[k]) if k < len(arr) else n + 10
+
+            # random baseline for the RIDE: random RTH candles, the exit at the median ride length
+            ok_all = np.nonzero((hm >= 935) & (hm <= 1530) & (dend > idx) & (a > 0))[0]
+            nev = 0
+            for s, j, b, side in runs:
+                if b < 0 or b + 1 >= n or not (a[b] > 0) or dend[b] <= b:
+                    continue
+                Y = G if side == 1 else F
+                oth = Y[b]
+                d = side                                            # +1 = look for UP (after fear), -1 = DOWN
+                A = a[b]
+                px = c[b]
+                k2 = lambda v: v / px * LP                          # $ at today's price
+                ext = l[s:j + 1].min() if side == 1 else h[s:j + 1].max()
+                po = next_start(-side, b - 1)                       # opposite max starting at or after the break
+                ps = next_start(side, j)                            # this side again
+                de = dend[b]
+                po = po if po <= de else n + 10
+                ps = ps if ps <= de else n + 10
+                if po < ps:
+                    out, k_end = "OPPOSITE", po
+                elif ps < po:
+                    out, k_end = "SAME", ps
+                else:
+                    out, k_end = "NEITHER", de
+                if k_end > b:
+                    seg = slice(b + 1, k_end + 1)
+                    heat = max(0.0, (px - l[seg].min()) if d == 1 else (h[seg].max() - px))
+                else:
+                    heat = 0.0
+                rec = dict(sym=sym, tf=tf, side=side, oth=oth, late=bool(ts[b] >= SW_SPLIT), day=day[b], out=out,
+                           cand=k_end - b, runlen=j - s + 1, heat=heat / A, heat_usd=k2(heat))
+                if out == "OPPOSITE":
+                    # the opposite run's own extreme (its first run)
+                    q = next(r for r in runs if r[0] == po and r[3] == -side)
+                    oext = h[q[0]:q[1] + 1].max() if side == 1 else l[q[0]:q[1] + 1].min()
+                    mv = d * (c[po] - px)
+                    sw = d * (oext - ext)
+                    rec.update(mv=mv / A, mv_usd=k2(mv), sw=sw / A, sw_usd=k2(sw))
+                if out == "SAME":
+                    # how far past the old extreme the new run pushed (by the end of that new run)
+                    q = next(r for r in runs if r[0] == ps and r[3] == side)
+                    nx = (ext - l[q[0]:q[1] + 1].min()) if side == 1 else (h[q[0]:q[1] + 1].max() - ext)
+                    rec.update(newx=nx / A, newx_usd=k2(nx))
+                # RIDE trade
+                e = b + 1
+                if e <= de:
+                    xk = min(k_end, de)
+                    xk = max(xk, e)
+                    ride = d * (c[xk] - o[e])
+                    # random: same length, random RTH entry, same direction
+                    rr = ok_all[rng.integers(0, len(ok_all), 3)] if len(ok_all) else []
+                    rnd = []
+                    for ri in rr:
+                        ex = min(ri + 1 + (xk - e), dend[ri])
+                        if ex > ri:
+                            rnd.append(d * (c[ex] - o[min(ri + 1, ex)]) / a[ri])
+                    rec.update(ride=ride / A, ride_usd=k2(ride), ride_rnd=np.mean(rnd) if rnd else np.nan)
+                E.append(rec)
+                nev += 1
+            # ---------- ping-pong legs: merge runs into turns per day
+            cur, turns = None, []
+            for s, j, b, side in runs:
+                dd_ = day[s]
+                if cur is not None and cur["day"] == dd_ and cur["side"] == side:
+                    cur["j"] = j
+                    continue
+                if cur is not None:
+                    turns.append(cur)
+                cur = dict(day=dd_, side=side, s=s, j=j)
+            if cur is not None:
+                turns.append(cur)
+            per_day = {}
+            for t_ in turns:
+                per_day.setdefault(t_["day"], []).append(t_)
+            for dd_, ts_ in per_day.items():
+                R.append(dict(sym=sym, tf=tf, day=dd_, turns=len(ts_), flips=len(ts_) - 1))
+                for x1, x2 in zip(ts_[:-1], ts_[1:]):
+                    e1 = l[x1["s"]:x1["j"] + 1].min() if x1["side"] == 1 else h[x1["s"]:x1["j"] + 1].max()
+                    e2 = h[x2["s"]:x2["j"] + 1].max() if x1["side"] == 1 else l[x2["s"]:x2["j"] + 1].min()
+                    A1 = a[x1["j"]]
+                    if not (A1 > 0):
+                        continue
+                    sw = abs(e2 - e1)
+                    L.append(dict(sym=sym, tf=tf, day=dd_, late=bool(ts[x1["j"]] >= SW_SPLIT), first=x1["side"],
+                                  sw=sw / A1, sw_usd=sw / c[x1["j"]] * LP, cand=x2["s"] - x1["j"],
+                                  wrongway=(x1["side"] == 1 and e2 < e1) or (x1["side"] == -1 and e2 > e1)))
+            print(f"  {sym} {tf}m: {nev:,} breaks, {len(turns):,} turns", flush=True)
+    X = pd.DataFrame(E)
+    LG = pd.DataFrame(L)
+    RD = pd.DataFrame(R)
+    f2 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:+.2f}"
+    u2 = lambda v: "-" if v is None or not np.isfinite(v) else f"{v:.2f}"
+    pc = lambda v: "-" if v is None or not np.isfinite(v) else f"{100 * v:.0f}%"
+    SIDE = {1: "FEAR 100 (looking for UP)", -1: "GREED 100 (looking for DOWN)"}
+
+    def brow(x, lab):
+        if len(x) < 20:
+            return None
+        op, sm, ne = x[x.out == "OPPOSITE"], x[x.out == "SAME"], x[x.out == "NEITHER"]
+        rd = x.ride - x.ride_rnd
+        t = on_t(rd.dropna(), x.loc[rd.dropna().index, "day"]) if rd.notna().sum() > 20 else float("nan")
+        return (f"| {lab} | {len(x):,} | **{pc(len(op) / len(x))}** / {pc(len(sm) / len(x))} / {pc(len(ne) / len(x))} | "
+                f"{op.cand.median():.0f} | {u2(op.mv.median())} / {f2(op.mv.mean())} (${u2(op.mv_usd.median())}) | "
+                f"{u2(op.sw.median())} (${u2(op.sw_usd.median())}) | {u2(op.heat.median())} | "
+                f"{sm.cand.median() if len(sm) else float('nan'):.0f} | {u2(sm.newx.median()) if len(sm) else '-'} (${u2(sm.newx_usd.median()) if len(sm) else '-'}) | "
+                f"{f2(x.ride.mean())} | {f2(rd.mean())} ({'-' if not np.isfinite(t) else f'{t:.1f}'}) | "
+                f"{f2(rd[~x.late].mean())} / {f2(rd[x.late].mean())} | {' / '.join(f2(rd[x.sym == s].mean()) for s in SYMBOLS)} |")
+
+    HEAD = ("| Break | Breaks | Next: OPPOSITE max / SAME side again / neither | Candles to the opposite max (median) | "
+            "Break -> opposite max: median / avg ATR (median $) | Whole swing, extreme to extreme: median ATR ($) | Heat first "
+            "(median ATR) | Candles to same side again | New extreme past the old one: median ATR ($) | RIDE avg ATR | "
+            "RIDE vs random (t) | vs random 2020-23 / 2024-now | " + " / ".join(SYMBOLS) + " |")
+    SEP = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    md = [f"# 100 TO 100 - THE VIX FIX PING-PONG - {', '.join(SYMBOLS)} - {datetime.now(NY):%Y-%m-%d %H:%M} ET",
+          f"Data {start:%Y-%m-%d} to {end:%Y-%m-%d}, charts {', '.join(f'{t}m' for t in SW_TFS)}, regular hours, same day only. "
+          "DATA ONLY.",
+          "**Run** = candles in a row at 100. **Break** = the first candle back under 100. **Other side** = the opposite pane at "
+          "the break. After the break, which comes first: the **OPPOSITE** side hits 100 (the full swing), the **SAME** side "
+          "hits 100 again (a new extreme), or **neither** by the close. Moves are the reversal way (+ = toward the opposite "
+          "side) in ATR of the chart at the break, $ at today's price (" + ", ".join(f"{s} ${p:,.0f}" for s, p in LPs.items()) +
+          "). **Whole swing** = the maxed run's low (high) to the opposite run's high (low). **RIDE** = in at the next open "
+          "after the break, out at the opposite max, the same side's next 100, or 15:55 - vs random entries of the same "
+          "length and direction.", ""]
+    S = ["## The answer in 30 seconds"]
+    for tf in SW_TFS:
+        x = X[(X.tf == tf) & (X.oth < 10)]
+        if len(x) < 20:
+            continue
+        op = x[x.out == "OPPOSITE"]
+        sm = x[x.out == "SAME"]
+        S.append(f"- **{tf}m, other side in single digits ({len(x):,} breaks):** the opposite side maxes first "
+                 f"{pc(len(op) / len(x))} of the time (median {op.cand.median():.0f} candles, price moves {u2(op.mv.median())} "
+                 f"ATR / ${u2(op.mv_usd.median())} from the break, whole swing {u2(op.sw.median())} ATR / ${u2(op.sw_usd.median())}); "
+                 f"the same side maxes again first {pc(len(sm) / len(x))} (new extreme {u2(sm.newx.median())} ATR past the old one); "
+                 f"RIDE {f2(x.ride.mean())} ATR vs random {f2((x.ride - x.ride_rnd).mean())}.")
+    for tf in SW_TFS:
+        rd_ = RD[RD.tf == tf]
+        lg = LG[LG.tf == tf]
+        if len(rd_) and len(lg):
+            S.append(f"- **{tf}m ping-pong:** {rd_.flips.median():.0f} flips a day (median; busiest 10% of days "
+                     f"{rd_.flips.quantile(.9):.0f}+), each leg median {u2(lg.sw.median())} ATR / ${u2(lg.sw_usd.median())} "
+                     f"over {lg.cand.median():.0f} candles; {pc(lg.wrongway.mean())} of legs end on the WRONG side of the start.")
+    md += S + [""]
+    md += ["## A) Every break, by the other side at the break", "", HEAD, SEP]
+    for tf in SW_TFS:
+        for side in (1, -1):
+            for lo, hi, nm in SW_BUCKETS:
+                x = X[(X.tf == tf) & (X.side == side) & (X.oth >= lo) & (X.oth < hi)]
+                r = brow(x, f"{tf}m {SIDE[side]}, other side {nm}")
+                if r:
+                    md.append(r)
+    md += ["", "## B) Single digits only - does a longer run at 100 change it?", "", HEAD, SEP]
+    for tf in SW_TFS:
+        x0 = X[(X.tf == tf) & (X.oth < 10)]
+        for nm, m in (("run 1 candle", x0.runlen == 1), ("run 2-3 candles", x0.runlen.between(2, 3)),
+                      ("run 4+ candles", x0.runlen >= 4)):
+            r = brow(x0[m], f"{tf}m single digits, {nm}")
+            if r:
+                md.append(r)
+    md += ["", "## C) The ping-pong - turns per day and the size of each leg", "",
+           "| Chart | Days | Flips a day: median / avg / 90% | Days with 0 / 1-2 / 3-5 / 6+ flips | Leg size: median / avg / 75% ATR | "
+           "Leg size median $ | Candles per leg (median) | Leg ends on the wrong side | Leg median ATR 2020-23 / 2024-now |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for tf in SW_TFS:
+        rd_ = RD[RD.tf == tf]
+        lg = LG[LG.tf == tf]
+        if not len(rd_):
+            continue
+        ndays = rd_.groupby("sym").day.nunique().sum()
+        fl = rd_.flips
+        md.append(f"| {tf}m | {ndays:,} | {fl.median():.0f} / {fl.mean():.1f} / {fl.quantile(.9):.0f} | "
+                  f"{pc((fl == 0).mean())} / {pc(fl.between(1, 2).mean())} / {pc(fl.between(3, 5).mean())} / {pc((fl >= 6).mean())} | "
+                  f"{u2(lg.sw.median())} / {u2(lg.sw.mean())} / {u2(lg.sw.quantile(.75))} | ${u2(lg.sw_usd.median())} | "
+                  f"{lg.cand.median():.0f} | {pc(lg.wrongway.mean())} | {u2(lg[~lg.late].sw.median())} / {u2(lg[lg.late].sw.median())} |")
+    md += ["", f"Runtime {(time.time() - t0) / 60:.1f} min. This is math/data, not financial advice."]
+    txt = "\n".join(md)
+    stamp = datetime.now(NY).strftime("%Y-%m-%d")
+    for fn in (f"swing_{stamp}.md", "swing_latest.md"):
+        with open(os.path.join(OUT, fn), "w") as f:
+            f.write(txt)
+    print(txt[:5000])
+    print(f"\nSaved {OUT}/swing_latest.md")
+
 if __name__ == "__main__":
+    if MODE == "swing":
+        swing_main()
+        sys.exit(0)
     if MODE == "avgdn":
         avgdn_main()
         sys.exit(0)
