@@ -173,6 +173,11 @@ def collect_signals(fear, greed, high, low, close, minutes, day_i, atr, mom, vwa
                     vwap_ok = _finite(vw) and _finite(cl) and cl >= vw
                 else:
                     vwap_ok = _finite(vw) and _finite(cl) and cl <= vw
+                if _finite(vw) and _finite(cl) and _finite(atr_i) and atr_i > 0:
+                    signed = (cl - vw) / atr_i
+                    vwap_dist = signed if side == 1 else -signed
+                else:
+                    vwap_dist = float("nan")
                 sess = und_day.get(score_days[int(day[i])])
                 out.append({
                     "day_i": int(day[i]),
@@ -187,6 +192,7 @@ def collect_signals(fear, greed, high, low, close, minutes, day_i, atr, mom, vwa
                     "mom_with": bool(mom_with),
                     "range_lt_3atr": bool(range_ok),
                     "vwap_with": bool(vwap_ok),
+                    "vwap_dist": float(vwap_dist),
                     "in_noon": bool(NOON_LO <= entry < NOON_HI),
                     "und_atr_20": atr_move(sess, entry, side, atr_i, 20),
                     "und_atr_30": atr_move(sess, entry, side, atr_i, 30),

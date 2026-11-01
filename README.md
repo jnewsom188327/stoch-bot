@@ -41,6 +41,14 @@ Inputs: `days` (default 120), `results_branch` (default `whipsaw-results`). Leav
 
 Results land on the branch `whipsaw-results` (never main): `results/WHIPSAW.md`, `results/whipsaw_trades.csv`. The raw table is first. Read that before the last paragraph.
 
+## Vix Fix whipsaw VWAP check (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Vix Fix whipsaw VWAP check (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
+
+Inputs: `days` (default 120), `results_branch` (default `whipsaw-vwap-results`). Leave both as they are. Same signals and same option costs as the whipsaw check. Data only. No orders.
+
+Results land on the branch `whipsaw-vwap-results` (never main): `results/WHIPSAW_VWAP.md`, `results/whipsaw_vwap_trades.csv`. The raw tables are first. Read those before the last paragraph.
+
 ## Fear-greed fade PERFECT (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade PERFECT (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
