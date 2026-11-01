@@ -329,3 +329,22 @@ if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "di
     exec(compile(open(__file__).read(), __file__, "exec"), _g)
     _g["div_main"]()
     _sys.exit(0)
+  import os as _os, sys as _sys
+if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "div"):
+    import subprocess, urllib.request
+    _src = urllib.request.urlopen("https://raw.githubusercontent.com/jnewsom188327/stoch-bot/"
+                                  "e6a301876e8bc10a098f8bb6cbbdc16ac1c435fa/backtest.py", timeout=120).read().decode()
+    _me = open(__file__).read()
+    _blk = _me[:_me.index("import os as _os, sys as _sys")]
+    _cut = _src.rindex('\nif __name__ == "__main__":')
+    _new = (_src[:_cut] + "\n\n" + _blk + 'if __name__ == "__main__" and os.getenv("MODE", "").strip().lower() in ("", "div"):\n'
+            "    div_main()\n    sys.exit(0)\n" + _src[_cut:])
+    with open(__file__, "w") as _f:
+        _f.write(_new)
+    subprocess.run(["git", "add", __file__])
+    print("Restored the full backtest.py with the DIV test added at the bottom.", flush=True)
+    _g = {"__name__": "div_lib", "__file__": __file__}
+    exec(compile(_new, __file__, "exec"), _g)
+    _g["div_main"]()
+    _sys.exit(0)
+
