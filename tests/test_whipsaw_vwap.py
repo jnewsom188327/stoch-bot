@@ -106,6 +106,24 @@ def test_far_side_touch_table_uses_only_against_trades(tmp_path):
     assert (tmp_path / "whipsaw_vwap_trades.csv").read_text().startswith("day,")
 
 
+def test_main_builds_the_download_window_before_loading_bars(tmp_path, monkeypatch):
+    """The Actions crash was NameError: pd is not defined on the start timestamp."""
+    monkeypatch.setenv("WHIP_SYNTH", "1")
+    monkeypatch.setenv("WHIP_DAYS", "8")
+    monkeypatch.setenv("WHIP_OUT", str(tmp_path))
+    monkeypatch.setenv("WHIP_SYMBOLS", "SPY")
+
+    def loader(symbols, start, end, synthetic):
+        assert start < end
+        raise RuntimeError("loader-reached")
+
+    monkeypatch.setattr(wv.sc, "_load_underlying", loader)
+    assert wv.main() == 1
+    report = (tmp_path / "WHIPSAW_VWAP.md").read_text()
+    assert "loader-reached" in report
+    assert "STAGE load failed" in report
+
+
 def test_workflow_is_manual_and_places_no_orders():
     text = open(".github/workflows/whipsaw_vwap.yml").read()
     src = open("whipsaw_vwap.py").read()
