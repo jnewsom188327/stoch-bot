@@ -323,6 +323,7 @@ def div_main():
     print(f"\nSaved {OUT}/div_latest.md")
 
 
-if __name__ == "__main__" and os.getenv("MODE", "").strip().lower() in ("", "div"):
-    div_main()
-    sys.exit(0)
+import os as _os, sys as _sys, runpy as _runpy
+if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "div"):
+    _runpy.run_path(__file__, run_name="div_lib")["div_main"]()
+    _sys.exit(0)
