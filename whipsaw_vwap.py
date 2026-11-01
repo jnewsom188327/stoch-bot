@@ -14,6 +14,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pandas as pd
 
 import edge_hunt as eh
 import fgfade as fg
@@ -498,7 +499,6 @@ def run_study(frames, symbols, score_days, und, opt=None, synthetic=False, cache
     paths = _stage("vwap paths", lambda: session_paths(frames, symbols, score_days), failures) or {}
 
     def _download():
-        nonlocal opt
         if opt is not None:
             return opt
         needed = wc.needed_contracts(signals, und, symbols, score_days)
