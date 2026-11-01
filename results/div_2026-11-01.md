@@ -100,4 +100,4 @@ Settings positive on BOTH halves (TEST 30+ fires): **44 of 648** with 60+ TRAIN 
 | SPY | 3m | DIV / G2 / R3 / atr / arm 3 | -0.031 (5201) | **-0.042** (3694) | 57.8 |
 | SPY | 5m | turn / G3 / R3 / atr / arm 3 | +0.052 (1376) | **-0.016** (1017) | 57.3 |
 
-Runtime 3.3 min. This is math/data, not financial advice.
+Runtime 3.9 min. This is math/data, not financial advice.
