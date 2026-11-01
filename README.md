@@ -33,6 +33,14 @@ Inputs: `days` (default 120), `tfs` (default `1,3,5`), `results_branch` (default
 
 Results land on the branch `fgfade-results` (never main): `results/FGFADE.md`, `results/fgfade_summary.csv`, `results/fgfade_trades.csv`, `results/fgfade_folds.csv`.
 
+## Vix Fix whipsaw check (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Vix Fix whipsaw check (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
+
+Inputs: `days` (default 120), `results_branch` (default `whipsaw-results`). Leave both as they are. The run is SPY and QQQ, 0DTE, the same option cost model as the fear/greed fade. Data only. No orders.
+
+Results land on the branch `whipsaw-results` (never main): `results/WHIPSAW.md`, `results/whipsaw_trades.csv`. The raw table is first. Read that before the last paragraph.
+
 ## Fear-greed fade PERFECT (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade PERFECT (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
