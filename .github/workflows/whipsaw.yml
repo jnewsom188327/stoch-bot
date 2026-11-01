@@ -1,0 +1,115 @@
+name: Vix Fix whipsaw check (real option prices)
+
+# DATA ONLY. This workflow downloads historical bars and writes a report.
+# It does not place orders. Trigger it by hand: Actions tab, this workflow, Run workflow.
+# A fresh run, not Re-run.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Recent completed trading days to score"
+        default: "120"
+      results_branch:
+        description: "Branch that receives the result files. main and master are refused."
+        default: "whipsaw-results"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: whipsaw
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: python -m pytest -q tests/test_whipsaw_check.py
+      - name: Vix Fix whipsaw check on real OPRA prints (data only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          WHIP_DAYS: ${{ github.event.inputs.days }}
+          WHIP_WORKERS: "4"
+        run: python whipsaw_check.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: whipsaw-results
+          path: |
+            results/WHIPSAW.md
+            results/whipsaw_trades.csv
+          if-no-files-found: warn
+      - name: Commit results onto the results branch (never main)
+        if: always()
+        env:
+          RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="${RESULTS_BRANCH:-whipsaw-results}"
+          case "$BRANCH" in
+            main|master|origin/main|origin/master)
+              echo "Refusing to push results to ${BRANCH}"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Refusing results branch name"
+            exit 1
+          fi
+          mkdir -p /tmp/whipsaw-out
+          copied=0
+          for f in results/WHIPSAW.md results/whipsaw_trades.csv; do
+            if [ -f "$f" ]; then
+              cp -f "$f" /tmp/whipsaw-out/
+              copied=1
+            fi
+          done
+          rm -f results/WHIPSAW.md results/whipsaw_trades.csv
+          if [ "$copied" -eq 0 ]; then
+            echo "No result files to commit"
+            exit 0
+          fi
+          git config user.name "whipsaw"
+          git config user.email "whipsaw@users.noreply.github.com"
+          git fetch origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH"
+          fi
+          HEADBR="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p results
+          for f in /tmp/whipsaw-out/WHIPSAW.md /tmp/whipsaw-out/whipsaw_trades.csv; do
+            if [ -f "$f" ]; then
+              cp -f "$f" results/
+            fi
+          done
+          add=()
+          for name in WHIPSAW.md whipsaw_trades.csv; do
+            if [ -f "results/$name" ]; then
+              add+=("results/$name")
+            fi
+          done
+          git add "${add[@]}"
+          if git diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          git commit -m "whipsaw results $(date -u +%F)"
+          git push origin "HEAD:${BRANCH}"
