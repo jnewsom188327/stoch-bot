@@ -162,3 +162,9 @@ date,candle,closed,seen,book,ticker,tf,diamond,candle_close,spot,swing_stop,acti
 2026-11-02,14:55,15:00,15:00:06,YOURS,QQQ,5,GREEN,685.65,685.37,682.4,outside the entry window (9:45-14:30),3.41,3.07,94.3,84.5,100.0,same candle,9.37
 2026-11-02,15:09,15:10,15:10:06,YOURS,SPY,1,RED,755.3,755.36,756.28,outside the entry window (9:45-14:30),2.72,2.55,81.6,73.3,20.7,same candle,3.1
 2026-11-02,15:09,15:10,15:10:06,YOURS,QQQ,1,RED,685.36,685.44,686.7,outside the entry window (9:45-14:30),3.19,3.02,84.0,78.4,24.5,same candle,4.2
+2026-11-02,15:26,15:28,15:28:06,YOURS,SPY,2,RED,754.25,754.25,755.8,outside the entry window (9:45-14:30),1.54,0.98,67.8,52.5,40.1,TTM first,3.1
+2026-11-02,15:26,15:28,15:28:06,YOURS,QQQ,2,RED,684.13,684.08,686.12,outside the entry window (9:45-14:30),1.66,1.21,69.8,57.4,39.2,same candle,4.2
+2026-11-02,15:45,15:48,15:48:06,TUNED,QQQ,3,GREEN,682.44,682.58,680.3,outside the entry window (9:45-14:30),1.54,1.41,71.7,54.5,52.8,same candle,6.3
+2026-11-02,15:48,15:50,15:50:06,YOURS,SPY,2,GREEN,753.53,753.5,751.98,outside the entry window (9:45-14:30),2.8,2.73,76.0,60.7,49.8,VIX FIX first,3.41
+2026-11-02,15:45,15:50,15:50:06,TUNED,QQQ,5,GREEN,682.77,682.72,680.3,outside the entry window (9:45-14:30),3.19,3.15,93.3,89.5,45.4,same candle,7.63
+2026-11-02,15:50,15:52,15:52:06,YOURS,QQQ,2,GREEN,681.03,681.03,680.3,outside the entry window (9:45-14:30),3.12,2.79,75.2,85.9,56.1,VIX FIX first,5.33
