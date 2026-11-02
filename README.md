@@ -49,6 +49,14 @@ Inputs: `days` (default 120), `results_branch` (default `whipsaw-vwap-results`).
 
 Results land on the branch `whipsaw-vwap-results` (never main): `results/WHIPSAW_VWAP.md`, `results/whipsaw_vwap_trades.csv`. The raw tables are first. Read those before the last paragraph.
 
+## Vix Fix + VWAP trend fade (research, no orders)
+
+On your phone: open the repo on GitHub, tap **Actions**, tap **Vix Fix + VWAP trend fade check (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
+
+Inputs: `days` (default 120), `results_branch` (default `vwap-trend-fade-results`). Leave both as they are. SPY, 1-minute and 2-minute bars, 0DTE. The contract is the ask inside $0.45–$1.00 closest to $0.65. Signals only from 9:40 to 15:00 ET. Data only. No orders.
+
+Results land on the branch `vwap-trend-fade-results` (never main): `results/VWAP_TREND_FADE.md`, `results/vwap_trend_fade_trades.csv`. The raw table is first. Read that before the last paragraph.
+
 ## Fear-greed fade PERFECT (research, no orders)
 
 On your phone: open the repo on GitHub, tap **Actions**, tap **Fear-greed fade PERFECT (real option prices)**, tap **Run workflow**. That starts a fresh run. Do not tap Re-run.
