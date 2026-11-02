@@ -1,0 +1,115 @@
+name: Vix Fix + VWAP trend fade check (real option prices)
+
+# DATA ONLY. This workflow downloads historical bars and writes a report.
+# It does not place orders. Trigger it by hand: Actions tab, this workflow, Run workflow.
+# A fresh run, not Re-run.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Recent completed trading days to score"
+        default: "120"
+      results_branch:
+        description: "Branch that receives the result files. main and master are refused."
+        default: "vwap-trend-fade-results"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vwap-trend-fade
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Unit tests (no market data, no orders)
+        run: python -m pytest -q tests/test_vwap_trend_fade.py
+      - name: Vix Fix + VWAP trend fade on real OPRA prints (data only, no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          VTF_DAYS: ${{ github.event.inputs.days }}
+          VTF_WORKERS: "4"
+        run: python vwap_trend_fade.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vwap-trend-fade-results
+          path: |
+            results/VWAP_TREND_FADE.md
+            results/vwap_trend_fade_trades.csv
+          if-no-files-found: warn
+      - name: Commit results onto the results branch (never main)
+        if: always()
+        env:
+          RESULTS_BRANCH: ${{ github.event.inputs.results_branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="${RESULTS_BRANCH:-vwap-trend-fade-results}"
+          case "$BRANCH" in
+            main|master|origin/main|origin/master)
+              echo "Refusing to push results to ${BRANCH}"
+              exit 1
+              ;;
+          esac
+          if ! [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Refusing results branch name"
+            exit 1
+          fi
+          mkdir -p /tmp/vwap-trend-fade-out
+          copied=0
+          for f in results/VWAP_TREND_FADE.md results/vwap_trend_fade_trades.csv; do
+            if [ -f "$f" ]; then
+              cp -f "$f" /tmp/vwap-trend-fade-out/
+              copied=1
+            fi
+          done
+          rm -f results/VWAP_TREND_FADE.md results/vwap_trend_fade_trades.csv
+          if [ "$copied" -eq 0 ]; then
+            echo "No result files to commit"
+            exit 0
+          fi
+          git config user.name "vwap-trend-fade"
+          git config user.email "vwap-trend-fade@users.noreply.github.com"
+          git fetch origin "$BRANCH" || true
+          if git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -B "$BRANCH"
+          fi
+          HEADBR="$(git rev-parse --abbrev-ref HEAD)"
+          if [ "$HEADBR" = "main" ] || [ "$HEADBR" = "master" ]; then
+            echo "Refusing to commit results on ${HEADBR}"
+            exit 1
+          fi
+          mkdir -p results
+          for f in /tmp/vwap-trend-fade-out/VWAP_TREND_FADE.md /tmp/vwap-trend-fade-out/vwap_trend_fade_trades.csv; do
+            if [ -f "$f" ]; then
+              cp -f "$f" results/
+            fi
+          done
+          add=()
+          for name in VWAP_TREND_FADE.md vwap_trend_fade_trades.csv; do
+            if [ -f "results/$name" ]; then
+              add+=("results/$name")
+            fi
+          done
+          git add "${add[@]}"
+          if git diff --cached --quiet; then
+            echo "No result changes to commit"
+            exit 0
+          fi
+          git commit -m "vwap trend fade results $(date -u +%F)"
+          git push origin "HEAD:${BRANCH}"
