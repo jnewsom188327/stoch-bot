@@ -37,3 +37,4 @@ t_entry,sym,side,setup,score,contract,entry_ask,delta,spot,target,target_kind,es
 2026-11-05T10:55:20-05:00,BABA,PUTS,PIN AT CALL WALL (positive gamma) - fade,50,BABA261106P00102000,0.75,-0.23,104.97,103.58,2.5 ATR,27.0,-26.7,-57.3,-56.0,-5.3,9,-69.3,,,,18,,-37.3,-56.0,,-56.0,-56.0,-56.0,-56.0
 2026-11-05T15:00:20-05:00,SMCI,CALLS,RUN: clean trend + negative gamma + flow agrees,51,SMCI261106C00028500,0.46,0.34,27.63,28.14,2.5 ATR,29.3,-26.1,-45.7,-30.4,-6.5,0,-47.8,,,,6,,-37.0,-30.4,,-30.4,-30.4,-30.4,-30.4
 2026-11-06T09:50:20-05:00,NFLX,CALLS,PIN AT PUT WALL (positive gamma) - bounce,45,NFLX261106C00064000,0.4,0.46,63.86,65.0,GEX level,164.2,-25.0,-17.5,-10.0,32.5,4,-42.5,3,,,38,,-5.0,-10.0,,-10.0,5.0,5.0,-5.0
+2026-11-06T10:00:20-05:00,NVDA,CALLS,RUN: clean trend + negative gamma + flow agrees,72,NVDA261106C00197500,0.67,0.22,193.31,195.0,GEX level,23.9,-58.2,-86.6,-95.5,-6.0,1,-95.5,,,,6,,-56.7,-95.5,,-95.5,-95.5,-95.5,-95.5
