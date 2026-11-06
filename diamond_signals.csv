@@ -292,3 +292,6 @@ date,candle,closed,seen,book,ticker,tf,diamond,candle_close,spot,swing_stop,acti
 2026-11-06,14:18,14:21,14:21:06,TUNED,SPY,3,RED,737.65,737.71,739.05,ENTER,2.69,2.67,88.2,73.7,24.7,same candle,2.82
 2026-11-06,14:18,14:21,14:21:06,YOURS,QQQ,3,RED,658.13,658.08,659.54,ENTER,2.16,1.67,74.6,73.6,22.9,TTM first,4.16
 2026-11-06,14:31,14:32,14:32:06,YOURS,SPY,1,GREEN,737.84,737.84,737.36,outside the entry window (9:45-14:30),1.39,1.22,81.4,73.6,19.3,TTM first,1.48
+2026-11-06,15:14,15:15,15:15:06,YOURS,SPY,1,RED,738.2,738.1,739.16,outside the entry window (9:45-14:30),2.26,2.12,87.8,85.5,46.9,same candle,2.01
+2026-11-06,15:14,15:15,15:15:06,YOURS,QQQ,1,RED,659.62,659.62,660.45,outside the entry window (9:45-14:30),2.32,2.26,89.3,87.0,55.7,same candle,2.64
+2026-11-06,15:45,15:46,15:46:06,YOURS,SPY,1,GREEN,737.51,737.51,736.76,outside the entry window (9:45-14:30),1.45,1.18,77.5,75.1,36.8,same candle,1.35
