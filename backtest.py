@@ -221,7 +221,7 @@ def fetch_1m(symbol, start, end):
 
 
 # ============================================================================================================
-# WHITE DOTS - 6 MONTH BACKTEST ON REAL OPTION PRICES (runs by default while this block is in the file). DATA ONLY, NO ORDERS.
+# WHITE DOTS v2 - 6 MONTH BACKTEST ON REAL OPTION PRICES + LOSS CONTROL (runs by default while this block is in the file). DATA ONLY, NO ORDERS.
 # Paste this whole block directly ABOVE the line:  def fake_1m(symbol, start, end):   (near the top, right after fetch_1m)
 # To go back to your normal backtests, delete the block (or set DOTS=0 in the workflow env).
 # What it does: SPY 1-minute bars for the last DOTS_MONTHS months -> the exact white-dot logic from the Gamma Field page
@@ -509,7 +509,7 @@ def dots_slip(e):
     return .01 if e < 1 else (.02 if e < 3 else .03)
 
 
-def dots_sim(T, pick, exit_, sizing, win, acct, keep=False):
+def dots_sim(T, pick, exit_, sizing, win, acct, keep=False, stop=0.5, cut="none"):
     P, E, Z, W = DOTS_PICK[pick], DOTS_EXIT[exit_], DOTS_SIZE[sizing], DOTS_WIN[win]
     eq = DOTS_START
     peak, mdd = eq, 0.0
@@ -550,6 +550,8 @@ def dots_sim(T, pick, exit_, sizing, win, acct, keep=False):
             legs = [[f, t, False] for f, t in E["legs"]]
             rule = E.get("rule")
             lo_a, armed = 1e9, False
+            a0 = d["a"][d["i"]]
+            hi_a = a0
             lim = min(len(s["h"]) - 1, 360 - s["j0"], 150)
             k = 0
             for k in range(lim + 1):
@@ -567,10 +569,24 @@ def dots_sim(T, pick, exit_, sizing, win, acct, keep=False):
                         cost += n2 * ap
                         raw += n2 * s["e"] * .91
                 avg = raw / cnt
-                if L_ <= avg * (1 - DOTS_STOP):
-                    cash += left * (avg * (1 - DOTS_STOP) - slip)
+                if L_ <= avg * (1 - stop):
+                    cash += left * (avg * (1 - stop) - slip)
                     left, how = 0, "stop"
                     break
+                if cut != "none" and j < 390 and k >= 1:
+                    av0 = d["a"][j]
+                    xhit = any(x <= j for x in d["kills"])
+                    spike = av0 > hi_a + 5
+                    hi_a = max(hi_a, av0)
+                    cut_now = ((cut == "x" and xhit) or (cut == "x or F/G re-spike" and (xhit or spike))
+                               or (cut == "F/G re-spike" and spike and not trimmed)
+                               or (cut == "F/G not letting off by min 5" and k == 4 and not trimmed and av0 >= a0)
+                               or (cut == "time 10 min if not trimmed" and k >= 9 and not trimmed)
+                               or (cut == "time 20 min if not trimmed" and k >= 19 and not trimmed))
+                    if cut_now:
+                        cash += left * (C - slip)
+                        left, how = 0, "cut"
+                        break
                 for g in legs:
                     if not g[2] and H >= avg * (1 + g[1]):
                         g[2] = trimmed = True
@@ -627,6 +643,48 @@ def dots_sim(T, pick, exit_, sizing, win, acct, keep=False):
     return dict(end=eq, mdd=mdd, curve=curve, trades=trades if keep else None, lite=lite)
 
 
+def dots_diag(T):
+    """How good are the dots themselves? 1 OTM option, entry next minute open, no exits: what happened first."""
+    rows = []
+    for d in T:
+        s = d["strikes"].get("OTM1")
+        if s is None:
+            continue
+        hit10 = lose25 = lose50 = None
+        clean = 0.0
+        for k in range(min(len(s["h"]), 150)):
+            if hit10 is None and s["h"][k] >= .10:
+                hit10 = k
+            if lose25 is None and s["l"][k] <= -.25:
+                lose25 = k
+            if lose50 is None and s["l"][k] <= -.50:
+                lose50 = k
+            if lose25 is None:
+                clean = max(clean, s["h"][k])
+        win = hit10 is not None and (lose25 is None or hit10 < lose25)
+        tb = "9:30-11" if d["tod"] < 90 else ("11-1" if d["tod"] < 210 else ("1-3" if d["tod"] < 330 else "after 3"))
+        rows.append(dict(month=str(d["day"])[:7], side="calls" if d["side"] == "long" else "puts", time=tb,
+                         dot="gray weak" if d["weak"] else "white", day="with the day" if d["with_day"] else "against the day",
+                         ema9="still stretched" if d["stretched"] else "past 9 EMA",
+                         x="x within 30 min" if any(x <= d["i"] + 30 for x in d["kills"]) else "no x in 30 min",
+                         win=win, lose50=lose50 is not None and (hit10 is None or lose50 < hit10), clean=100 * clean,
+                         flat5=(s["c"][4] if len(s["c"]) > 4 else 0) < 0))
+    if not rows:
+        return []
+    df = pd.DataFrame(rows)
+    out = ["", "## How the dots themselves did (1 OTM, before any exit rule)",
+           "+10% first = hit +10% before -25%. -50% first = fell to -50% before ever touching +10%. Clean run = best price before -25%."]
+    for fld in ("month", "side", "time", "dot", "day", "ema9", "x"):
+        out += ["", f"| {fld} | dots | +10% first | -50% first | median clean run | red at minute 5 |", "|---|---|---|---|---|---|"]
+        for k, g in df.groupby(fld):
+            out.append(f"| {k} | {len(g)} | {100 * g.win.mean():.0f}% | {100 * g.lose50.mean():.0f}% | +{g.clean.median():.0f}% | {100 * g.flat5.mean():.0f}% |")
+    w = df[df.win]
+    l_ = df[~df.win]
+    out += ["", f"Of dots red at minute 5: {100 * df[df.flat5].win.mean():.0f}% still hit +10% first. Of dots green at minute 5: {100 * df[~df.flat5].win.mean():.0f}%.",
+            f"All dots: {len(df)}, +10% first {100 * df.win.mean():.0f}%, -50% first {100 * df.lose50.mean():.0f}%, median clean run +{df.clean.median():.0f}%."]
+    return out
+
+
 def dots_main():
     from alpaca.data.historical import OptionHistoricalDataClient
     os.makedirs(OUT, exist_ok=True)
@@ -674,32 +732,39 @@ def dots_main():
     print(f"{n_days} days, {n_dots} dots, {len(T)} tradable", flush=True)
 
     runs = []
-    for pick in DOTS_PICK:
-        for ex in DOTS_EXIT:
-            for sz in DOTS_SIZE:
+    G_PICK = ["1 OTM (current)", "clock: $0.40-0.80 <11, ~$1 11-1, 2 ITM >1", "2 ITM", "$0.40-0.80 near $0.80"]
+    G_EXIT = ["half +10%, runner trend line", "all out +10%", "quarters +10/+20/+40%, runner F/G"]
+    G_SIZE = ["25%", "50%"]
+    G_STOP = [.15, .25, .35, .5]
+    G_CUT = ["none", "x", "F/G re-spike", "x or F/G re-spike", "F/G not letting off by min 5", "time 10 min if not trimmed", "time 20 min if not trimmed"]
+    for pick in G_PICK:
+        for ex in G_EXIT:
+            for sz in G_SIZE:
                 for win in DOTS_WIN:
-                    for acct in ("cash", "margin"):
-                        r = dots_sim(T, pick, ex, sz, win, acct)
-                        tr = r["lite"]
-                        months = {}
-                        for t in tr:
-                            months.setdefault(t[0], []).append(t[1])
-                        runs.append(dict(strike=pick, exit=ex, size=sz, window=win, account=acct, end=round(r["end"], 2),
-                                         max_dd_pct=round(100 * r["mdd"], 1), trades=len(tr),
-                                         win_pct=round(100 * sum(t[1] > 0 for t in tr) / len(tr), 1) if tr else 0,
-                                         avg_ret_pct=round(float(np.mean([t[2] for t in tr])), 1) if tr else 0,
-                                         worst_trade_acct_pct=round(min([t[3] for t in tr], default=0), 1),
-                                         green_months=sum(sum(v) > 0 for v in months.values()), months=len(months),
-                                         _r=r))
+                    for stp in G_STOP:
+                        for cut in G_CUT:
+                            acct = "cash"
+                            r = dots_sim(T, pick, ex, sz, win, acct, stop=stp, cut=cut)
+                            tr = r["lite"]
+                            months = {}
+                            for t in tr:
+                                months.setdefault(t[0], []).append(t[1])
+                            runs.append(dict(strike=pick, exit=ex, size=sz, window=win, stop=f"-{int(stp * 100)}%", cut=cut, account=acct,
+                                             end=round(r["end"], 2), max_dd_pct=round(100 * r["mdd"], 1), trades=len(tr),
+                                             win_pct=round(100 * sum(t[1] > 0 for t in tr) / len(tr), 1) if tr else 0,
+                                             avg_ret_pct=round(float(np.mean([t[2] for t in tr])), 2) if tr else 0,
+                                             worst_trade_acct_pct=round(min([t[3] for t in tr], default=0), 1),
+                                             green_months=sum(sum(v) > 0 for v in months.values()), months=len(months),
+                                             _r=r, _stop=stp))
     runs.sort(key=lambda x: -x["end"])
     cols = [k for k in runs[0] if not k.startswith("_")]
     pd.DataFrame([{k: r[k] for k in cols} for r in runs]).to_csv(f"{OUT}/dots_6mo_runs.csv", index=False)
-    best_cash = [r for r in runs if r["account"] == "cash"]
-    top = best_cash[0]
-    top["_r"] = dots_sim(T, top["strike"], top["exit"], top["size"], top["window"], "cash", keep=True)
+    best_cash = [r for r in runs if r["trades"] >= 100]
+    top = best_cash[0] if best_cash else runs[0]
+    top["_r"] = dots_sim(T, top["strike"], top["exit"], top["size"], top["window"], "cash", keep=True, stop=top["_stop"], cut=top["cut"])
     pd.DataFrame(top["_r"]["trades"]).to_csv(f"{OUT}/dots_6mo_trades.csv", index=False)
     base = next(r for r in runs if r["strike"] == "1 OTM (current)" and r["exit"] == "half +10%, runner trend line"
-                and r["size"] == "50%" and r["window"] == "before 1:00" and r["account"] == "cash")
+                and r["size"] == "50%" and r["window"] == "before 1:00" and r["stop"] == "-50%" and r["cut"] == "none")
     curves = {}
     for tag, r in (("best", top), ("current", base)):
         for dd, v in r["_r"]["curve"]:
@@ -707,22 +772,21 @@ def dots_main():
     pd.DataFrame([dict(day=k, **v) for k, v in sorted(curves.items())]).to_csv(f"{OUT}/dots_6mo_curve.csv", index=False)
 
     def line(r):
-        return (f"| {r['strike']} | {r['exit']} | {r['size']} | {r['window']} | {r['account']} | ${r['end']:,.0f} | "
+        return (f"| {r['strike']} | {r['exit']} | {r['size']} | {r['window']} | {r['stop']} | {r['cut']} | ${r['end']:,.0f} | "
                 f"{r['max_dd_pct']}% | {r['trades']} | {r['win_pct']}% | {r['avg_ret_pct']}% | {r['worst_trade_acct_pct']}% | "
                 f"{r['green_months']}/{r['months']} |")
-    hdr = ("| Strike | Exit | Size | Window | Account | $2,000 became | Max DD | Trades | Win | Avg/trade | Worst trade | Green months |\n"
-           "|---|---|---|---|---|---|---|---|---|---|---|---|")
-    L = [f"# White dots - {n_days} trading days on real option prices", "",
-         f"SPY feed: {feed}. {n_dots} dots ({len(T)} had option bars). Start ${DOTS_START:,.0f}, whole contracts, "
-         f"spread 1c/2c/3c a side by price, max ${DOTS_CAP:,.0f} per trade, -50% stop, one trade at a time. DATA ONLY - no orders.",
-         "Cash = only settled money (options settle next day). Margin = PDT, 3 day trades per 5 days until $25k.", "",
-         "## Your current setup (1 OTM, half +10%, trend-line runner, 50%, before 1:00, cash)", hdr, line(base), "",
-         "## Top 25, cash account", hdr] + [line(r) for r in best_cash[:25]] + ["", "## Top 15, margin account", hdr] + \
-        [line(r) for r in runs if r["account"] == "margin"][:15] + ["", "## Each choice on its own (median ending across every other setting, cash)"]
-    for fld in ("strike", "exit", "size", "window"):
+    hdr = ("| Strike | Exit | Size | Window | Stop | Cut | $2,000 became | Max DD | Trades | Win | Avg/trade | Worst trade | Green months |\n"
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L = [f"# White dots v2 - {n_days} trading days on real option prices, with loss control", "",
+         f"SPY feed: {feed}. {n_dots} dots ({len(T)} had option bars). Start ${DOTS_START:,.0f}, cash account (settled money only), "
+         f"whole contracts, spread 1c/2c/3c a side, max ${DOTS_CAP:,.0f} per trade, one trade at a time. DATA ONLY - no orders.",
+         f"{sum(r['end'] > DOTS_START for r in runs)} of {len(runs)} setups made money.", "",
+         "## Your current setup (1 OTM, half +10%, trend-line runner, 50%, before 1:00, -50% stop, no cut)", hdr, line(base), "",
+         "## Top 30 (100+ trades)", hdr] + [line(r) for r in best_cash[:30]] + ["", "## Each choice on its own (median ending across every other setting)"]
+    for fld in ("strike", "exit", "size", "window", "stop", "cut"):
         L += ["", f"| {fld} | median ending | share profitable | median max DD |", "|---|---|---|---|"]
         vals = {}
-        for r in best_cash:
+        for r in runs:
             vals.setdefault(r[fld], []).append(r)
         for k, v in sorted(vals.items(), key=lambda kv: -float(np.median([x["end"] for x in kv[1]]))):
             L.append(f"| {k} | ${np.median([x['end'] for x in v]):,.0f} | {100 * np.mean([x['end'] > DOTS_START for x in v]):.0f}% | "
@@ -730,9 +794,10 @@ def dots_main():
     mon = {}
     for t in top["_r"]["trades"]:
         mon.setdefault(t["day"][:7], []).append(t)
-    L += ["", "## Best cash setup, month by month", "| Month | Trades | Win | P/L | Ending |", "|---|---|---|---|---|"]
+    L += ["", "## Best setup (100+ trades), month by month", "| Month | Trades | Win | P/L | Ending |", "|---|---|---|---|---|"]
     for mth, v in sorted(mon.items()):
         L.append(f"| {mth} | {len(v)} | {100 * np.mean([t['pnl'] > 0 for t in v]):.0f}% | ${sum(t['pnl'] for t in v):,.0f} | ${v[-1]['equity']:,.0f} |")
+    L += dots_diag(T)
     with open(f"{OUT}/DOTS_6MO.md", "w") as f:
         f.write("\n".join(L) + "\n")
     print("\n".join(L[:40]), flush=True)
