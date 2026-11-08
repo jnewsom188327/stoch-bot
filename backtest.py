@@ -437,6 +437,9 @@ T7_PLANS = {
     "limit bid 25% under the dot price (5 min max)": "dip25",
 }
 T7_STRIKES = {"1 OTM": 0, "2 ITM": -3}
+T7_FILL_STRIKES = {"3 OTM": 2, "2 OTM": 1, "1 OTM": 0, "ATM": -1, "1 ITM": -2, "2 ITM": -3}
+T7_FILL_BIDS = ["w0", "dip2", "dip5", "dip8", "dip10", "dip15"]
+T7_BUCKETS = [(0, 60, "9:30-10:30"), (60, 150, "10:30-12:00"), (150, 210, "12:00-1:00"), (210, 270, "1:00-2:00"), (270, 330, "2:00-3:00"), (330, 390, "3:00-4:00")]
 
 
 def t7_entry(plan, i, Lg, sess, ind, rec):
@@ -517,6 +520,7 @@ def dots7_main():
     rows = []
     rows2 = []
     rows3 = []
+    rows4 = []
     for day, gall in df1.groupby(df1.index.date):
         hmd = gall.index.hour * 100 + gall.index.minute
         g = gall[(hmd >= 930) & (hmd < 1600)]
@@ -572,6 +576,16 @@ def dots7_main():
                     sym = dots_occ(day, "C" if Lg else "P", K)
                     need.append(sym)
                     pick3.append((f"jump {th}x ATR on the {pos}", p_, Lg, sn, sym, th))
+        pick4 = []
+        for s in dots:
+            Lg = s["side"] == "long"
+            px = c[s["i"]]
+            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+            for sn, off in T7_FILL_STRIKES.items():
+                K = K1 + off if Lg else K1 - off
+                sym = dots_occ(day, "C" if Lg else "P", K)
+                need.append(sym)
+                pick4.append((s, sn, sym))
         for s in dots:
             Lg = s["side"] == "long"
             px = c[s["i"]]
@@ -611,6 +625,10 @@ def dots7_main():
                 fx[f"ob{kk}"] = float(Ok[j - 4:j + 1].min())
                 fx[f"tv{kk}"] = float(dd * ik["m"][j])
                 fx[f"ts{kk}"] = float(dd * (ik["m"][j] - ik["m"][j - 1]))
+                fx[f"fgcurl{kk}"] = float((Sk[j] < Sk[j - 1]) and (Ok[j] > Ok[j - 1]))
+                fx[f"dnear{kk}"] = float(any(q["side"] == s["side"] and i - 4 <= (q["i"] + 1) * kk - 1 <= i for q in sk))
+            fx["nsame"] = sum(1 for q in dots if q["side"] == s["side"] and q["i"] < i)
+            fx["atrp"] = float(100 * ind["A"][i] / c[i])
             for pname, code in T7_PLANS.items():
                 en = t7_entry(code, i, Lg, sess, ind, rec)
                 r = dict(day=day, half="2nd half" if day >= mid else "1st half", i=i, am=i < 210, side=s["side"],
@@ -640,6 +658,21 @@ def dots7_main():
                 if en is not None:
                     r.update(t7_result(rec, en[0], en[1], sess, i1 - 1, Lg))
                 rows2.append(r)
+        for s, sn, sym in pick4:
+            rec = opt.get(sym)
+            if rec is None:
+                continue
+            i, Lg = s["i"], s["side"] == "long"
+            base = t7_entry("w0", i, Lg, sess, ind, rec)
+            if base is None:
+                continue
+            bk = next(b[2] for b in T7_BUCKETS if b[0] <= i < b[1])
+            for code in T7_FILL_BIDS:
+                en = t7_entry(code, i, Lg, sess, ind, rec)
+                r = dict(day=day, half="2nd half" if day >= mid else "1st half", strike=sn, bucket=bk, bid=code, taken=en is not None, e0=base[1])
+                if en is not None:
+                    r.update(t7_result(rec, en[0], en[1], sess, i, Lg))
+                rows4.append(r)
         for src, p_, Lg, sn, sym, th in pick3:
             rec = opt.get(sym)
             if rec is None:
@@ -790,6 +823,65 @@ def dots7_main():
                                  f"{100 * len(t) / len(x):.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.R.mean():+.2f}% | "
                                  f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
             L.append("")
+    # ---- everyday filters on all 1m dots (1 OTM, 10% under)
+    E = A[(A.strike == "1 OTM") & (A.plan == "limit bid 10% under the dot price (5 min max)")].copy()
+    nd = max(A.day.nunique(), 1)
+    if len(E) and "dnear2" in E:
+        C = {"before 1:00": E.am.astype(bool), "1st-3rd dot this side": E.nsame < 3, "busy day": E.atrp >= 0.048, "day not stretched": E.rng <= 11.5,
+             "2m dot same side within 4 min": E.dnear2 == 1, "2m fear/greed curling your way": E.fgcurl2 == 1, "2m TTM ticking your way": E.ts2 > 0,
+             "1m TTM ticking your way": E.ttm_slope > 0}
+        import itertools
+        res = []
+        names = list(C)
+        for r_ in range(0, 4):
+            for combo in itertools.combinations(names, r_):
+                m_ = np.ones(len(E), bool)
+                for nm in combo:
+                    m_ &= C[nm].fillna(False).to_numpy().astype(bool)
+                x = E[m_]
+                t = x[x.taken]
+                if len(t) < 100:
+                    continue
+                hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                res.append((" + ".join(combo) or "every dot (no filter)", len(x) / nd, len(t) / nd, t.R.mean(), hv, t.tp_first.mean(), t.heat.median(), len(combo)))
+        L += ["## Making the everyday dots better (1-minute dots, 1 OTM, limit 10% under)", "",
+              "Every filter alone, then the best combos of up to 3 that keep 8+ dots a day AND are positive in both halves. Sorted by avg per trade.", "",
+              "| Filter | Dots/day | Fills/day | +10% first | Median heat | Avg per trade | 1st half / 2nd half |", "|---|---|---|---|---|---|---|"]
+        fmt = lambda z: f"| {z[0]} | {z[1]:.1f} | {z[2]:.1f} | {100 * z[5]:.0f}% | {100 * z[6]:.0f}% | {100 * z[3]:+.2f}% | {100 * z[4][0]:+.2f}% / {100 * z[4][1]:+.2f}% |"
+        for z in sorted([z for z in res if z[7] <= 1], key=lambda z: -z[3]):
+            L.append(fmt(z))
+        L += ["", "Best combos (8+ dots a day, positive both halves):", "", "| Filter | Dots/day | Fills/day | +10% first | Median heat | Avg per trade | 1st half / 2nd half |", "|---|---|---|---|---|---|---|"]
+        for z in sorted([z for z in res if z[7] >= 2 and z[1] >= 8 and min(z[4]) > 0], key=lambda z: -z[3])[:15]:
+            L.append(fmt(z))
+        L.append("")
+    # ---- fills: strike x time of day x bid depth
+    Fd = pd.DataFrame(rows4)
+    Fd.to_csv(f"{OUT}/entry_fills.csv", index=False)
+    if len(Fd):
+        bl = {"w0": "at the dot", "dip2": "2% under", "dip5": "5% under", "dip8": "8% under", "dip10": "10% under", "dip15": "15% under"}
+        L += ["## Limit fills: strike x time of day x how far under (every 1-minute dot)", "",
+              "Each cell = how often it filled · avg per trade (Plan A) · avg contract price at the dot. 'Most fills, still positive' = the shallowest bid",
+              "that was positive in both halves, with fills per day at that bid.", "",
+              "| Strike | Time | Avg price | " + " | ".join(bl[b] for b in T7_FILL_BIDS) + " | Most fills, still positive |",
+              "|---|---|---|" + "---|" * len(T7_FILL_BIDS) + "---|"]
+        for sn in T7_FILL_STRIKES:
+            for _, _, bk in T7_BUCKETS:
+                cells, best = [], "-"
+                x0 = Fd[(Fd.strike == sn) & (Fd.bucket == bk)]
+                if not len(x0):
+                    continue
+                for b in T7_FILL_BIDS:
+                    x = x0[x0.bid == b]
+                    t = x[x.taken]
+                    if len(t) < 20:
+                        cells.append("-")
+                        continue
+                    hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                    cells.append(f"{100 * len(t) / len(x):.0f}% · {100 * t.R.mean():+.1f}%")
+                    if best == "-" and min(hv) > 0:
+                        best = f"{bl[b]}: {len(t) / nd:.1f} fills/day, {100 * t.R.mean():+.1f}%"
+                L.append(f"| {sn} | {bk} | ${x0[x0.bid == 'w0'].e0.mean():.2f} | " + " | ".join(cells) + f" | {best} |")
+        L.append("")
     L += ["How to read it: a plan helps if its Plan A avg beats 'at the dot' in BOTH halves. A filter plan (green candle, fear/greed under",
           "its average, quits driving, limit bids) also helps if the dots it skipped did worse at the dot than the ones it took."]
     with open(f"{OUT}/ENTRY_TIMING.md", "w") as f:
