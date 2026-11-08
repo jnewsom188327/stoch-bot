@@ -220,6 +220,530 @@ def fetch_1m(symbol, start, end):
              "Make new PAPER keys in Alpaca and paste them into ALPACA_KEY and ALPACA_SECRET again.")
 
 
+# ============================================================================================================
+# WHITE DOTS - 6 MONTH BACKTEST ON REAL OPTION PRICES (runs by default while this block is in the file). DATA ONLY, NO ORDERS.
+# Paste this whole block directly ABOVE the line:  def fake_1m(symbol, start, end):   (near the top, right after fetch_1m)
+# To go back to your normal backtests, delete the block (or set DOTS=0 in the workflow env).
+# What it does: SPY 1-minute bars for the last DOTS_MONTHS months -> the exact white-dot logic from the Gamma Field page
+# (Vix Fix fear/greed, TTM, stall dots + x kills) -> real 0DTE option bars from Alpaca for every strike it could pick
+# -> every trading plan we found (clock strikes, trims, runners, sizing, one add) compounded from $2,000 with whole contracts,
+# spread costs, a per-trade dollar cap and your account's settlement rules. Writes results/DOTS_6MO.md plus CSVs.
+# ============================================================================================================
+import math  # noqa: E402
+DOTS_MONTHS = float(os.getenv("DOTS_MONTHS", "6") or 6)
+DOTS_START = float(os.getenv("DOTS_START", "2000") or 2000)
+DOTS_CAP = float(os.getenv("DOTS_CAP", "25000") or 25000)          # most $ in any one trade (0DTE fills get worse past this)
+DOTS_STOP = 0.5
+
+
+def dots_ema(x, L):
+    k = 2.0 / (L + 1)
+    o = np.empty(len(x))
+    o[0] = x[0]
+    for i in range(1, len(x)):
+        o[i] = o[i - 1] + k * (x[i] - o[i - 1])
+    return o
+
+
+def dots_rma(x, L):
+    o = np.empty(len(x))
+    a = None
+    for i, v in enumerate(x):
+        a = v if a is None else (a * (L - 1) + v) / L
+        o[i] = a
+    return o
+
+
+def dots_lr(y):
+    L = len(y)
+    mx = (L - 1) / 2.0
+    my = float(np.mean(y))
+    xs = np.arange(L) - mx
+    d = float(np.sum(xs * xs))
+    return my + (float(np.sum(xs * (np.asarray(y) - my))) / d) * mx if d else my
+
+
+def dots_clean(o, h, l, c):
+    """Bad ticks: a lone wick many times the normal bar range is clipped back to the body (same as the page)."""
+    h, l = h.copy(), l.copy()
+    for i in range(len(o)):
+        rs = sorted(h[k] - l[k] for k in range(max(0, i - 20), i))
+        if len(rs) < 5:
+            continue
+        med = max(rs[len(rs) // 2], 1e-6)
+        top, bot, lim = max(o[i], c[i]), min(o[i], c[i]), 8 * med
+        if h[i] - top > lim:
+            h[i] = top + med
+        if bot - l[i] > lim:
+            l[i] = bot - med
+    return h, l
+
+
+def dots_compute(o, h, l, c):
+    """VIX FIX RAINBOW fear/greed (0-100) + TTM FLOW momentum + EMA 13 / 9, computed fresh from 9:30 like the page."""
+    n = len(c)
+    wvf, wvs = np.zeros(n), np.zeros(n)
+    for i in range(n):
+        s = max(0, i - 21)
+        hc, lc = c[s:i + 1].max(), c[s:i + 1].min()
+        wvf[i] = (hc - l[i]) / hc * 100 if hc > 0 else 0
+        wvs[i] = (h[i] - lc) / lc * 100 if lc > 0 else 0
+    F, G = np.zeros(n), np.zeros(n)
+    for i in range(n):
+        s = max(0, i - 49)
+        wh, sh = wvf[s:i + 1].max(), wvs[s:i + 1].max()
+        F[i] = wvf[i] / wh * 100 if wh > 0 else 0
+        G[i] = wvs[i] / sh * 100 if sh > 0 else 0
+    fA, gA = dots_ema(F, 10), dots_ema(G, 10)
+    tr = np.empty(n)
+    tr[0] = h[0] - l[0]
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
+    atr = dots_rma(tr, 14)
+    d = np.zeros(n)
+    for i in range(n):
+        s = max(0, i - 19)
+        d[i] = c[i] - ((h[s:i + 1].max() + l[s:i + 1].min()) / 2 + c[s:i + 1].mean()) / 2
+    m = np.zeros(n)
+    for i in range(4, n):
+        w = min(20, i + 1)
+        m[i] = max(-10.0, min(10.0, dots_lr(d[i - w + 1:i + 1]) / max(atr[i], 0.01)))
+    return dict(F=F, G=G, fA=fA, gA=gA, m=m, ef=dots_ema(c, 13), e9=dots_ema(c, 9), A=atr)
+
+
+def dots_signals(o, h, l, c, ind):
+    """White dots (stall marks, incl. gray weak fires) and x kills. Index 0 = 9:30. Same rules as the Gamma Field page."""
+    n = len(c)
+    out = []
+    if n < 20:
+        return out
+    A = ind["A"]
+    for side in ("long", "short"):
+        Lg = side == "long"
+        st, sa, ot, oa = ("F", "fA", "G", "gA") if Lg else ("G", "gA", "F", "fA")
+        S_, SA, O_, OA = ind[st], ind[sa], ind[ot], ind[oa]
+        phase, x, xi, si, dr0 = 0, None, -1, -1, 0.0
+
+        def fire(i, a):
+            pk = max(S_[max(0, xi - 5):i + 1])
+            vix = pk >= 60 and (S_[i] < SA[i] or (S_[i] < S_[i - 1] < S_[i - 2])) and O_[i] > OA[i] and O_[i] > O_[i - 1]
+            trig = c[i] > h[i - 1] if Lg else c[i] < l[i - 1]
+            if not (vix and trig):
+                return False
+            s0 = max(0, i - 45)
+            lo, hi = l[s0:i + 1].min(), h[s0:i + 1].max()
+            late = 570 + i > 900
+            real = (not late) and (x <= lo if Lg else x >= hi) and dr0 >= 2 * a and i - xi <= 8
+            if not real:
+                out.append(dict(i=i, side=side, kind="stall", weak=1))
+            return True
+
+        for i in range(15, n):
+            a = A[i] or 1e-9
+            lo, hi = l[i - 15:i + 1].min(), h[i - 15:i + 1].max()
+            ext = l[i] if Lg else h[i]
+            new_ext = l[i] <= lo if Lg else h[i] >= hi
+            drive = hi - l[i] if Lg else h[i] - lo
+            if phase == 0:
+                if new_ext and drive >= 2 * a:
+                    phase, x, xi, dr0 = 1, ext, i, drive
+                continue
+            if (ext < x - 0.2 * a) if Lg else (ext > x + 0.2 * a):
+                if phase == 2:
+                    out.append(dict(i=i, side=side, kind="kill"))
+                phase, x, xi, dr0 = 1, ext, i, max(dr0, drive)
+                continue
+            if (l[i] < x) if Lg else (h[i] > x):
+                x = ext
+            dist = c[i] - x if Lg else x - c[i]
+            if phase == 1:
+                if 1 <= i - xi <= 3 and fire(i, a):
+                    phase = 0
+                    continue
+                if dist > 1.5 * a:
+                    phase = 0
+                    continue
+                if i - xi >= 2:
+                    body = float(np.mean(np.abs(c[xi + 1:i + 1] - o[xi + 1:i + 1])))
+                    if body <= 0.6 * a:
+                        phase, si = 2, i
+                        out.append(dict(i=i, side=side, kind="stall", weak=0))
+                continue
+            if phase == 2:
+                if i - si > 10:
+                    phase = 0
+                elif fire(i, a):
+                    phase = 0
+                elif dist > 2.5 * a:
+                    phase = 0
+    return sorted(out, key=lambda s: s["i"])
+
+
+def dots_occ(day, cp, k):
+    return f"SPY{day:%y%m%d}{cp}{int(round(k * 1000)):08d}"
+
+
+def dots_fetch_options(oc, contracts, day):
+    """Real 1-minute OHLC for each contract on `day`, as arrays of 390 (NaN = no trade that minute)."""
+    from alpaca.data.requests import OptionBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    start = pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30)
+    end = start + pd.Timedelta(minutes=390)
+    out = {}
+    contracts = sorted(set(contracts))
+    for k0 in range(0, len(contracts), 60):
+        chunk = contracts[k0:k0 + 60]
+        df = None
+        for attempt in range(4):
+            try:
+                df = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
+                                                          start=start.tz_convert("UTC").to_pydatetime(),
+                                                          end=end.tz_convert("UTC").to_pydatetime())).df
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  option bars {day} retry {attempt + 1}: {str(e)[:120]}", flush=True)
+                time.sleep(4 * (attempt + 1))
+        if df is None or not len(df) or not isinstance(df.index, pd.MultiIndex):
+            continue
+        for sym, g in df.groupby(level=0):
+            g = g.droplevel(0)
+            ix = g.index.tz_convert(NY)
+            mm = (ix.hour * 60 + ix.minute - 570).to_numpy()
+            ok = (mm >= 0) & (mm < 390)
+            rec = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
+            for col in rec:
+                rec[col][mm[ok]] = g[col].to_numpy()[ok]
+            out[sym] = rec
+    return out
+
+
+DOTS_OFF = {"ITM2": -3, "ITM1": -2, "ATM": -1, "OTM1": 0, "OTM2": 1, "OTM3": 2, "OTM4": 3, "OTM5": 4, "OTM6": 5}
+
+
+def dots_build_trades(day, sess, ind, sigs, opt):
+    """Every dot of the day with its real option path at each strike, plus SPY trend-line / fear-greed state each minute."""
+    o, c = sess["open"], sess["close"]
+    kills = [s for s in sigs if s["kind"] == "kill"]
+    rows = []
+    for s in sigs:
+        if s["kind"] != "stall":
+            continue
+        i = s["i"]
+        if i + 2 >= 390:
+            continue
+        Lg = s["side"] == "long"
+        px = c[i]
+        K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+        cp = "C" if Lg else "P"
+        strikes = {}
+        for nm, off in DOTS_OFF.items():
+            K = K1 + off if Lg else K1 - off
+            rec = opt.get(dots_occ(day, cp, K))
+            if rec is None:
+                continue
+            j0 = i + 1
+            e = rec["open"][j0]
+            if not (e > 0):
+                nxt = [j for j in range(j0, min(j0 + 3, 390)) if rec["open"][j] > 0]
+                if not nxt:
+                    continue
+                j0 = nxt[0]
+                e = rec["open"][j0]
+            H, Lo, C = [], [], []
+            last = e
+            for j in range(j0, 390):
+                if rec["close"][j] > 0:
+                    last = rec["close"][j]
+                    H.append(rec["high"][j] / e - 1)
+                    Lo.append(rec["low"][j] / e - 1)
+                    C.append(rec["close"][j] / e - 1)
+                else:
+                    H.append(last / e - 1)
+                    Lo.append(last / e - 1)
+                    C.append(last / e - 1)
+            strikes[nm] = dict(K=K, e=float(e), j0=j0, h=np.array(H), l=np.array(Lo), c=np.array(C))
+        if not strikes:
+            continue
+        a_side = ind["F"] if Lg else ind["G"]
+        tl = (c < ind["ef"]) if Lg else (c > ind["ef"])
+        day_chg = c[i] / o[0] - 1
+        rows.append(dict(day=day, i=i, tod=i, side=s["side"], weak=s.get("weak", 0), strikes=strikes,
+                         a=a_side, tl=tl, kills=[k["i"] for k in kills if k["side"] == s["side"] and k["i"] > i],
+                         with_day=(day_chg >= 0) if Lg else (day_chg <= 0),
+                         stretched=(c[i] <= ind["e9"][i]) if Lg else (c[i] >= ind["e9"][i])))
+    return rows
+
+
+def dots_band(d, lo, hi, tgt):
+    best, bd = None, 1e9
+    for k, s in d["strikes"].items():
+        if lo <= s["e"] <= hi and abs(s["e"] - tgt) < bd:
+            best, bd = k, abs(s["e"] - tgt)
+    return best
+
+
+DOTS_PICK = {
+    "clock: $0.40-0.80 <11, ~$1 11-1, 2 ITM >1": lambda d: dots_band(d, .4, .8, .8) if d["tod"] < 90 else (dots_band(d, .7, 1.3, 1.0) if d["tod"] < 210 else "ITM2"),
+    "1 OTM (current)": lambda d: "OTM1",
+    "2 ITM": lambda d: "ITM2",
+    "$0.40-0.80 near $0.80": lambda d: dots_band(d, .4, .8, .8),
+    "2 OTM <1, 1 ITM >1 (old way)": lambda d: "OTM2" if d["tod"] < 210 else "ITM1",
+}
+DOTS_EXIT = {
+    "half +10%, runner trend line": dict(legs=[(.5, .1)], rule="tl"),
+    "quarters +10/+20/+40%, runner F/G": dict(legs=[(.25, .1), (.25, .2), (.25, .4)], rule="fg"),
+    "3/4 +20%, runner trend line, lock +20%": dict(legs=[(.75, .2)], rule="tl", lock=.2),
+    "half +10%, runner F/G": dict(legs=[(.5, .1)], rule="fg"),
+    "all out +10%": dict(legs=[(1.0, .1)]),
+}
+DOTS_SIZE = {
+    "25%": dict(size=.25), "50%": dict(size=.5), "full port": dict(size=1.0),
+    "by the read (50% with-day+stretched, else 25%)": dict(read=True),
+    "25% + add 25% at -9% (<1:00, no x)": dict(size=.25, add=.25),
+    "50% + add 50% at -9% (<1:00, no x)": dict(size=.5, add=.5),
+}
+DOTS_WIN = {"all day (to 3:00)": 330, "before 1:00": 210}
+
+
+def dots_slip(e):
+    return .01 if e < 1 else (.02 if e < 3 else .03)
+
+
+def dots_sim(T, pick, exit_, sizing, win, acct, keep=False):
+    P, E, Z, W = DOTS_PICK[pick], DOTS_EXIT[exit_], DOTS_SIZE[sizing], DOTS_WIN[win]
+    eq = DOTS_START
+    peak, mdd = eq, 0.0
+    trades, curve = [], []
+    pdt = []
+    byday = {}
+    for x in T:
+        byday.setdefault(x["day"], []).append(x)
+    days = sorted(byday)
+    di = {dd: n for n, dd in enumerate(days)}
+    lite = []
+    for day in days:
+        settled = eq
+        spent = 0.0
+        free = -1
+        for d in byday[day]:
+            if d["tod"] < free or d["tod"] >= W:
+                continue
+            k0 = P(d)
+            s = d["strikes"].get(k0) if k0 else None
+            if s is None:
+                continue
+            if acct == "margin" and eq < 25000:
+                pdt = [x for x in pdt if x > di[day] - 5]
+                if len(pdt) >= 3:
+                    continue
+            size = (.5 if (d["with_day"] and d["stretched"]) else .25) if Z.get("read") else Z["size"]
+            slip = dots_slip(s["e"])
+            px = s["e"] + slip
+            budget = min(eq * size, DOTS_CAP)
+            if acct == "cash":
+                budget = min(budget, settled - spent)
+            n = int(budget // (px * 100))
+            if n < 1:
+                continue
+            cnt, cost, raw = n, n * px, n * s["e"]
+            left, cash, trimmed, added, how = float(n), 0.0, False, False, None
+            legs = [[f, t, False] for f, t in E["legs"]]
+            rule = E.get("rule")
+            lo_a, armed = 1e9, False
+            lim = min(len(s["h"]) - 1, 360 - s["j0"], 150)
+            k = 0
+            for k in range(lim + 1):
+                j = s["j0"] + k
+                H, L_, C = s["e"] * (1 + s["h"][k]), s["e"] * (1 + s["l"][k]), s["e"] * (1 + s["c"][k])
+                if Z.get("add") and not added and not trimmed and d["tod"] < 210 and L_ <= s["e"] * .91 \
+                        and not any(x <= j for x in d["kills"]):
+                    added = True
+                    ap = s["e"] * .91 + slip
+                    room = min(eq * Z["add"], DOTS_CAP, (eq - cost * 100) if acct != "cash" else (settled - spent - cost * 100))
+                    n2 = int(max(0, room) // (ap * 100))
+                    if n2 >= 1:
+                        left += n2
+                        cnt += n2
+                        cost += n2 * ap
+                        raw += n2 * s["e"] * .91
+                avg = raw / cnt
+                if L_ <= avg * (1 - DOTS_STOP):
+                    cash += left * (avg * (1 - DOTS_STOP) - slip)
+                    left, how = 0, "stop"
+                    break
+                for g in legs:
+                    if not g[2] and H >= avg * (1 + g[1]):
+                        g[2] = trimmed = True
+                        q = left if g[0] >= 1 else max(1, round(cnt * g[0]))
+                        if rule and g is legs[-1] and left - q < 1 and cnt > 1:
+                            q = left - 1
+                        q = min(q, left)
+                        cash += q * (avg * (1 + g[1]) - slip)
+                        left -= q
+                if left <= 1e-9:
+                    how = "targets"
+                    break
+                if trimmed and E.get("lock") is not None and k > 0 and L_ <= avg * (1 + E["lock"]):
+                    cash += left * (avg * (1 + E["lock"]) - slip)
+                    left, how = 0, "lock"
+                    break
+                if j < 390:
+                    av = d["a"][j]
+                    lo_a = min(lo_a, av)
+                    if av <= 20:
+                        armed = True
+                    fire = (rule == "tl" and bool(d["tl"][j])) or (rule == "fg" and armed and av - lo_a >= 3)
+                    if trimmed and rule and k >= 1 and fire:
+                        cash += left * (C - slip)
+                        left, how = 0, "runner"
+                        break
+                if not rule and k >= 60:
+                    cash += left * (C - slip)
+                    left, how = 0, "time"
+                    break
+            if left > 1e-9:
+                cash += left * (s["e"] * (1 + s["c"][k]) - slip)
+                how = how or "time"
+            pnl = 100 * (cash - cost)
+            before = eq
+            eq += pnl
+            spent += cost * 100
+            if acct == "margin" and before < 25000:
+                pdt.append(di[day])
+            peak = max(peak, eq)
+            mdd = max(mdd, (peak - eq) / peak if peak > 0 else 0)
+            free = s["j0"] + k
+            lite.append((str(day)[:7], pnl, 100 * (cash - cost) / cost, 100 * pnl / before))
+            if keep:
+                trades.append(dict(day=str(day), time=f"{(570 + d['i']) // 60}:{(570 + d['i']) % 60:02d}", side=d["side"],
+                                   strike=k0, K=s["K"], entry=round(s["e"], 2), contracts=cnt, added=added, exit=how,
+                                   minutes=k + 1, ret_pct=round(100 * (cash - cost) / cost, 1), pnl=round(pnl, 2),
+                                   acct_pct=round(100 * pnl / before, 2), equity=round(eq, 2)))
+            if eq <= 50:
+                break
+        curve.append((str(day), round(eq, 2)))
+        if eq <= 50:
+            break
+    return dict(end=eq, mdd=mdd, curve=curve, trades=trades if keep else None, lite=lite)
+
+
+def dots_main():
+    from alpaca.data.historical import OptionHistoricalDataClient
+    os.makedirs(OUT, exist_ok=True)
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
+    start = end - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
+    print(f"WHITE DOTS 6-MONTH: SPY 1m {start:%Y-%m-%d} -> {end:%Y-%m-%d}", flush=True)
+    df1, feed = fetch_1m("SPY", start, end)
+    hm = df1.index.hour * 100 + df1.index.minute
+    rth = df1[(hm >= 930) & (hm < 1600)]
+    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
+    oc = OptionHistoricalDataClient(key, sec)
+    T, n_days, n_dots, missing = [], 0, 0, 0
+    for day, g in rth.groupby(rth.index.date):
+        if len(g) < 300:
+            continue
+        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
+        mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
+        ok = (mm >= 0) & (mm < 390)
+        for col in sess:
+            sess[col][mm[ok]] = g[col].to_numpy()[ok]
+        for col in sess:  # fill the odd missing minute from the last close
+            s = pd.Series(sess[col])
+            sess[col] = s.fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
+        o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
+        h2, l2 = dots_clean(o, h, l, c)
+        ind = dots_compute(o, h2, l2, c)
+        sigs = dots_signals(o, h2, l2, c, ind)
+        need = set()
+        for s in sigs:
+            if s["kind"] != "stall":
+                continue
+            Lg = s["side"] == "long"
+            px = c[s["i"]]
+            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+            for off in DOTS_OFF.values():
+                need.add(dots_occ(day, "C" if Lg else "P", K1 + off if Lg else K1 - off))
+        opt = dots_fetch_options(oc, need, day) if need else {}
+        rows = dots_build_trades(day, sess, ind, sigs, opt)
+        n_days += 1
+        n_dots += sum(1 for s in sigs if s["kind"] == "stall")
+        missing += sum(1 for s in sigs if s["kind"] == "stall") - len(rows)
+        T.extend(rows)
+        print(f"  {day}: {sum(1 for s in sigs if s['kind'] == 'stall')} dots, {len(rows)} with option bars", flush=True)
+    T.sort(key=lambda d: (d["day"], d["tod"]))
+    print(f"{n_days} days, {n_dots} dots, {len(T)} tradable", flush=True)
+
+    runs = []
+    for pick in DOTS_PICK:
+        for ex in DOTS_EXIT:
+            for sz in DOTS_SIZE:
+                for win in DOTS_WIN:
+                    for acct in ("cash", "margin"):
+                        r = dots_sim(T, pick, ex, sz, win, acct)
+                        tr = r["lite"]
+                        months = {}
+                        for t in tr:
+                            months.setdefault(t[0], []).append(t[1])
+                        runs.append(dict(strike=pick, exit=ex, size=sz, window=win, account=acct, end=round(r["end"], 2),
+                                         max_dd_pct=round(100 * r["mdd"], 1), trades=len(tr),
+                                         win_pct=round(100 * sum(t[1] > 0 for t in tr) / len(tr), 1) if tr else 0,
+                                         avg_ret_pct=round(float(np.mean([t[2] for t in tr])), 1) if tr else 0,
+                                         worst_trade_acct_pct=round(min([t[3] for t in tr], default=0), 1),
+                                         green_months=sum(sum(v) > 0 for v in months.values()), months=len(months),
+                                         _r=r))
+    runs.sort(key=lambda x: -x["end"])
+    cols = [k for k in runs[0] if not k.startswith("_")]
+    pd.DataFrame([{k: r[k] for k in cols} for r in runs]).to_csv(f"{OUT}/dots_6mo_runs.csv", index=False)
+    best_cash = [r for r in runs if r["account"] == "cash"]
+    top = best_cash[0]
+    top["_r"] = dots_sim(T, top["strike"], top["exit"], top["size"], top["window"], "cash", keep=True)
+    pd.DataFrame(top["_r"]["trades"]).to_csv(f"{OUT}/dots_6mo_trades.csv", index=False)
+    base = next(r for r in runs if r["strike"] == "1 OTM (current)" and r["exit"] == "half +10%, runner trend line"
+                and r["size"] == "50%" and r["window"] == "before 1:00" and r["account"] == "cash")
+    curves = {}
+    for tag, r in (("best", top), ("current", base)):
+        for dd, v in r["_r"]["curve"]:
+            curves.setdefault(dd, {})[tag] = v
+    pd.DataFrame([dict(day=k, **v) for k, v in sorted(curves.items())]).to_csv(f"{OUT}/dots_6mo_curve.csv", index=False)
+
+    def line(r):
+        return (f"| {r['strike']} | {r['exit']} | {r['size']} | {r['window']} | {r['account']} | ${r['end']:,.0f} | "
+                f"{r['max_dd_pct']}% | {r['trades']} | {r['win_pct']}% | {r['avg_ret_pct']}% | {r['worst_trade_acct_pct']}% | "
+                f"{r['green_months']}/{r['months']} |")
+    hdr = ("| Strike | Exit | Size | Window | Account | $2,000 became | Max DD | Trades | Win | Avg/trade | Worst trade | Green months |\n"
+           "|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L = [f"# White dots - {n_days} trading days on real option prices", "",
+         f"SPY feed: {feed}. {n_dots} dots ({len(T)} had option bars). Start ${DOTS_START:,.0f}, whole contracts, "
+         f"spread 1c/2c/3c a side by price, max ${DOTS_CAP:,.0f} per trade, -50% stop, one trade at a time. DATA ONLY - no orders.",
+         "Cash = only settled money (options settle next day). Margin = PDT, 3 day trades per 5 days until $25k.", "",
+         "## Your current setup (1 OTM, half +10%, trend-line runner, 50%, before 1:00, cash)", hdr, line(base), "",
+         "## Top 25, cash account", hdr] + [line(r) for r in best_cash[:25]] + ["", "## Top 15, margin account", hdr] + \
+        [line(r) for r in runs if r["account"] == "margin"][:15] + ["", "## Each choice on its own (median ending across every other setting, cash)"]
+    for fld in ("strike", "exit", "size", "window"):
+        L += ["", f"| {fld} | median ending | share profitable | median max DD |", "|---|---|---|---|"]
+        vals = {}
+        for r in best_cash:
+            vals.setdefault(r[fld], []).append(r)
+        for k, v in sorted(vals.items(), key=lambda kv: -float(np.median([x["end"] for x in kv[1]]))):
+            L.append(f"| {k} | ${np.median([x['end'] for x in v]):,.0f} | {100 * np.mean([x['end'] > DOTS_START for x in v]):.0f}% | "
+                     f"{np.median([x['max_dd_pct'] for x in v]):.1f}% |")
+    mon = {}
+    for t in top["_r"]["trades"]:
+        mon.setdefault(t["day"][:7], []).append(t)
+    L += ["", "## Best cash setup, month by month", "| Month | Trades | Win | P/L | Ending |", "|---|---|---|---|---|"]
+    for mth, v in sorted(mon.items()):
+        L.append(f"| {mth} | {len(v)} | {100 * np.mean([t['pnl'] > 0 for t in v]):.0f}% | ${sum(t['pnl'] for t in v):,.0f} | ${v[-1]['equity']:,.0f} |")
+    with open(f"{OUT}/DOTS_6MO.md", "w") as f:
+        f.write("\n".join(L) + "\n")
+    print("\n".join(L[:40]), flush=True)
+
+
+if __name__ == "__main__" and os.getenv("DOTS", "1").strip() == "1":
+    dots_main()
+    sys.exit(0)
+# ======================================= END WHITE DOTS BLOCK ===============================================
+
+
 def fake_1m(symbol, start, end):
     """Random-walk data so the program can be tested without keys (TEST=1). Built from 10 steps a minute, so each
     candle's high / low are real points of the path (needed to test instant, intrabar entries fairly)."""
