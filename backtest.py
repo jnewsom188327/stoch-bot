@@ -432,6 +432,9 @@ T7_PLANS = {
     "price quits driving: no new extreme for 2 min": "quit",
     "limit bid 5% under the dot price (5 min max)": "dip5",
     "limit bid 10% under the dot price (5 min max)": "dip10",
+    "limit bid 15% under the dot price (5 min max)": "dip15",
+    "limit bid 20% under the dot price (5 min max)": "dip20",
+    "limit bid 25% under the dot price (5 min max)": "dip25",
 }
 T7_STRIKES = {"1 OTM": 0, "2 ITM": -3}
 
@@ -459,8 +462,8 @@ def t7_entry(plan, i, Lg, sess, ind, rec):
         if plan == "quit" and k >= i + 2:
             ok = all((l[m] >= l[i]) if Lg else (h[m] <= h[i]) for m in range(i + 1, k + 1))
             return px_at(k + 1) if ok else None
-    if plan in ("dip5", "dip10"):
-        tgt = base[1] * (0.95 if plan == "dip5" else 0.90)
+    if plan.startswith("dip"):
+        tgt = base[1] * (1 - int(plan[3:]) / 100)
         for j in range(base[0], min(base[0] + 5, 390)):
             if rec["low"][j] > 0 and rec["low"][j] <= tgt - 0.01:  # must trade a cent through your bid to count as filled
                 return j, tgt
@@ -496,7 +499,7 @@ def t7_result(rec, j0, e, sess, i, Lg):
         best60 = max(best60, hh / e - 1)
     if exitp is None:
         exitp = last
-    return dict(tp_first=1.0 if first == "tp" else 0.0, heat=heat, best15=best15, best60=best60,
+    return dict(tp_first=1.0 if first == "tp" else 0.0, green60=1.0 if best60 > 0.02 else 0.0, heat=heat, best15=best15, best60=best60,
                 R=(max(exitp - 0.01, 0) / (e + 0.01) - 1))
 
 
@@ -551,10 +554,17 @@ def dots7_main():
             if base is None:
                 continue
             b_res = t7_result(rec, base[0], base[1], sess, i, Lg)
+            S_, O_ = (ind["F"], ind["G"]) if Lg else (ind["G"], ind["F"])
+            pk = float(S_[max(0, i - 6):i + 1].max())
+            obot = float(O_[max(0, i - 10):i + 1].min())
+            dd = 1 if Lg else -1
+            ttm_slope = float(dd * (ind["m"][i] - ind["m"][i - 1]))
+            ttm_val = float(dd * ind["m"][i])
+            rng = float((h2[:i + 1].max() - l2[:i + 1].min()) / max(ind["A"][i], 1e-6))
             for pname, code in T7_PLANS.items():
                 en = t7_entry(code, i, Lg, sess, ind, rec)
                 r = dict(day=day, half="2nd half" if day >= mid else "1st half", i=i, am=i < 210, side=s["side"],
-                         weak=s.get("weak", 0), strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
+                         weak=s.get("weak", 0), pk=pk, obot=obot, rng=rng, ttm_slope=ttm_slope, ttm_val=ttm_val, strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
                 if en is not None:
                     r.update(t7_result(rec, en[0], en[1], sess, i, Lg))
                     r["e"] = en[1]
@@ -583,6 +593,37 @@ def dots7_main():
                      f"{100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.best15.median():+.0f}% | "
                      f"{100 * t.R.mean():+.2f}% | {100 * (t.R > 0).mean():.0f}% | {100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | "
                      f"{100 * t[t.am].R.mean():+.2f}% | {(f'{100 * sk.base_R.mean():+.2f}% (n={len(sk)})') if len(sk) else '-'} |")
+        L.append("")
+    groups = [("every dot", lambda x: x.pk > -1),
+              ("stretch pegged 95-100 AND other side bottomed (10 or less)", lambda x: (x.pk >= 95) & (x.obot <= 10)),
+              ("  ...same, day NOT stretched (range 11.5 ATR or less)", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.rng <= 11.5)),
+              ("  ...same, day stretched (trend / lock-out / big selloff)", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.rng > 11.5)),
+              ("  ...pegged + TTM ticking fast your way", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_slope >= 0.256)),
+              ("  ...pegged + TTM slow or still against", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_slope < 0.256)),
+              ("  ...pegged + TTM already flipped your way", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_val > 0)),
+              ("  ...pegged + TTM fast + day NOT stretched", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_slope >= 0.256) & (x.rng <= 11.5)),
+              ("  ...pegged + TTM still against you (neg for calls / pos for puts)", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_val < 0)),
+              ("  ...pegged + TTM deep against (-2 or past) and curling your way", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_val <= -2) & (x.ttm_slope > 0)),
+              ("  ...pegged + TTM deep against + curling + day NOT stretched", lambda x: (x.pk >= 95) & (x.obot <= 10) & (x.ttm_val <= -2) & (x.ttm_slope > 0) & (x.rng <= 11.5)),
+              ("every dot + TTM deep against and curling your way", lambda x: (x.ttm_val <= -2) & (x.ttm_slope > 0)),
+              ("every dot + TTM ticking fast your way", lambda x: x.ttm_slope >= 0.256)]
+    for sn in T7_STRIKES:
+        L += [f"## Pegged fear/greed: how deep to bid ({sn})", "",
+              "Green = traded at least +2% above your fill within 60 min. Plan A as above.", "",
+              "| Dots | Bid | Filled | Green within 60m | +10% first | Median heat | Run: median best in 60m / reached +40% | Plan A avg | 1st half / 2nd half | Before 1:00 |", "|---|---|---|---|---|---|---|---|---|---|"]
+        for gname, fn in groups:
+            for pname, code in T7_PLANS.items():
+                if code not in ("w0", "dip5", "dip10", "dip15", "dip20", "dip25"):
+                    continue
+                x = A[(A.strike == sn) & (A.plan == pname)]
+                x = x[fn(x)]
+                t = x[x.taken]
+                if len(t) < 10:
+                    continue
+                hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                L.append(f"| {gname} (n={len(x)}) | {'at the dot' if code == 'w0' else code[3:] + '% under'} | {100 * len(t) / len(x):.0f}% | "
+                         f"{100 * t.green60.mean():.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.best60.median():+.0f}% / {100 * (t.best60 >= .4).mean():.0f}% | {100 * t.R.mean():+.2f}% | "
+                         f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am].R.mean():+.2f}% |")
         L.append("")
     L += ["How to read it: a plan helps if its Plan A avg beats 'at the dot' in BOTH halves. A filter plan (green candle, fear/greed under",
           "its average, quits driving, limit bids) also helps if the dots it skipped did worse at the dot than the ones it took."]
