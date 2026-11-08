@@ -515,6 +515,8 @@ def dots7_main():
     df1, feed = fetch_1m("SPY", start, now)
     oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
     rows = []
+    rows2 = []
+    rows3 = []
     for day, gall in df1.groupby(df1.index.date):
         hmd = gall.index.hour * 100 + gall.index.minute
         g = gall[(hmd >= 930) & (hmd < 1600)]
@@ -534,7 +536,42 @@ def dots7_main():
         dots = [s for s in dots_signals(o, h2, l2, c, ind) if s["kind"] == "stall" and s["i"] < 380]
         if not dots:
             continue
+        HT = {}
+        for kk in (2, 3):
+            oo, hh_, ll_, cc_ = (o.reshape(-1, kk)[:, 0], h2.reshape(-1, kk).max(1), l2.reshape(-1, kk).min(1), c.reshape(-1, kk)[:, -1])
+            ik = dots_compute(oo, hh_, ll_, cc_)
+            HT[kk] = (ik, [s for s in dots_signals(oo, hh_, ll_, cc_, ik) if s["kind"] == "stall"], cc_)
         need, pick = [], []
+        pick2 = []
+        for kk, (ik, sk, cc_) in HT.items():
+            for s in sk:
+                i1 = (s["i"] + 1) * kk
+                if i1 >= 380:
+                    continue
+                Lg = s["side"] == "long"
+                px = cc_[s["i"]]
+                K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+                for sn, off in T7_STRIKES.items():
+                    K = K1 + off if Lg else K1 - off
+                    sym = dots_occ(day, "C" if Lg else "P", K)
+                    need.append(sym)
+                    pick2.append((kk, s, i1, sn, sym))
+        pick3 = []
+        body = (c - o) / np.maximum(ind["A"], 1e-6)
+        for p_ in range(20, 378):
+            b_ = body[p_]
+            for th in (1.5, 2.5):
+                if abs(b_) < th:
+                    continue
+                pos = "last minute of the 5m candle" if p_ % 5 == 4 else "minutes 1-4 of the 5m candle"
+                Lg = b_ > 0
+                px = c[p_]
+                K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+                for sn, off in T7_STRIKES.items():
+                    K = K1 + off if Lg else K1 - off
+                    sym = dots_occ(day, "C" if Lg else "P", K)
+                    need.append(sym)
+                    pick3.append((f"jump {th}x ATR on the {pos}", p_, Lg, sn, sym, th))
         for s in dots:
             Lg = s["side"] == "long"
             px = c[s["i"]]
@@ -555,22 +592,76 @@ def dots7_main():
                 continue
             b_res = t7_result(rec, base[0], base[1], sess, i, Lg)
             S_, O_ = (ind["F"], ind["G"]) if Lg else (ind["G"], ind["F"])
+            dd = 1 if Lg else -1
             pk = float(S_[max(0, i - 6):i + 1].max())
             obot = float(O_[max(0, i - 10):i + 1].min())
-            dd = 1 if Lg else -1
             ttm_slope = float(dd * (ind["m"][i] - ind["m"][i - 1]))
             ttm_val = float(dd * ind["m"][i])
             rng = float((h2[:i + 1].max() - l2[:i + 1].min()) / max(ind["A"][i], 1e-6))
+            way = (lambda a, b: a > b) if Lg else (lambda a, b: a < b)
+            ps = (i // 5 - 1) * 5
+            fx = dict(pos5=i % 5, last1_way=float(way(c[ps + 4], o[ps + 4])) if ps >= 0 else np.nan,
+                      prev5_way=float(way(c[ps + 4], o[ps])) if ps >= 0 else np.nan, cur5_way=float(way(c[i], o[(i // 5) * 5])))
+            for kk, (ik, sk, cc_) in HT.items():
+                j = (i + 1) // kk - 1
+                if j < 5:
+                    continue
+                Sk, Ok = (ik["F"], ik["G"]) if Lg else (ik["G"], ik["F"])
+                fx[f"pk{kk}"] = float(Sk[j - 2:j + 1].max())
+                fx[f"ob{kk}"] = float(Ok[j - 4:j + 1].min())
+                fx[f"tv{kk}"] = float(dd * ik["m"][j])
+                fx[f"ts{kk}"] = float(dd * (ik["m"][j] - ik["m"][j - 1]))
             for pname, code in T7_PLANS.items():
                 en = t7_entry(code, i, Lg, sess, ind, rec)
                 r = dict(day=day, half="2nd half" if day >= mid else "1st half", i=i, am=i < 210, side=s["side"],
-                         weak=s.get("weak", 0), pk=pk, obot=obot, rng=rng, ttm_slope=ttm_slope, ttm_val=ttm_val, strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
+                         weak=s.get("weak", 0), pk=pk, obot=obot, rng=rng, ttm_slope=ttm_slope, ttm_val=ttm_val, **fx, strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
                 if en is not None:
                     r.update(t7_result(rec, en[0], en[1], sess, i, Lg))
                     r["e"] = en[1]
                     r["wait"] = en[0] - base[0]
                 rows.append(r)
-        print(f"  {day}: dots {len(dots)}, {time.time() - t0:.0f}s", flush=True)
+        for kk, s, i1, sn, sym in pick2:
+            rec = opt.get(sym)
+            if rec is None:
+                continue
+            Lg = s["side"] == "long"
+            ik = HT[kk][0]
+            Sk, Ok = (ik["F"], ik["G"]) if Lg else (ik["G"], ik["F"])
+            j, dd = s["i"], (1 if Lg else -1)
+            base = t7_entry("w0", i1 - 1, Lg, sess, ind, rec)
+            if base is None:
+                continue
+            rg = float((h2[:i1].max() - l2[:i1].min()) / max(ind["A"][i1 - 1], 1e-6))
+            for code in ("w0", "dip10"):
+                en = t7_entry(code, i1 - 1, Lg, sess, ind, rec)
+                r = dict(src=f"{kk}m", day=day, half="2nd half" if day >= mid else "1st half", am=i1 < 210, strike=sn, plan=code, taken=en is not None,
+                         rng=rg, pk=float(Sk[max(0, j - 2):j + 1].max()), obot=float(Ok[max(0, j - 4):j + 1].min()),
+                         ttm_val=float(dd * ik["m"][j]), ttm_slope=float(dd * (ik["m"][j] - ik["m"][j - 1])) if j else 0.0)
+                if en is not None:
+                    r.update(t7_result(rec, en[0], en[1], sess, i1 - 1, Lg))
+                rows2.append(r)
+        for src, p_, Lg, sn, sym, th in pick3:
+            rec = opt.get(sym)
+            if rec is None:
+                continue
+            base = t7_entry("w0", p_, Lg, sess, ind, rec)
+            if base is None:
+                continue
+            dd = 1 if Lg else -1
+            A_ = max(ind["A"][p_], 1e-6)
+            side = "long" if Lg else "short"
+            dotnear = any(d["side"] == side and p_ - 5 <= d["i"] <= p_ for d in dots)
+            dotagainst = any(d["side"] != side and p_ - 5 <= d["i"] <= p_ for d in dots)
+            rg = float((h2[:p_ + 1].max() - l2[:p_ + 1].min()) / A_)
+            for code in ("w0", "dip10"):
+                en = t7_entry(code, p_, Lg, sess, ind, rec)
+                r = dict(src=src, th=th, day=day, half="2nd half" if day >= mid else "1st half", am=p_ < 210, strike=sn, plan=code, taken=en is not None,
+                         rng=rg, dotnear=dotnear, dotagainst=dotagainst,
+                         cont5=float(dd * (c[min(p_ + 5, 389)] - c[p_]) / A_), cont15=float(dd * (c[min(p_ + 15, 389)] - c[p_]) / A_))
+                if en is not None:
+                    r.update(t7_result(rec, en[0], en[1], sess, p_, Lg))
+                rows3.append(r)
+        print(f"  {day}: dots {len(dots)}, 2m {len(HT[2][1])}, 3m {len(HT[3][1])}, {time.time() - t0:.0f}s", flush=True)
     A = pd.DataFrame(rows)
     A.to_csv(f"{OUT}/entry_timing_v7.csv", index=False)
     L = ["# Entry timing: buy at the dot, or wait?", "",
@@ -625,6 +716,80 @@ def dots7_main():
                          f"{100 * t.green60.mean():.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.best60.median():+.0f}% / {100 * (t.best60 >= .4).mean():.0f}% | {100 * t.R.mean():+.2f}% | "
                          f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am].R.mean():+.2f}% |")
         L.append("")
+    B = pd.DataFrame(rows2)
+    B.to_csv(f"{OUT}/entry_timing_htf.csv", index=False)
+    A2 = A[A.plan.isin([list(T7_PLANS)[0], "limit bid 10% under the dot price (5 min max)"])].copy()
+    A2["plan"] = np.where(A2.plan == list(T7_PLANS)[0], "w0", "dip10")
+    A2["src"] = "1m"
+    Z = pd.concat([A2, B], ignore_index=True) if len(B) else A2
+    peg = lambda x, a, b: (x[a] >= 95) & (x[b] <= 10)
+    G2 = [("1m dots: every dot", lambda x: x.src == "1m"),
+          ("1m: dot on the LAST minute of a 5m candle", lambda x: (x.src == "1m") & (x.pos5 == 4)),
+          ("1m: dot on minutes 1-4 of a 5m candle", lambda x: (x.src == "1m") & (x.pos5 < 4)),
+          ("1m: last minute of the previous 5m candle moved your way", lambda x: (x.src == "1m") & (x.last1_way == 1)),
+          ("1m: last minute of the previous 5m candle moved against", lambda x: (x.src == "1m") & (x.last1_way == 0)),
+          ("1m: previous 5m candle closed your way", lambda x: (x.src == "1m") & (x.prev5_way == 1)),
+          ("1m: current 5m candle already your way at the dot", lambda x: (x.src == "1m") & (x.cur5_way == 1)),
+          ("1m: 2m fear/greed pegged + other bottomed", lambda x: (x.src == "1m") & peg(x, "pk2", "ob2")),
+          ("1m: 3m fear/greed pegged + other bottomed", lambda x: (x.src == "1m") & peg(x, "pk3", "ob3")),
+          ("1m: 3m TTM deep against + curling", lambda x: (x.src == "1m") & (x.tv3 <= -2) & (x.ts3 > 0)),
+          ("1m: 3m TTM ticking fast your way", lambda x: (x.src == "1m") & (x.ts3 >= 0.256)),
+          ("1m A+ (pegged, TTM deep+curl, day calm)", lambda x: (x.src == "1m") & peg(x, "pk", "obot") & (x.ttm_val <= -2) & (x.ttm_slope > 0) & (x.rng <= 11.5)),
+          ("1m A+ AND 3m TTM curling your way", lambda x: (x.src == "1m") & peg(x, "pk", "obot") & (x.ttm_val <= -2) & (x.ttm_slope > 0) & (x.rng <= 11.5) & (x.ts3 > 0)),
+          ("1m A+ AND last 5m minute your way", lambda x: (x.src == "1m") & peg(x, "pk", "obot") & (x.ttm_val <= -2) & (x.ttm_slope > 0) & (x.rng <= 11.5) & (x.last1_way == 1)),
+          ("1m pegged + calm day AND 3m pegged", lambda x: (x.src == "1m") & peg(x, "pk", "obot") & (x.rng <= 11.5) & peg(x, "pk3", "ob3"))]
+    for kk in ("2m", "3m"):
+        G2 += [(f"{kk} chart dots: every dot", lambda x, kk=kk: x.src == kk),
+               (f"{kk} chart dots: pegged + other bottomed", lambda x, kk=kk: (x.src == kk) & peg(x, "pk", "obot")),
+               (f"{kk} chart dots: pegged + calm day", lambda x, kk=kk: (x.src == kk) & peg(x, "pk", "obot") & (x.rng <= 11.5)),
+               (f"{kk} chart dots: A+ (pegged, TTM deep+curl, calm)", lambda x, kk=kk: (x.src == kk) & peg(x, "pk", "obot") & (x.ttm_val <= -2) & (x.ttm_slope > 0) & (x.rng <= 11.5)),
+               (f"{kk} chart dots: before 1:00", lambda x, kk=kk: (x.src == kk) & x.am)]
+    for sn in T7_STRIKES:
+        L += [f"## 5-minute candle + 2m / 3m charts ({sn})", "",
+              "| Dots | Count | Per day | Bid | Filled | +10% first | Median heat | Run: median best 60m / +40% | Plan A avg | 1st half / 2nd half | Before 1:00 |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
+        nd = max(A.day.nunique(), 1)
+        for gname, fn in G2:
+            for code in ("w0", "dip10"):
+                x = Z[(Z.strike == sn) & (Z.plan == code)]
+                try:
+                    x = x[fn(x).fillna(False).astype(bool)]
+                except Exception:  # noqa: BLE001
+                    continue
+                t = x[x.taken]
+                if len(t) < 10:
+                    continue
+                hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                L.append(f"| {gname} | {len(x)} | {len(x) / nd:.1f} | {'at the dot' if code == 'w0' else '10% under'} | {100 * len(t) / len(x):.0f}% | "
+                         f"{100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.best60.median():+.0f}% / {100 * (t.best60 >= .4).mean():.0f}% | "
+                         f"{100 * t.R.mean():+.2f}% | {100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
+        L.append("")
+    J = pd.DataFrame(rows3)
+    J.to_csv(f"{OUT}/entry_timing_jumps.csv", index=False)
+    if len(J):
+        nd = max(A.day.nunique(), 1)
+        for sn in T7_STRIKES:
+            L += [f"## Hard jump on a 1-minute candle: does it keep going? ({sn}, bought in the jump's direction)", "",
+                  "Jump = 1-minute candle body at least 1.5x or 2.5x the 1-minute ATR. SPY kept going = closed further that way 5 / 15 min later (avg move in ATR).", "",
+                  "| Jump | Filter | Count | Per day | Bid | SPY kept going 5m / 15m | Avg move 5m / 15m (ATR) | Filled | +10% first | Median heat | Plan A avg | 1st half / 2nd half | Before 1:00 |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            filt = [("all", lambda x: x.th > 0), ("dot same side in the last 5 min", lambda x: x.dotnear),
+                    ("dot on the OTHER side in the last 5 min", lambda x: x.dotagainst),
+                    ("calm day (11.5 ATR or less)", lambda x: x.rng <= 11.5), ("before 1:00", lambda x: x.am)]
+            for src in sorted(J.src.unique()):
+                for fname, fn in filt:
+                    for code in ("w0", "dip10"):
+                        x = J[(J.src == src) & (J.strike == sn) & (J.plan == code)]
+                        x = x[fn(x).astype(bool)]
+                        t = x[x.taken]
+                        if len(t) < 10:
+                            continue
+                        hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                        L.append(f"| {src} | {fname} | {len(x)} | {len(x) / nd:.1f} | {'at the jump' if code == 'w0' else '10% under'} | "
+                                 f"{100 * (x.cont5 > 0).mean():.0f}% / {100 * (x.cont15 > 0).mean():.0f}% | {x.cont5.mean():+.2f} / {x.cont15.mean():+.2f} | "
+                                 f"{100 * len(t) / len(x):.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.R.mean():+.2f}% | "
+                                 f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
+            L.append("")
     L += ["How to read it: a plan helps if its Plan A avg beats 'at the dot' in BOTH halves. A filter plan (green candle, fear/greed under",
           "its average, quits driving, limit bids) also helps if the dots it skipped did worse at the dot than the ones it took."]
     with open(f"{OUT}/ENTRY_TIMING.md", "w") as f:
