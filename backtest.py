@@ -430,6 +430,7 @@ T7_PLANS = {
     "first green candle your way (5 min max)": "green",
     "fear/greed under its average (5 min max)": "fgx",
     "price quits driving: no new extreme for 2 min": "quit",
+    "wait for agreement shading your way (5 min max)": "agree",
     "limit bid 5% under the dot price (5 min max)": "dip5",
     "limit bid 10% under the dot price (5 min max)": "dip10",
     "limit bid 15% under the dot price (5 min max)": "dip15",
@@ -442,7 +443,7 @@ T7_FILL_BIDS = ["w0", "dip2", "dip5", "dip8", "dip10", "dip15"]
 T7_BUCKETS = [(0, 60, "9:30-10:30"), (60, 150, "10:30-12:00"), (150, 210, "12:00-1:00"), (210, 270, "1:00-2:00"), (270, 330, "2:00-3:00"), (330, 390, "3:00-4:00")]
 
 
-def t7_entry(plan, i, Lg, sess, ind, rec):
+def t7_entry(plan, i, Lg, sess, ind, rec, PG=None):
     """Returns (minute, price) of the buy, or None when the plan never triggers within 5 minutes."""
     o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
     S_, SA = (ind["F"], ind["fA"]) if Lg else (ind["G"], ind["gA"])
@@ -459,6 +460,8 @@ def t7_entry(plan, i, Lg, sess, ind, rec):
         return px_at(i + 1 + int(plan[1]))
     for k in range(i, min(i + 6, 388)):
         if plan == "green" and ((c[k] > o[k]) if Lg else (c[k] < o[k])) and k > i:
+            return px_at(k + 1)
+        if plan == "agree" and PG is not None and (PG["ag"][k] == (1 if Lg else -1)):
             return px_at(k + 1)
         if plan == "fgx" and S_[k] < SA[k]:
             return px_at(k + 1)
@@ -506,6 +509,76 @@ def t7_result(rec, j0, e, sess, i, Lg):
                 R=(max(exitp - 0.01, 0) / (e + 0.01) - 1))
 
 
+def t7_page_states(o, h, l, c, v, ind):
+    """Same as the chart page: TTM state (2 bars up/down, latched), AGREE shading, trend-line color, squeeze."""
+    n = len(c)
+    m, F, G, fA, gA = ind["m"], ind["F"], ind["G"], ind["fA"], ind["gA"]
+    st, state = np.zeros(n), 0
+    for i in range(n):
+        if i >= 2 and m[i] > m[i - 1] > m[i - 2]:
+            state = 1
+        if i >= 2 and m[i] < m[i - 1] < m[i - 2]:
+            state = -1
+        st[i] = state
+    ag = np.zeros(n)
+    for i in range(1, n):
+        if st[i] == 1 and gA[i] > gA[i - 1] and fA[i] < fA[i - 1]:
+            ag[i] = 1
+        elif st[i] == -1 and gA[i] < gA[i - 1] and fA[i] > fA[i - 1]:
+            ag[i] = -1
+    ef, es = dots_ema(c, 13), dots_ema(c, 34)
+    tp = (h + l + c) / 3
+    vw = np.cumsum(tp * v) / np.maximum(np.cumsum(v), 1e-9)
+    vw = np.where(np.cumsum(v) > 0, vw, tp)
+    col = np.zeros(n)
+    for i in range(n):
+        tr_ = 1 if (ef[i] > es[i] and c[i] > vw[i]) else -1 if (ef[i] < es[i] and c[i] < vw[i]) else 0
+        fl = i >= 2 and all(c[k] < ef[k] and ef[k] < ef[k - 1] for k in (i, i - 1))
+        fs = i >= 2 and all(c[k] > ef[k] and ef[k] > ef[k - 1] for k in (i, i - 1))
+        col[i] = (1 if fl else 2) if tr_ == 1 else (-1 if fs else -2) if tr_ == -1 else 0
+    tr = np.r_[h[0] - l[0], np.maximum.reduce([h[1:] - l[1:], abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])])]
+    kc = dots_rma(tr, 20)
+    sq = np.array([2 * np.std(c[max(0, i - 19):i + 1]) < 1.5 * kc[i] for i in range(n)])
+    return dict(st=st, ag=ag, col=col, sq=sq)
+
+
+def t7_exit(rec, j0, e, sig, half=False, arm=None):
+    """Stop -25%; exit the (rest of the) position at the option close of the first minute the SPY signal fires; 60 min max.
+    half=True: sell half at +10% first. Returns (R after 1c a side, minutes held)."""
+    last, got10, k = e, False, 0
+    armed = arm is None
+    for k, j in enumerate(range(j0, min(j0 + 61, 390))):
+        hh, ll, cc = rec["high"][j], rec["low"][j], rec["close"][j]
+        if not (cc > 0):
+            hh = ll = cc = last
+        last = cc
+        if ll <= e * 0.75 and not got10:
+            px = e * 0.75
+            return max(px - 0.01, 0) / (e + 0.01) - 1, k
+        if half and not got10 and hh >= e * 1.10:
+            got10 = True
+        if not armed and arm(j):
+            armed = True
+            continue
+        if armed and k >= 1 and sig(j):
+            px = cc
+            break
+    else:
+        px = last
+    out = max(px - 0.01, 0) / (e + 0.01) - 1
+    if half and got10:
+        out = 0.5 * ((e * 1.10 - 0.01) / (e + 0.01) - 1) + 0.5 * out
+    return out, k
+
+
+# (arms once this is true, fires when this is true). Each exit waits until its color has turned your way first.
+T7_EXITS = {"agreement flips against you": (lambda P, d, j: d * P["ag"][j] == 1, lambda P, d, j: d * P["ag"][j] == -1),
+            "agreement shading ends": (lambda P, d, j: d * P["ag"][j] == 1, lambda P, d, j: d * P["ag"][j] != 1),
+            "TTM color turns against (2 bars the other way)": (lambda P, d, j: d * P["st"][j] == 1, lambda P, d, j: d * P["st"][j] == -1),
+            "trend line starts fading or turns against": (lambda P, d, j: d * P["col"][j] == 2, lambda P, d, j: d * P["col"][j] <= 1),
+            "trend line turns against": (lambda P, d, j: d * P["col"][j] > 0, lambda P, d, j: d * P["col"][j] < 0)}
+
+
 def dots7_main():
     from alpaca.data.historical import OptionHistoricalDataClient
     os.makedirs(OUT, exist_ok=True)
@@ -533,10 +606,14 @@ def dots7_main():
             sess[col][mm[ok]] = g[col].to_numpy()[ok]
         for col in sess:
             sess[col] = pd.Series(sess[col]).fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
+        vol = np.zeros(390)
+        if "volume" in g:
+            vol[mm[ok]] = np.nan_to_num(g["volume"].to_numpy()[ok])
         o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
         h2, l2 = dots_clean(o, h, l, c)
         sess["high"], sess["low"] = h2, l2
         ind = dots_compute(o, h2, l2, c)
+        PG = t7_page_states(o, h2, l2, c, vol, ind)
         dots = [s for s in dots_signals(o, h2, l2, c, ind) if s["kind"] == "stall" and s["i"] < 380]
         if not dots:
             continue
@@ -627,16 +704,29 @@ def dots7_main():
                 fx[f"ts{kk}"] = float(dd * (ik["m"][j] - ik["m"][j - 1]))
                 fx[f"fgcurl{kk}"] = float((Sk[j] < Sk[j - 1]) and (Ok[j] > Ok[j - 1]))
                 fx[f"dnear{kk}"] = float(any(q["side"] == s["side"] and i - 4 <= (q["i"] + 1) * kk - 1 <= i for q in sk))
+            fx["ag_i"] = float(dd * PG["ag"][i])
+            fx["col_i"] = float(dd * PG["col"][i])
+            fx["sq_i"] = float(PG["sq"][i])
+            fx["sqfired"] = float((not PG["sq"][i]) and PG["sq"][max(0, i - 3):i].any())
+            mi, mp = dd * ind["m"][i], dd * ind["m"][i - 1]
+            fx["ttmcol"] = ("against + curling your way (yellow on calls)" if mi < 0 and mi > mp else "against + still falling (red on calls)" if mi < 0
+                            else "your way + rising (cyan on calls)" if mi > mp else "your way + fading (blue on calls)")
             fx["nsame"] = sum(1 for q in dots if q["side"] == s["side"] and q["i"] < i)
             fx["atrp"] = float(100 * ind["A"][i] / c[i])
             for pname, code in T7_PLANS.items():
-                en = t7_entry(code, i, Lg, sess, ind, rec)
+                en = t7_entry(code, i, Lg, sess, ind, rec, PG)
                 r = dict(day=day, half="2nd half" if day >= mid else "1st half", i=i, am=i < 210, side=s["side"],
                          weak=s.get("weak", 0), pk=pk, obot=obot, rng=rng, ttm_slope=ttm_slope, ttm_val=ttm_val, **fx, strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
                 if en is not None:
                     r.update(t7_result(rec, en[0], en[1], sess, i, Lg))
                     r["e"] = en[1]
                     r["wait"] = en[0] - base[0]
+                    if sn == "1 OTM" and code in ("w0", "dip10"):
+                        for xn, (fa, fn) in T7_EXITS.items():
+                            for hf in (False, True):
+                                rr, km = t7_exit(rec, en[0], en[1], lambda j, fn=fn: fn(PG, dd, j), half=hf, arm=lambda j, fa=fa: fa(PG, dd, j))
+                                r[f"X|{'half +10% then ' if hf else ''}{xn}"] = rr
+                                r[f"M|{'half +10% then ' if hf else ''}{xn}"] = km
                 rows.append(r)
         for kk, s, i1, sn, sym in pick2:
             rec = opt.get(sym)
@@ -822,6 +912,47 @@ def dots7_main():
                                  f"{100 * (x.cont5 > 0).mean():.0f}% / {100 * (x.cont15 > 0).mean():.0f}% | {x.cont5.mean():+.2f} / {x.cont15.mean():+.2f} | "
                                  f"{100 * len(t) / len(x):.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.R.mean():+.2f}% | "
                                  f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
+            L.append("")
+    # ---- page colors at entry + color exits
+    for code, bname in (("at the dot (next minute)", "at the dot"), ("limit bid 10% under the dot price (5 min max)", "10% under")):
+        E1 = A[(A.strike == "1 OTM") & (A.plan == code)]
+        if not len(E1) or "ag_i" not in E1:
+            continue
+        nd = max(A.day.nunique(), 1)
+        L += [f"## Your page's colors at the dot (1 OTM, {bname})", "",
+              "| Reading at the dot | Dots/day | Filled | +10% first | Median heat | Run: median best 60m / +40% | Plan A avg | 1st half / 2nd half | Before 1:00 |", "|---|---|---|---|---|---|---|---|---|"]
+        cuts = [("every dot", E1.ag_i > -9),
+                ("AGREE shading your way", E1.ag_i == 1), ("no agreement", E1.ag_i == 0), ("AGREE shading against you", E1.ag_i == -1),
+                ("trend line strong your way", E1.col_i == 2), ("trend line your way but fading", E1.col_i == 1), ("trend line neutral", E1.col_i == 0),
+                ("trend line fading against", E1.col_i == -1), ("trend line strong against", E1.col_i == -2),
+                ("TTM squeeze on", E1.sq_i == 1), ("TTM squeeze just fired", E1.sqfired == 1)]
+        cuts += [(f"TTM {k}", E1.ttmcol == k) for k in sorted(E1.ttmcol.dropna().unique())]
+        cuts += [("AGREE your way + busy day", (E1.ag_i == 1) & (E1.atrp >= 0.048)), ("AGREE your way + before 1:00", (E1.ag_i == 1) & E1.am.astype(bool)),
+                 ("trend against (strong or fading) + busy day", (E1.col_i < 0) & (E1.atrp >= 0.048))]
+        for nm, msk in cuts:
+            x = E1[msk.fillna(False).to_numpy().astype(bool)]
+            t = x[x.taken]
+            if len(t) < 30:
+                continue
+            hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+            L.append(f"| {nm} | {len(x) / nd:.1f} | {100 * len(t) / len(x):.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | "
+                     f"{100 * t.best60.median():+.0f}% / {100 * (t.best60 >= .4).mean():.0f}% | {100 * t.R.mean():+.2f}% | {100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
+        L.append("")
+        xc = [cc for cc in E1.columns if cc.startswith("X|")]
+        if xc:
+            L += [f"## Exits by your page's colors vs Plan A (1 OTM, {bname}, stop -25%, 60 min max)", "",
+                  "Each color exit waits until that color has turned your way, then sells when it turns. Never turned your way = held to 60 min or the stop.", "",
+                  "| Exit | Every dot: avg / win / avg minutes | 1st half / 2nd half | Busy day + before 1:00: avg / win |", "|---|---|---|---|"]
+            t = E1[E1.taken]
+            sub = t[(t.atrp >= 0.048) & t.am.astype(bool)]
+            hvA = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+            L.append(f"| Plan A (+10% / -25% / 30 min) | {100 * t.R.mean():+.2f}% / {100 * (t.R > 0).mean():.0f}% / - | {100 * hvA[0]:+.2f}% / {100 * hvA[1]:+.2f}% | "
+                     f"{100 * sub.R.mean():+.2f}% / {100 * (sub.R > 0).mean():.0f}% |")
+            for cc in xc:
+                v_ = t[cc].dropna()
+                hv = [t[t.half == hf][cc].mean() for hf in ("1st half", "2nd half")]
+                L.append(f"| {cc[2:]} | {100 * v_.mean():+.2f}% / {100 * (v_ > 0).mean():.0f}% / {t['M|' + cc[2:]].mean():.0f}m | "
+                         f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * sub[cc].mean():+.2f}% / {100 * (sub[cc] > 0).mean():.0f}% |")
             L.append("")
     # ---- everyday filters on all 1m dots (1 OTM, 10% under)
     E = A[(A.strike == "1 OTM") & (A.plan == "limit bid 10% under the dot price (5 min max)")].copy()
