@@ -220,8 +220,10 @@ def fetch_1m(symbol, start, end):
              "Make new PAPER keys in Alpaca and paste them into ALPACA_KEY and ALPACA_SECRET again.")
 
 
+
+
 # ============================================================================================================
-# WHITE DOTS v5 - STRICT ARROWS ON 6 UNTOUCHED MONTHS + EVERY READING (BACKTEST ONLY) (runs by default while this block is in the file). DATA ONLY, NO ORDERS.
+# ENTRY TIMING v7 - BUY AT THE DOT OR WAIT? (BACKTEST ONLY, NO ORDERS). Runs by default while this block is in the file; set DOTS=0 or delete it to go back.
 # Paste this whole block directly ABOVE the line:  def fake_1m(symbol, start, end):   (near the top, right after fetch_1m)
 # To go back to your normal backtests, delete the block (or set DOTS=0 in the workflow env).
 # What it does: SPY 1-minute bars for the last DOTS_MONTHS months -> the exact white-dot logic from the Gamma Field page
@@ -417,1632 +419,183 @@ def dots_fetch_options(oc, contracts, day):
     return out
 
 
-DOTS_OFF = {"ITM2": -3, "ITM1": -2, "ATM": -1, "OTM1": 0, "OTM2": 1, "OTM3": 2, "OTM4": 3, "OTM5": 4, "OTM6": 5}
 
-
-def dots_build_trades(day, sess, ind, sigs, opt):
-    """Every dot of the day with its real option path at each strike, plus SPY trend-line / fear-greed state each minute."""
-    o, c = sess["open"], sess["close"]
-    kills = [s for s in sigs if s["kind"] == "kill"]
-    rows = []
-    for s in sigs:
-        if s["kind"] != "stall":
-            continue
-        i = s["i"]
-        if i + 2 >= 390:
-            continue
-        Lg = s["side"] == "long"
-        px = c[i]
-        K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
-        cp = "C" if Lg else "P"
-        strikes = {}
-        for nm, off in DOTS_OFF.items():
-            K = K1 + off if Lg else K1 - off
-            rec = opt.get(dots_occ(day, cp, K))
-            if rec is None:
-                continue
-            j0 = i + 1
-            e = rec["open"][j0]
-            if not (e > 0):
-                nxt = [j for j in range(j0, min(j0 + 3, 390)) if rec["open"][j] > 0]
-                if not nxt:
-                    continue
-                j0 = nxt[0]
-                e = rec["open"][j0]
-            H, Lo, C = [], [], []
-            last = e
-            for j in range(j0, 390):
-                if rec["close"][j] > 0:
-                    last = rec["close"][j]
-                    H.append(rec["high"][j] / e - 1)
-                    Lo.append(rec["low"][j] / e - 1)
-                    C.append(rec["close"][j] / e - 1)
-                else:
-                    H.append(last / e - 1)
-                    Lo.append(last / e - 1)
-                    C.append(last / e - 1)
-            strikes[nm] = dict(K=K, e=float(e), j0=j0, h=np.array(H), l=np.array(Lo), c=np.array(C))
-        if not strikes:
-            continue
-        a_side = ind["F"] if Lg else ind["G"]
-        tl = (c < ind["ef"]) if Lg else (c > ind["ef"])
-        day_chg = c[i] / o[0] - 1
-        rows.append(dict(day=day, i=i, tod=i, side=s["side"], weak=s.get("weak", 0), strikes=strikes,
-                         a=a_side, tl=tl, kills=[k["i"] for k in kills if k["side"] == s["side"] and k["i"] > i],
-                         with_day=(day_chg >= 0) if Lg else (day_chg <= 0),
-                         stretched=(c[i] <= ind["e9"][i]) if Lg else (c[i] >= ind["e9"][i])))
-    return rows
-
-
-def dots_band(d, lo, hi, tgt):
-    best, bd = None, 1e9
-    for k, s in d["strikes"].items():
-        if lo <= s["e"] <= hi and abs(s["e"] - tgt) < bd:
-            best, bd = k, abs(s["e"] - tgt)
-    return best
-
-
-DOTS_PICK = {
-    "clock: $0.40-0.80 <11, ~$1 11-1, 2 ITM >1": lambda d: dots_band(d, .4, .8, .8) if d["tod"] < 90 else (dots_band(d, .7, 1.3, 1.0) if d["tod"] < 210 else "ITM2"),
-    "1 OTM (current)": lambda d: "OTM1",
-    "2 ITM": lambda d: "ITM2",
-    "$0.40-0.80 near $0.80": lambda d: dots_band(d, .4, .8, .8),
-    "2 OTM <1, 1 ITM >1 (old way)": lambda d: "OTM2" if d["tod"] < 210 else "ITM1",
+# ---------------------------------- ENTRY TIMING STUDY (v7) ----------------------------------
+# Same white dots. Same contract the dot would pick (1 OTM, plus 2 ITM). Only the moment you buy changes.
+T7_PLANS = {
+    "at the dot (next minute)": "w0",
+    "wait 1 min": "w1",
+    "wait 2 min": "w2",
+    "wait 3 min": "w3",
+    "first green candle your way (5 min max)": "green",
+    "fear/greed under its average (5 min max)": "fgx",
+    "price quits driving: no new extreme for 2 min": "quit",
+    "limit bid 5% under the dot price (5 min max)": "dip5",
+    "limit bid 10% under the dot price (5 min max)": "dip10",
 }
-DOTS_EXIT = {
-    "half +10%, runner trend line": dict(legs=[(.5, .1)], rule="tl"),
-    "quarters +10/+20/+40%, runner F/G": dict(legs=[(.25, .1), (.25, .2), (.25, .4)], rule="fg"),
-    "3/4 +20%, runner trend line, lock +20%": dict(legs=[(.75, .2)], rule="tl", lock=.2),
-    "half +10%, runner F/G": dict(legs=[(.5, .1)], rule="fg"),
-    "all out +10%": dict(legs=[(1.0, .1)]),
-}
-DOTS_SIZE = {
-    "25%": dict(size=.25), "50%": dict(size=.5), "full port": dict(size=1.0),
-    "by the read (50% with-day+stretched, else 25%)": dict(read=True),
-    "25% + add 25% at -9% (<1:00, no x)": dict(size=.25, add=.25),
-    "50% + add 50% at -9% (<1:00, no x)": dict(size=.5, add=.5),
-}
-DOTS_WIN = {"all day (to 3:00)": 330, "before 1:00": 210}
+T7_STRIKES = {"1 OTM": 0, "2 ITM": -3}
 
 
-def dots_slip(e):
-    return .01 if e < 1 else (.02 if e < 3 else .03)
+def t7_entry(plan, i, Lg, sess, ind, rec):
+    """Returns (minute, price) of the buy, or None when the plan never triggers within 5 minutes."""
+    o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
+    S_, SA = (ind["F"], ind["fA"]) if Lg else (ind["G"], ind["gA"])
 
-
-def dots_sim(T, pick, exit_, sizing, win, acct, keep=False, stop=0.5, cut="none"):
-    P, E, Z, W = DOTS_PICK[pick], DOTS_EXIT[exit_], DOTS_SIZE[sizing], DOTS_WIN[win]
-    eq = DOTS_START
-    peak, mdd = eq, 0.0
-    trades, curve = [], []
-    pdt = []
-    byday = {}
-    for x in T:
-        byday.setdefault(x["day"], []).append(x)
-    days = sorted(byday)
-    di = {dd: n for n, dd in enumerate(days)}
-    lite = []
-    for day in days:
-        settled = eq
-        spent = 0.0
-        free = -1
-        for d in byday[day]:
-            if d["tod"] < free or d["tod"] >= W:
-                continue
-            k0 = P(d)
-            s = d["strikes"].get(k0) if k0 else None
-            if s is None:
-                continue
-            if acct == "margin" and eq < 25000:
-                pdt = [x for x in pdt if x > di[day] - 5]
-                if len(pdt) >= 3:
-                    continue
-            size = (.5 if (d["with_day"] and d["stretched"]) else .25) if Z.get("read") else Z["size"]
-            slip = dots_slip(s["e"])
-            px = s["e"] + slip
-            budget = min(eq * size, DOTS_CAP)
-            if acct == "cash":
-                budget = min(budget, settled - spent)
-            n = int(budget // (px * 100))
-            if n < 1:
-                continue
-            cnt, cost, raw = n, n * px, n * s["e"]
-            left, cash, trimmed, added, how = float(n), 0.0, False, False, None
-            legs = [[f, t, False] for f, t in E["legs"]]
-            rule = E.get("rule")
-            lo_a, armed = 1e9, False
-            a0 = d["a"][d["i"]]
-            hi_a = a0
-            lim = min(len(s["h"]) - 1, 360 - s["j0"], 150)
-            k = 0
-            for k in range(lim + 1):
-                j = s["j0"] + k
-                H, L_, C = s["e"] * (1 + s["h"][k]), s["e"] * (1 + s["l"][k]), s["e"] * (1 + s["c"][k])
-                if Z.get("add") and not added and not trimmed and d["tod"] < 210 and L_ <= s["e"] * .91 \
-                        and not any(x <= j for x in d["kills"]):
-                    added = True
-                    ap = s["e"] * .91 + slip
-                    room = min(eq * Z["add"], DOTS_CAP, (eq - cost * 100) if acct != "cash" else (settled - spent - cost * 100))
-                    n2 = int(max(0, room) // (ap * 100))
-                    if n2 >= 1:
-                        left += n2
-                        cnt += n2
-                        cost += n2 * ap
-                        raw += n2 * s["e"] * .91
-                avg = raw / cnt
-                if L_ <= avg * (1 - stop):
-                    cash += left * (avg * (1 - stop) - slip)
-                    left, how = 0, "stop"
-                    break
-                if cut != "none" and j < 390 and k >= 1:
-                    av0 = d["a"][j]
-                    xhit = any(x <= j for x in d["kills"])
-                    spike = av0 > hi_a + 5
-                    hi_a = max(hi_a, av0)
-                    cut_now = ((cut == "x" and xhit) or (cut == "x or F/G re-spike" and (xhit or spike))
-                               or (cut == "F/G re-spike" and spike and not trimmed)
-                               or (cut == "F/G not letting off by min 5" and k == 4 and not trimmed and av0 >= a0)
-                               or (cut == "time 10 min if not trimmed" and k >= 9 and not trimmed)
-                               or (cut == "time 20 min if not trimmed" and k >= 19 and not trimmed))
-                    if cut_now:
-                        cash += left * (C - slip)
-                        left, how = 0, "cut"
-                        break
-                for g in legs:
-                    if not g[2] and H >= avg * (1 + g[1]):
-                        g[2] = trimmed = True
-                        q = left if g[0] >= 1 else max(1, round(cnt * g[0]))
-                        if rule and g is legs[-1] and left - q < 1 and cnt > 1:
-                            q = left - 1
-                        q = min(q, left)
-                        cash += q * (avg * (1 + g[1]) - slip)
-                        left -= q
-                if left <= 1e-9:
-                    how = "targets"
-                    break
-                if trimmed and E.get("lock") is not None and k > 0 and L_ <= avg * (1 + E["lock"]):
-                    cash += left * (avg * (1 + E["lock"]) - slip)
-                    left, how = 0, "lock"
-                    break
-                if j < 390:
-                    av = d["a"][j]
-                    lo_a = min(lo_a, av)
-                    if av <= 20:
-                        armed = True
-                    fire = (rule == "tl" and bool(d["tl"][j])) or (rule == "fg" and armed and av - lo_a >= 3)
-                    if trimmed and rule and k >= 1 and fire:
-                        cash += left * (C - slip)
-                        left, how = 0, "runner"
-                        break
-                if not rule and k >= 60:
-                    cash += left * (C - slip)
-                    left, how = 0, "time"
-                    break
-            if left > 1e-9:
-                cash += left * (s["e"] * (1 + s["c"][k]) - slip)
-                how = how or "time"
-            pnl = 100 * (cash - cost)
-            before = eq
-            eq += pnl
-            spent += cost * 100
-            if acct == "margin" and before < 25000:
-                pdt.append(di[day])
-            peak = max(peak, eq)
-            mdd = max(mdd, (peak - eq) / peak if peak > 0 else 0)
-            free = s["j0"] + k
-            lite.append((str(day)[:7], pnl, 100 * (cash - cost) / cost, 100 * pnl / before))
-            if keep:
-                trades.append(dict(day=str(day), time=f"{(570 + d['i']) // 60}:{(570 + d['i']) % 60:02d}", side=d["side"],
-                                   strike=k0, K=s["K"], entry=round(s["e"], 2), contracts=cnt, added=added, exit=how,
-                                   minutes=k + 1, ret_pct=round(100 * (cash - cost) / cost, 1), pnl=round(pnl, 2),
-                                   acct_pct=round(100 * pnl / before, 2), equity=round(eq, 2)))
-            if eq <= 50:
-                break
-        curve.append((str(day), round(eq, 2)))
-        if eq <= 50:
-            break
-    return dict(end=eq, mdd=mdd, curve=curve, trades=trades if keep else None, lite=lite)
-
-
-def dots_diag(T):
-    """How good are the dots themselves? 1 OTM option, entry next minute open, no exits: what happened first."""
-    rows = []
-    for d in T:
-        s = d["strikes"].get("OTM1")
-        if s is None:
-            continue
-        hit10 = lose25 = lose50 = None
-        clean = 0.0
-        for k in range(min(len(s["h"]), 150)):
-            if hit10 is None and s["h"][k] >= .10:
-                hit10 = k
-            if lose25 is None and s["l"][k] <= -.25:
-                lose25 = k
-            if lose50 is None and s["l"][k] <= -.50:
-                lose50 = k
-            if lose25 is None:
-                clean = max(clean, s["h"][k])
-        win = hit10 is not None and (lose25 is None or hit10 < lose25)
-        tb = "9:30-11" if d["tod"] < 90 else ("11-1" if d["tod"] < 210 else ("1-3" if d["tod"] < 330 else "after 3"))
-        rows.append(dict(month=str(d["day"])[:7], side="calls" if d["side"] == "long" else "puts", time=tb,
-                         dot="gray weak" if d["weak"] else "white", day="with the day" if d["with_day"] else "against the day",
-                         ema9="still stretched" if d["stretched"] else "past 9 EMA",
-                         x="x within 30 min" if any(x <= d["i"] + 30 for x in d["kills"]) else "no x in 30 min",
-                         win=win, lose50=lose50 is not None and (hit10 is None or lose50 < hit10), clean=100 * clean,
-                         flat5=(s["c"][4] if len(s["c"]) > 4 else 0) < 0))
-    if not rows:
-        return []
-    df = pd.DataFrame(rows)
-    out = ["", "## How the dots themselves did (1 OTM, before any exit rule)",
-           "+10% first = hit +10% before -25%. -50% first = fell to -50% before ever touching +10%. Clean run = best price before -25%."]
-    for fld in ("month", "side", "time", "dot", "day", "ema9", "x"):
-        out += ["", f"| {fld} | dots | +10% first | -50% first | median clean run | red at minute 5 |", "|---|---|---|---|---|---|"]
-        for k, g in df.groupby(fld):
-            out.append(f"| {k} | {len(g)} | {100 * g.win.mean():.0f}% | {100 * g.lose50.mean():.0f}% | +{g.clean.median():.0f}% | {100 * g.flat5.mean():.0f}% |")
-    w = df[df.win]
-    l_ = df[~df.win]
-    out += ["", f"Of dots red at minute 5: {100 * df[df.flat5].win.mean():.0f}% still hit +10% first. Of dots green at minute 5: {100 * df[~df.flat5].win.mean():.0f}%.",
-            f"All dots: {len(df)}, +10% first {100 * df.win.mean():.0f}%, -50% first {100 * df.lose50.mean():.0f}%, median clean run +{df.clean.median():.0f}%."]
-    return out
-
-
-def dots_main():
-    from alpaca.data.historical import OptionHistoricalDataClient
-    os.makedirs(OUT, exist_ok=True)
-    end = datetime.now(timezone.utc) - timedelta(minutes=20)
-    start = end - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
-    print(f"WHITE DOTS 6-MONTH: SPY 1m {start:%Y-%m-%d} -> {end:%Y-%m-%d}", flush=True)
-    df1, feed = fetch_1m("SPY", start, end)
-    hm = df1.index.hour * 100 + df1.index.minute
-    rth = df1[(hm >= 930) & (hm < 1600)]
-    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
-    oc = OptionHistoricalDataClient(key, sec)
-    T, n_days, n_dots, missing = [], 0, 0, 0
-    for day, g in rth.groupby(rth.index.date):
-        if len(g) < 300:
-            continue
-        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
-        mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
-        ok = (mm >= 0) & (mm < 390)
-        for col in sess:
-            sess[col][mm[ok]] = g[col].to_numpy()[ok]
-        for col in sess:  # fill the odd missing minute from the last close
-            s = pd.Series(sess[col])
-            sess[col] = s.fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
-        o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
-        h2, l2 = dots_clean(o, h, l, c)
-        ind = dots_compute(o, h2, l2, c)
-        sigs = dots_signals(o, h2, l2, c, ind)
-        need = set()
-        for s in sigs:
-            if s["kind"] != "stall":
-                continue
-            Lg = s["side"] == "long"
-            px = c[s["i"]]
-            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
-            for off in DOTS_OFF.values():
-                need.add(dots_occ(day, "C" if Lg else "P", K1 + off if Lg else K1 - off))
-        opt = dots_fetch_options(oc, need, day) if need else {}
-        rows = dots_build_trades(day, sess, ind, sigs, opt)
-        n_days += 1
-        n_dots += sum(1 for s in sigs if s["kind"] == "stall")
-        missing += sum(1 for s in sigs if s["kind"] == "stall") - len(rows)
-        T.extend(rows)
-        print(f"  {day}: {sum(1 for s in sigs if s['kind'] == 'stall')} dots, {len(rows)} with option bars", flush=True)
-    T.sort(key=lambda d: (d["day"], d["tod"]))
-    print(f"{n_days} days, {n_dots} dots, {len(T)} tradable", flush=True)
-
-    runs = []
-    G_PICK = ["1 OTM (current)", "clock: $0.40-0.80 <11, ~$1 11-1, 2 ITM >1", "2 ITM", "$0.40-0.80 near $0.80"]
-    G_EXIT = ["half +10%, runner trend line", "all out +10%", "quarters +10/+20/+40%, runner F/G"]
-    G_SIZE = ["25%", "50%"]
-    G_STOP = [.15, .25, .35, .5]
-    G_CUT = ["none", "x", "F/G re-spike", "x or F/G re-spike", "F/G not letting off by min 5", "time 10 min if not trimmed", "time 20 min if not trimmed"]
-    for pick in G_PICK:
-        for ex in G_EXIT:
-            for sz in G_SIZE:
-                for win in DOTS_WIN:
-                    for stp in G_STOP:
-                        for cut in G_CUT:
-                            acct = "cash"
-                            r = dots_sim(T, pick, ex, sz, win, acct, stop=stp, cut=cut)
-                            tr = r["lite"]
-                            months = {}
-                            for t in tr:
-                                months.setdefault(t[0], []).append(t[1])
-                            runs.append(dict(strike=pick, exit=ex, size=sz, window=win, stop=f"-{int(stp * 100)}%", cut=cut, account=acct,
-                                             end=round(r["end"], 2), max_dd_pct=round(100 * r["mdd"], 1), trades=len(tr),
-                                             win_pct=round(100 * sum(t[1] > 0 for t in tr) / len(tr), 1) if tr else 0,
-                                             avg_ret_pct=round(float(np.mean([t[2] for t in tr])), 2) if tr else 0,
-                                             worst_trade_acct_pct=round(min([t[3] for t in tr], default=0), 1),
-                                             green_months=sum(sum(v) > 0 for v in months.values()), months=len(months),
-                                             _r=r, _stop=stp))
-    runs.sort(key=lambda x: -x["end"])
-    cols = [k for k in runs[0] if not k.startswith("_")]
-    pd.DataFrame([{k: r[k] for k in cols} for r in runs]).to_csv(f"{OUT}/dots_6mo_runs.csv", index=False)
-    best_cash = [r for r in runs if r["trades"] >= 100]
-    top = best_cash[0] if best_cash else runs[0]
-    top["_r"] = dots_sim(T, top["strike"], top["exit"], top["size"], top["window"], "cash", keep=True, stop=top["_stop"], cut=top["cut"])
-    pd.DataFrame(top["_r"]["trades"]).to_csv(f"{OUT}/dots_6mo_trades.csv", index=False)
-    base = next(r for r in runs if r["strike"] == "1 OTM (current)" and r["exit"] == "half +10%, runner trend line"
-                and r["size"] == "50%" and r["window"] == "before 1:00" and r["stop"] == "-50%" and r["cut"] == "none")
-    curves = {}
-    for tag, r in (("best", top), ("current", base)):
-        for dd, v in r["_r"]["curve"]:
-            curves.setdefault(dd, {})[tag] = v
-    pd.DataFrame([dict(day=k, **v) for k, v in sorted(curves.items())]).to_csv(f"{OUT}/dots_6mo_curve.csv", index=False)
-
-    def line(r):
-        return (f"| {r['strike']} | {r['exit']} | {r['size']} | {r['window']} | {r['stop']} | {r['cut']} | ${r['end']:,.0f} | "
-                f"{r['max_dd_pct']}% | {r['trades']} | {r['win_pct']}% | {r['avg_ret_pct']}% | {r['worst_trade_acct_pct']}% | "
-                f"{r['green_months']}/{r['months']} |")
-    hdr = ("| Strike | Exit | Size | Window | Stop | Cut | $2,000 became | Max DD | Trades | Win | Avg/trade | Worst trade | Green months |\n"
-           "|---|---|---|---|---|---|---|---|---|---|---|---|---|")
-    L = [f"# White dots v2 - {n_days} trading days on real option prices, with loss control", "",
-         f"SPY feed: {feed}. {n_dots} dots ({len(T)} had option bars). Start ${DOTS_START:,.0f}, cash account (settled money only), "
-         f"whole contracts, spread 1c/2c/3c a side, max ${DOTS_CAP:,.0f} per trade, one trade at a time. DATA ONLY - no orders.",
-         f"{sum(r['end'] > DOTS_START for r in runs)} of {len(runs)} setups made money.", "",
-         "## Your current setup (1 OTM, half +10%, trend-line runner, 50%, before 1:00, -50% stop, no cut)", hdr, line(base), "",
-         "## Top 30 (100+ trades)", hdr] + [line(r) for r in best_cash[:30]] + ["", "## Each choice on its own (median ending across every other setting)"]
-    for fld in ("strike", "exit", "size", "window", "stop", "cut"):
-        L += ["", f"| {fld} | median ending | share profitable | median max DD |", "|---|---|---|---|"]
-        vals = {}
-        for r in runs:
-            vals.setdefault(r[fld], []).append(r)
-        for k, v in sorted(vals.items(), key=lambda kv: -float(np.median([x["end"] for x in kv[1]]))):
-            L.append(f"| {k} | ${np.median([x['end'] for x in v]):,.0f} | {100 * np.mean([x['end'] > DOTS_START for x in v]):.0f}% | "
-                     f"{np.median([x['max_dd_pct'] for x in v]):.1f}% |")
-    mon = {}
-    for t in top["_r"]["trades"]:
-        mon.setdefault(t["day"][:7], []).append(t)
-    L += ["", "## Best setup (100+ trades), month by month", "| Month | Trades | Win | P/L | Ending |", "|---|---|---|---|---|"]
-    for mth, v in sorted(mon.items()):
-        L.append(f"| {mth} | {len(v)} | {100 * np.mean([t['pnl'] > 0 for t in v]):.0f}% | ${sum(t['pnl'] for t in v):,.0f} | ${v[-1]['equity']:,.0f} |")
-    L += dots_diag(T)
-    with open(f"{OUT}/DOTS_6MO.md", "w") as f:
-        f.write("\n".join(L) + "\n")
-    print("\n".join(L[:40]), flush=True)
-
-
-
-
-# ------------------------------------------------------------------------------------------------------------
-# v3 EDGE MINER. Every reading at every dot -> real option outcome -> search singles, pairs, triples on the
-# first 2/3 of the days (TRAIN), keep only what also works on the last 1/3 it never saw (TEST), compare with
-# random entries and with a shuffled-label "luck" run, then trade the survivors from $2,000.
-# ------------------------------------------------------------------------------------------------------------
-DOTS3_SEED = 7
-
-
-def dots3_extra(o, h, l, c, v):
-    """Squeeze, EMA 34, VWAP, trend colors - the rest of the page's math."""
-    n = len(c)
-    tr = np.empty(n)
-    tr[0] = h[0] - l[0]
-    for i in range(1, n):
-        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
-    kc = dots_rma(tr, 20)
-    sq = np.zeros(n)
-    for i in range(n):
-        w = c[max(0, i - 19):i + 1]
-        on = 2 * w.std() < 1.5 * kc[i]
-        sq[i] = 2 if on else 0
-    for i in range(n):
-        if sq[i] == 0 and any(sq[max(0, i - 3):i] == 2):
-            sq[i] = 1
-    es = dots_ema(c, 34)
-    tp = (h + l + c) / 3
-    cv = np.cumsum(v)
-    vw = np.where(cv > 0, np.cumsum(tp * v) / np.where(cv > 0, cv, 1), tp)
-    return dict(sq=sq, es=es, vw=vw)
-
-
-def dots3_features(i, side, sig, sess, ind, ex, ctx, sigs):
-    o, h, l, c, v = sess["open"], sess["high"], sess["low"], sess["close"], sess["volume"]
-    L_ = side == "long"
-    d = 1 if L_ else -1
-    st, sa, ot, oa = (ind["F"], ind["fA"], ind["G"], ind["gA"]) if L_ else (ind["G"], ind["gA"], ind["F"], ind["fA"])
-    a = max(ind["A"][i], 1e-6)
-    m, ef, e9, es, vw = ind["m"], ind["ef"], ind["e9"], ex["es"], ex["vw"]
-    hi_d, lo_d = h[:i + 1].max(), l[:i + 1].min()
-    rng = max(hi_d - lo_d, 1e-6)
-    lb = lambda k: max(0, i - k)  # noqa: E731
-    f = {}
-    # fear / greed shape (st = the stretched side you fade, ot = the other side)
-    f["fg_stretch"] = st[i]
-    f["fg_stretch_peak5"] = st[lb(5):i + 1].max()
-    f["fg_stretch_peak20"] = st[lb(20):i + 1].max()
-    f["fg_letting_off"] = f["fg_stretch_peak5"] - st[i]
-    f["fg_stretch_slope3"] = st[i] - st[lb(3)]
-    f["fg_other"] = ot[i]
-    f["fg_other_slope3"] = ot[i] - ot[lb(3)]
-    f["fg_both_turning"] = float(st[i] < st[i - 1] and ot[i] > ot[i - 1])
-    f["fg_stretch_under_avg"] = float(st[i] < sa[i])
-    f["fg_other_over_avg"] = float(ot[i] > oa[i])
-    f["fg_gap"] = st[i] - ot[i]
-    f["fg_bars_90plus_20"] = float((st[lb(20):i + 1] >= 90).sum())
-    mx = [k for k in range(lb(60), i + 1) if st[k] >= 95]
-    f["fg_mins_since_95"] = float(i - mx[-1]) if mx else 99.0
-    # TTM
-    f["ttm_mom"] = d * m[i]
-    f["ttm_slope1"] = d * (m[i] - m[i - 1])
-    f["ttm_slope3"] = d * (m[i] - m[lb(3)])
-    f["ttm_turned2"] = float(d * (m[i] - m[i - 1]) > 0 and d * (m[i - 1] - m[lb(2)]) > 0)
-    f["ttm_squeeze"] = ex["sq"][i]
-    # trend line / EMAs / VWAP
-    f["tl_dist_atr"] = d * (c[i] - ef[i]) / a
-    f["tl_slope_atr"] = d * (ef[i] - ef[lb(3)]) / a
-    f["tl_13_vs_34_atr"] = d * (ef[i] - es[i]) / a
-    trend = 1 if (ef[i] > es[i] and c[i] > vw[i]) else (-1 if (ef[i] < es[i] and c[i] < vw[i]) else 0)
-    f["trend_color"] = d * trend
-    f["ema9_dist_atr"] = d * (c[i] - e9[i]) / a
-    f["vwap_dist_atr"] = d * (c[i] - vw[i]) / a
-    # price action
-    f["drive_atr"] = sig.get("dr0", 0) / a
-    f["bars_since_extreme"] = float(i - sig.get("xi", i))
-    f["dist_extreme_atr"] = d * (c[i] - sig.get("x", c[i])) / a
-    xi = sig.get("xi", i)
-    f["stall_body_atr"] = float(np.mean(np.abs(c[xi + 1:i + 1] - o[xi + 1:i + 1]))) / a if i > xi else 0.0
-    wick = [(min(o[k], c[k]) - l[k]) if L_ else (h[k] - max(o[k], c[k])) for k in range(lb(3), i + 1)]
-    f["rejection_wick_atr"] = max(wick) / a
-    f["atr_pct"] = 100 * a / c[i]
-    f["day_range_atr"] = rng / a
-    f["day_chg_pct"] = d * 100 * (c[i] / o[0] - 1)
-    f["pos_in_day_range"] = (c[i] - lo_d) / rng if L_ else (hi_d - c[i]) / rng
-    f["gap_pct"] = d * 100 * (o[0] / ctx["prev_close"] - 1) if ctx.get("prev_close") else 0.0
-    lvl = ctx["prev_low"] if L_ else ctx["prev_high"]
-    f["dist_prev_day_level_atr"] = abs(c[i] - lvl) / a if lvl else 9.0
-    onl = ctx["on_low"] if L_ else ctx["on_high"]
-    f["dist_overnight_level_atr"] = abs(c[i] - onl) / a if onl else 9.0
-    f["dist_round5_dollars"] = abs(c[i] - 5 * round(c[i] / 5))
-    f["dist_day_extreme_atr"] = (c[i] - lo_d) / a if L_ else (hi_d - c[i]) / a
-    f["dots_today_same_side"] = float(sum(1 for s in sigs if s["kind"] == "stall" and s["side"] == side and s["i"] < i))
-    opp = [s["i"] for s in sigs if s["kind"] == "stall" and s["side"] != side and s["i"] < i]
-    f["mins_since_opposite_dot"] = float(i - opp[-1]) if opp else 99.0
-    va = v[lb(35):lb(5)].mean() if i > 6 else v[:i + 1].mean()
-    f["rel_volume5"] = v[lb(5):i + 1].mean() / va if va > 0 else 1.0
-    f["stall_vs_drive_volume"] = (v[xi + 1:i + 1].mean() / max(v[max(0, xi - 5):xi + 1].mean(), 1)) if i > xi else 1.0
-    f["weak_gray"] = float(sig.get("weak", 0))
-    # VIX (VIXY 1m): positive = VIX moving the way that helps the trade
-    vx = ctx.get("vixy")
-    if vx is not None and np.isfinite(vx[i]) and np.isfinite(vx[lb(15)]) and vx[lb(15)] > 0:
-        f["vix_15m_helping_pct"] = -d * 100 * (vx[i] / vx[lb(15)] - 1)
-        f["vix_day_helping_pct"] = -d * 100 * (vx[i] / vx[0] - 1) if vx[0] > 0 else 0.0
-    else:
-        f["vix_15m_helping_pct"] = np.nan
-        f["vix_day_helping_pct"] = np.nan
-    # time
-    f["minute_of_day"] = float(i)
-    f["weekday"] = float(ctx["weekday"])
-    # GEX (only the days your gex_log.csv covers)
-    g = ctx.get("gex")
-    if g is not None and i in g:
-        row = g[i]
-        f["gex_net_positive"] = float(row["net_gex"] > 0)
-        f["gex_dist_flip_atr"] = d * (c[i] - row["flip"]) / a if np.isfinite(row["flip"]) else np.nan
-        wall = row["put_wall"] if L_ else row["call_wall"]
-        f["gex_dist_wall_atr"] = abs(c[i] - wall) / a if np.isfinite(wall) else np.nan
-    else:
-        f["gex_net_positive"] = np.nan
-        f["gex_dist_flip_atr"] = np.nan
-        f["gex_dist_wall_atr"] = np.nan
-    return f
-
-
-def dots3_outcome(s, slip_fn=None):
-    """+10% before -25% (60 min); R = scalp result (+10% target, -25% stop, out at 30 min) after spread; clean run."""
-    if s is None:
-        return np.nan, np.nan, np.nan
-    e = s["e"]
-    sl = dots_slip(e)
-    cost = 2 * sl / e
-    win, r, clean = 0.0, None, 0.0
-    hit25 = False
-    for k in range(min(len(s["h"]), 60)):
-        if not hit25:
-            clean = max(clean, s["h"][k])
-        if s["l"][k] <= -.25:
-            hit25 = True
-            if r is None:
-                r = -.25
-        elif s["h"][k] >= .10 and r is None:
-            r = .10
-            if not hit25:
-                win = 1.0
-        if r is None and k == 29:
-            r = s["c"][k]
-    if r is None:
-        r = s["c"][min(len(s["c"]) - 1, 29)]
-    return win, 100 * (r - cost), 100 * clean
-
-
-def dots3_load_gex(day, atr_unused=None):
-    p = "gex_log.csv"
-    if not os.path.exists(p):
+    def px_at(j):
+        for jj in range(j, min(j + 3, 390)):
+            if rec["open"][jj] > 0:
+                return jj, float(rec["open"][jj])
         return None
-    try:
-        if not hasattr(dots3_load_gex, "df"):
-            g = pd.read_csv(p, usecols=["t", "sym", "net_gex", "flip", "call_wall", "put_wall"], low_memory=False)
-            g = g[g["sym"] == "SPY"].copy()
-            g["ts"] = pd.to_datetime(g["t"], utc=True).dt.tz_convert(NY)
-            for col in ("net_gex", "flip", "call_wall", "put_wall"):
-                g[col] = pd.to_numeric(g[col], errors="coerce")
-            dots3_load_gex.df = g
-        g = dots3_load_gex.df
-        g = g[g["ts"].dt.date == day]
-        if not len(g):
-            return None
-        mins = (g["ts"].dt.hour * 60 + g["ts"].dt.minute - 570).to_numpy()
-        out = {}
-        rows = g.to_dict("records")
-        j = 0
-        for i in range(390):
-            while j + 1 < len(rows) and mins[j + 1] <= i:
-                j += 1
-            if mins[j] <= i:
-                out[i] = rows[j]
-        return out
-    except Exception as e:  # noqa: BLE001
-        print("  gex_log read failed:", str(e)[:120])
+    base = px_at(i + 1)
+    if base is None:
         return None
+    if plan in ("w0", "w1", "w2", "w3"):
+        return px_at(i + 1 + int(plan[1]))
+    for k in range(i, min(i + 6, 388)):
+        if plan == "green" and ((c[k] > o[k]) if Lg else (c[k] < o[k])) and k > i:
+            return px_at(k + 1)
+        if plan == "fgx" and S_[k] < SA[k]:
+            return px_at(k + 1)
+        if plan == "quit" and k >= i + 2:
+            ok = all((l[m] >= l[i]) if Lg else (h[m] <= h[i]) for m in range(i + 1, k + 1))
+            return px_at(k + 1) if ok else None
+    if plan in ("dip5", "dip10"):
+        tgt = base[1] * (0.95 if plan == "dip5" else 0.90)
+        for j in range(base[0], min(base[0] + 5, 390)):
+            if rec["low"][j] > 0 and rec["low"][j] <= tgt - 0.01:  # must trade a cent through your bid to count as filled
+                return j, tgt
+    return None
 
 
-def dots3_mine(F, train, test, min1=120, min2=80, min3=50):
-    """F: DataFrame with features + y_win, y_r. Returns report lines and the surviving rules."""
-    feats = [c for c in F.columns if not c.startswith("y_") and c not in ("day", "i", "side", "is_train")]
-    tr, te = F[train], F[test]
-    small = max(10, len(tr) // 10)
-    min1, min2, min3 = min(min1, small), min(min2, small), min(min3, small)
-    conds = []
-    for fe in feats:
-        x = tr[fe].dropna()
-        if x.nunique() < 2 or len(x) < min1:
-            continue
-        if x.nunique() <= 3:
-            for val in sorted(x.unique()):
-                conds.append((f"{fe} = {val:g}", fe, "eq", float(val)))
-            continue
-        for q in (.2, .4, .6, .8):
-            cut = float(x.quantile(q))
-            conds.append((f"{fe} <= {cut:.3g}", fe, "le", cut))
-            conds.append((f"{fe} >= {cut:.3g}", fe, "ge", cut))
-
-    def mask(df, cond):
-        _, fe, op, val = cond
-        x = df[fe].to_numpy()
-        with np.errstate(invalid="ignore"):
-            return (x == val) if op == "eq" else ((x <= val) if op == "le" else (x >= val))
-
-    if not conds:
-        return [], conds, mask
-    Mtr = np.array([mask(tr, cd) for cd in conds]).astype(bool)
-    Mte = np.array([mask(te, cd) for cd in conds]).astype(bool)
-    ytr, yte = tr["y_r"].to_numpy(), te["y_r"].to_numpy()
-    wtr, wte = tr["y_win"].to_numpy(), te["y_win"].to_numpy()
-
-    def stat(M, y, w):
-        n = M.sum(axis=-1)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            r = (M * y).sum(axis=-1) / n
-            wr = (M * w).sum(axis=-1) / n
-        return n, r, wr
-
-    res = []
-    n1, r1, w1 = stat(Mtr, ytr, wtr)
-    n1t, r1t, w1t = stat(Mte, yte, wte)
-    for k, cd in enumerate(conds):
-        if n1[k] >= min1:
-            res.append((cd[0], 1, n1[k], r1[k], w1[k], n1t[k], r1t[k], w1t[k], (k,)))
-    # pairs
-    K = len(conds)
-    for a_ in range(K):
-        P = Mtr[a_] & Mtr[a_ + 1:]
-        Pt = Mte[a_] & Mte[a_ + 1:]
-        n, r, w = stat(P, ytr, wtr)
-        nt, rt, wt = stat(Pt, yte, wte)
-        for b_ in np.nonzero(n >= min2)[0]:
-            bb = a_ + 1 + b_
-            if conds[a_][1] == conds[bb][1]:
-                continue
-            res.append((conds[a_][0] + " AND " + conds[bb][0], 2, n[b_], r[b_], w[b_], nt[b_], rt[b_], wt[b_], (a_, bb)))
-    # triples from the 70 strongest single/pair building blocks
-    base = sorted([x for x in res if x[1] == 1], key=lambda x: -x[3])[:70]
-    idx = sorted(set(x[8][0] for x in base))
-    for p_ in range(len(idx)):
-        for q_ in range(p_ + 1, len(idx)):
-            A2 = Mtr[idx[p_]] & Mtr[idx[q_]]
-            A2t = Mte[idx[p_]] & Mte[idx[q_]]
-            if A2.sum() < min3:
-                continue
-            for r_ in range(q_ + 1, len(idx)):
-                fe3 = {conds[idx[p_]][1], conds[idx[q_]][1], conds[idx[r_]][1]}
-                if len(fe3) < 3:
-                    continue
-                A3 = A2 & Mtr[idx[r_]]
-                n = A3.sum()
-                if n < min3:
-                    continue
-                A3t = A2t & Mte[idx[r_]]
-                nt = A3t.sum()
-                res.append((" AND ".join(conds[t][0] for t in (idx[p_], idx[q_], idx[r_])), 3, n, float((A3 * ytr).sum() / n),
-                            float((A3 * wtr).sum() / n), nt, float((A3t * yte).sum() / nt) if nt else np.nan,
-                            float((A3t * wte).sum() / nt) if nt else np.nan, (idx[p_], idx[q_], idx[r_])))
-    return res, conds, mask
-
-
-def dots3_main():
-    from alpaca.data.historical import OptionHistoricalDataClient
-    os.makedirs(OUT, exist_ok=True)
-    rng_ = np.random.default_rng(DOTS3_SEED)
-    end = datetime.now(timezone.utc) - timedelta(minutes=20)
-    start = end - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
-    print(f"WHITE DOTS v3 EDGE MINER: {start:%Y-%m-%d} -> {end:%Y-%m-%d}", flush=True)
-    df1, feed = fetch_1m("SPY", start, end)
-    try:
-        vx1, _ = fetch_1m("VIXY", start, end)
-    except SystemExit:
-        vx1 = None
-    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
-    oc = OptionHistoricalDataClient(key, sec)
-    hm = df1.index.hour * 100 + df1.index.minute
-    rows_f, T = [], []
-    prev = None
-    for day, gall in df1.groupby(df1.index.date):
-        hmd = gall.index.hour * 100 + gall.index.minute
-        g = gall[(hmd >= 930) & (hmd < 1600)]
-        pre = gall[(hmd >= 400) & (hmd < 930)]
-        if len(g) < 300:
-            continue
-        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close", "volume")}
-        mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
-        ok = (mm >= 0) & (mm < 390)
-        for col in sess:
-            sess[col][mm[ok]] = g[col].to_numpy()[ok]
-        for col in ("open", "high", "low", "close"):
-            sess[col] = pd.Series(sess[col]).fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
-        sess["volume"] = np.nan_to_num(sess["volume"])
-        o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
-        h2, l2 = dots_clean(o, h, l, c)
-        sess["high"], sess["low"] = h2, l2
-        ind = dots_compute(o, h2, l2, c)
-        ex = dots3_extra(o, h2, l2, c, sess["volume"])
-        sigs = dots_signals(o, h2, l2, c, ind)
-        ctx = dict(prev_close=prev["close"] if prev else None, prev_high=prev["high"] if prev else None,
-                   prev_low=prev["low"] if prev else None, on_high=float(pre["high"].max()) if len(pre) else None,
-                   on_low=float(pre["low"].min()) if len(pre) else None, weekday=day.weekday(), gex=dots3_load_gex(day))
-        if vx1 is not None:
-            vd = vx1[vx1.index.date == day]
-            vh = vd.index.hour * 60 + vd.index.minute - 570
-            arr = np.full(390, np.nan)
-            okv = (vh >= 0) & (vh < 390)
-            arr[np.asarray(vh[okv])] = vd["close"].to_numpy()[okv]
-            ctx["vixy"] = pd.Series(arr).ffill().bfill().to_numpy()
-        # random-entry control: same count of random minutes 9:45-3:00, random side
-        stalls = [s for s in sigs if s["kind"] == "stall"]
-        rnd = [dict(i=int(rng_.integers(15, 330)), side=("long" if rng_.random() < .5 else "short"), kind="stall", weak=0,
-                    xi=0, x=0.0, dr0=0.0, rand=1) for _ in stalls]
-        need = set()
-        for s in stalls + rnd:
-            Lg = s["side"] == "long"
-            px = c[s["i"]]
-            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
-            for off in DOTS_OFF.values():
-                need.add(dots_occ(day, "C" if Lg else "P", K1 + off if Lg else K1 - off))
-        opt = dots_fetch_options(oc, need, day) if need else {}
-        built = dots_build_trades(day, sess, ind, sigs, opt)
-        T.extend(built)
-        bmap = {(b["i"], b["side"]): b for b in built}
-        for s in stalls:
-            b = bmap.get((s["i"], s["side"]))
-            if b is None:
-                continue
-            fz = dots3_features(s["i"], s["side"], s, sess, ind, ex, ctx, sigs)
-            yw, yr, yc = dots3_outcome(b["strikes"].get("OTM1"))
-            yw2, yr2, _ = dots3_outcome(b["strikes"].get("ITM2"))
-            rows_f.append(dict(day=day, i=s["i"], side=s["side"], **fz, y_win=yw, y_r=yr, y_clean=yc, y_win_itm=yw2, y_r_itm=yr2, y_rand=0))
-        rb = dots_build_trades(day, sess, ind, rnd, opt)
-        for b in rb:
-            yw, yr, yc = dots3_outcome(b["strikes"].get("OTM1"))
-            rows_f.append(dict(day=day, i=b["i"], side=b["side"], y_win=yw, y_r=yr, y_clean=yc, y_rand=1))
-        prev = dict(close=c[-1], high=h2.max(), low=l2.min())
-        print(f"  {day}: {len(stalls)} dots", flush=True)
-    A = pd.DataFrame(rows_f)
-    A.to_csv(f"{OUT}/dots_v3_features.csv", index=False)
-    R = A[A.y_rand == 1].dropna(subset=["y_r"])
-    F = A[A.y_rand == 0].dropna(subset=["y_r"]).drop(columns=["y_rand"]).reset_index(drop=True)
-    days = sorted(F["day"].unique())
-    cut_day = days[int(len(days) * 2 / 3)]
-    train = (F["day"] < cut_day).to_numpy()
-    test = ~train
-    L = [f"# White dots v3 - edge miner, {len(days)} days, {len(F)} dots, real option prices", "",
-         f"Feed {feed}. TRAIN = {days[0]} to {days[int(len(days) * 2 / 3) - 1]} ({train.sum()} dots). "
-         f"TEST (never seen while searching) = {cut_day} to {days[-1]} ({test.sum()} dots).",
-         "Score per dot = 1 OTM 0DTE, +10% target / -25% stop / out at 30 min, after the spread (R, % of premium). "
-         "Win = +10% before -25%.", "",
-         "| Group | Dots | Win | Avg R |", "|---|---|---|---|",
-         f"| All dots | {len(F)} | {100 * F.y_win.mean():.1f}% | {F.y_r.mean():+.2f}% |",
-         f"| Random entries (same days, same count) | {len(R)} | {100 * R.y_win.mean():.1f}% | {R.y_r.mean():+.2f}% |",
-         f"| All dots at 2 ITM | {F.y_r_itm.notna().sum()} | {100 * F.y_win_itm.mean():.1f}% | {F.y_r_itm.mean():+.2f}% |", ""]
-    # single features: best vs worst fifth in train, then test
-    feats = [c for c in F.columns if not c.startswith("y_") and c not in ("day", "i", "side")]
-    L += ["## Every reading on its own (fifths set on TRAIN; avg R in each fifth, train | test)", "",
-          "| Reading | lowest fifth | 2nd | 3rd | 4th | highest fifth | spread train | spread test |", "|---|---|---|---|---|---|---|---|"]
-    srows = []
-    for fe in feats:
-        x = F[fe]
-        if x.notna().sum() < 150 or x[train].nunique() < 2:
-            continue
-        qs = x[train].quantile([.2, .4, .6, .8]).to_numpy()
-        b = np.digitize(x.to_numpy(), qs, right=True)
-        cells, sp = [], []
-        for part in (train, test):
-            rr = [F.y_r[part & (b == k) & x.notna().to_numpy()].mean() for k in range(5)]
-            sp.append(np.nanmax(rr) - np.nanmin(rr))
-            cells.append(rr)
-        txt = [f"{cells[0][k]:+.1f} \\| {cells[1][k]:+.1f}" for k in range(5)]
-        same_dir = np.sign(cells[0][4] - cells[0][0]) == np.sign(cells[1][4] - cells[1][0])
-        srows.append((sp[0] if same_dir else -1, fe, txt, sp))
-    for _, fe, txt, sp in sorted(srows, key=lambda z: -z[0]):
-        L.append(f"| {fe} | " + " | ".join(txt) + f" | {sp[0]:.1f} | {sp[1]:.1f} |")
-    # combination search + luck check
-    res, conds, mask = dots3_mine(F, train, test)
-    Fl = F.copy()
-    Fl["y_r"] = rng_.permutation(Fl["y_r"].to_numpy())
-    Fl["y_win"] = rng_.permutation(Fl["y_win"].to_numpy())
-    luck, _, _ = dots3_mine(Fl, train, test)
-    luck_best = {k: max([x[3] for x in luck if x[1] == k], default=np.nan) for k in (1, 2, 3)}
-    L += ["", "## Luck check", f"With the outcomes shuffled at random, the best train score the search still finds is: "
-          f"single {luck_best[1]:+.2f}%, pair {luck_best[2]:+.2f}%, triple {luck_best[3]:+.2f}% per trade. "
-          "A real rule has to beat these on TRAIN and also stay positive on TEST."]
-    surv = [x for x in res if x[3] > luck_best.get(x[1], 0) and x[5] >= 30 and x[6] > 0]
-    surv.sort(key=lambda x: -min(x[3], x[6]))
-    L += ["", f"## Rules that beat luck on TRAIN and stayed positive on TEST ({len(surv)} found, best 40)", "",
-          "| Rule | Size | Train dots | Train win | Train R | Test dots | Test win | Test R |", "|---|---|---|---|---|---|---|---|"]
-    for x in surv[:40]:
-        L.append(f"| {x[0]} | {x[1]} | {x[2]} | {100 * x[4]:.0f}% | {x[3]:+.2f}% | {x[5]} | {100 * x[7]:.0f}% | {x[6]:+.2f}% |")
-    top_train = sorted(res, key=lambda x: -x[3])[:20]
-    L += ["", "## Best 20 on TRAIN alone, and what happened on TEST (shows how much is curve-fit)", "",
-          "| Rule | Train dots | Train R | Test dots | Test R |", "|---|---|---|---|---|"]
-    for x in top_train:
-        L.append(f"| {x[0]} | {x[2]} | {x[3]:+.2f}% | {x[5]} | {x[6]:+.2f}% |")
-    pd.DataFrame([dict(rule=x[0], size=x[1], train_n=x[2], train_r=x[3], train_win=x[4], test_n=x[5], test_r=x[6], test_win=x[7])
-                  for x in res]).sort_values("train_r", ascending=False).head(5000).to_csv(f"{OUT}/dots_v3_rules.csv", index=False)
-    # trade the top survivors from $2,000 (cash account, 25%, half +10% trend-line runner and all out +10%, -25% stop)
-    L += ["", "## Trading the top 5 surviving rules from $2,000 (cash account, 25% size, -25% stop)", "",
-          "| Rule | Exit | TRAIN period | TEST period | Test trades | Test win |", "|---|---|---|---|---|---|"]
-    keyset = {(r["day"], r["i"], r["side"]): k for k, r in F.iterrows()}
-    for x in surv[:5]:
-        mk = np.ones(len(F), bool)
-        for t_ in x[8]:
-            mk &= mask(F, conds[t_])
-        keep = {(F.day[k], F.i[k], F.side[k]) for k in np.nonzero(mk)[0]}
-        Tr = [t for t in T if (t["day"], t["i"], t["side"]) in keep and t["day"] < cut_day]
-        Te = [t for t in T if (t["day"], t["i"], t["side"]) in keep and t["day"] >= cut_day]
-        for exn in ("half +10%, runner trend line", "all out +10%"):
-            a_ = dots_sim(Tr, "1 OTM (current)", exn, "25%", "all day (to 3:00)", "cash", stop=.25) if Tr else None
-            b_ = dots_sim(Te, "1 OTM (current)", exn, "25%", "all day (to 3:00)", "cash", stop=.25) if Te else None
-            wn = (100 * np.mean([t[1] > 0 for t in b_["lite"]])) if b_ and b_["lite"] else 0
-            L.append(f"| {x[0]} | {exn} | ${a_['end']:,.0f} | ${b_['end']:,.0f} | {len(b_['lite']) if b_ else 0} | {wn:.0f}% |"
-                     if a_ and b_ else f"| {x[0]} | {exn} | - | - | 0 | - |")
-    # GEX days on their own
-    gx = F[F.gex_net_positive.notna()] if "gex_net_positive" in F else F.iloc[:0]
-    if len(gx):
-        L += ["", f"## GEX (only the {gx.day.nunique()} days in gex_log.csv, {len(gx)} dots - too few to trust, a first look)", "",
-              "| Reading | Dots | Win | Avg R |", "|---|---|---|---|"]
-        for nm_, mk in (("positive gamma", gx.gex_net_positive == 1), ("negative gamma", gx.gex_net_positive == 0),
-                        ("within 1 ATR of the wall you're trading into", gx.gex_dist_wall_atr <= 1),
-                        ("more than 3 ATR from that wall", gx.gex_dist_wall_atr > 3),
-                        ("on the helpful side of the flip", gx.gex_dist_flip_atr > 0),
-                        ("on the wrong side of the flip", gx.gex_dist_flip_atr < 0)):
-            g_ = gx[mk]
-            if len(g_):
-                L.append(f"| {nm_} | {len(g_)} | {100 * g_.y_win.mean():.0f}% | {g_.y_r.mean():+.2f}% |")
-    with open(f"{OUT}/DOTS_V3_EDGE.md", "w") as f:
-        f.write("\n".join(L) + "\n")
-    print("\n".join(L[:60]), flush=True)
-
-
-
-
-# ------------------------------------------------------------------------------------------------------------
-# v4 DOT RULE TUNER (backtest only - your page code is not touched). Every setting of every white-dot rule,
-# scored on 130 days of real 0DTE option prices and on whether SPY actually turned / jumped after the dot,
-# with the best settings for each kind of day (VIX level, gap, opening range, weekday, time of day).
-# TRAIN = first 2/3 of the days, TEST = last 1/3 (never used to pick). Baseline = every minute of the day.
-# ------------------------------------------------------------------------------------------------------------
-import itertools  # noqa: E402
-
-D4_CORE = dict(lb=[8, 10, 13, 16, 20, 25, 30], drive=[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0], stall=[1, 2, 3, 4, 5],
-               tol=[0.05, 0.1, 0.2, 0.3, 0.5], away=[0.75, 1.0, 1.5, 2.0, 2.5], body=[0.3, 0.4, 0.5, 0.6, 0.8, 1.0])
-D4_DEF = dict(lb=16, drive=2.0, stall=2, tol=0.2, away=1.5, body=0.6, late=2.5, window=10, stretch=60, ext=45, maxbx=8, snap=3, mindr=2.0)
-D4_CONF = dict(late=[1.5, 2.0, 2.5, 3.0, 4.0], window=[3, 5, 10, 15, 20], stretch=[40, 50, 60, 70, 80, 90], ext=[30, 45, 60, 90],
-               maxbx=[3, 5, 8, 12, 20], snap=[1, 2, 3, 4, 6], mindr=[1.0, 1.5, 2.0, 2.5, 3.0])
-
-
-def d4_signals(D, P, detail=None):
-    """Same logic as the page's dots, every number adjustable. D = per-day plain lists. Returns dots, arrows, kills."""
-    o, h, l, c, A = D["o"], D["h"], D["l"], D["c"], D["A"]
-    n = len(c)
-    lo_w, hi_w = D["lo"][P["lb"]], D["hi"][P["lb"]]
-    lo_e, hi_e = D["lo"][P["ext"]], D["hi"][P["ext"]]
-    pb = D["pbody"]
-    dots, arrows, kills = [], [], []
-    for side in (0, 1):
-        Lg = side == 0
-        S_, SA, O_, OA = (D["F"], D["fA"], D["G"], D["gA"]) if Lg else (D["G"], D["gA"], D["F"], D["fA"])
-        phase, x, xi, si, dr0 = 0, 0.0, -1, -1, 0.0
-        start = 15 if P["lb"] <= 16 else P["lb"] - 1
-        for i in range(start, n):
-            a = A[i] or 1e-9
-            lo, hi = lo_w[i], hi_w[i]
-            ext = l[i] if Lg else h[i]
-            if phase == 0:
-                if (l[i] <= lo if Lg else h[i] >= hi) and ((hi - l[i]) if Lg else (h[i] - lo)) >= P["drive"] * a:
-                    phase, x, xi, dr0 = 1, ext, i, ((hi - l[i]) if Lg else (h[i] - lo))
-                continue
-            if (ext < x - P["tol"] * a) if Lg else (ext > x + P["tol"] * a):
-                if phase == 2:
-                    kills.append((i, side))
-                drive = (hi - l[i]) if Lg else (h[i] - lo)
-                phase, x, xi, dr0 = 1, ext, i, max(dr0, drive)
-                continue
-            if (l[i] < x) if Lg else (h[i] > x):
-                x = ext
-            dist = (c[i] - x) if Lg else (x - c[i])
-            fired = None
-            if phase >= 1:
-                ok_win = (1 <= i - xi <= P["snap"]) if phase == 1 else True
-                if ok_win and i >= 2:
-                    pk = max(S_[max(0, xi - 5):i + 1])
-                    vix = pk >= P["stretch"] and (S_[i] < SA[i] or (S_[i] < S_[i - 1] < S_[i - 2])) and O_[i] > OA[i] and O_[i] > O_[i - 1]
-                    trig = (c[i] > h[i - 1]) if Lg else (c[i] < l[i - 1])
-                    if vix and trig:
-                        late = 570 + i > 900
-                        real = (not late) and ((x <= lo_e[i]) if Lg else (x >= hi_e[i])) and dr0 >= P["mindr"] * a and i - xi <= P["maxbx"]
-                        fired = real
-            if phase == 1:
-                if fired is not None:
-                    if fired:
-                        arrows.append((i, side))
-                        if detail is not None:
-                            detail[(i, side)] = dict(xi=xi, x=x, dr0=dr0)
-                    else:
-                        dots.append((i, side, 1))
-                    phase = 0
-                    continue
-                if dist > P["away"] * a:
-                    phase = 0
-                    continue
-                if i - xi >= P["stall"]:
-                    body = (pb[i + 1] - pb[xi + 1]) / (i - xi)
-                    if body <= P["body"] * a:
-                        phase, si = 2, i
-                        dots.append((i, side, 0))
-                continue
-            if phase == 2:
-                if i - si > P["window"]:
-                    phase = 0
-                elif fired is not None:
-                    if fired:
-                        arrows.append((i, side))
-                        if detail is not None:
-                            detail[(i, side)] = dict(xi=xi, x=x, dr0=dr0)
-                    else:
-                        dots.append((i, side, 1))
-                    phase = 0
-                elif dist > P["late"] * a:
-                    phase = 0
-    return dots, arrows, kills
-
-
-def d4_day_lists(o, h, l, c, ind):
-    D = dict(o=list(map(float, o)), h=list(map(float, h)), l=list(map(float, l)), c=list(map(float, c)),
-             A=list(map(float, ind["A"])), F=list(map(float, ind["F"])), G=list(map(float, ind["G"])),
-             fA=list(map(float, ind["fA"])), gA=list(map(float, ind["gA"])))
-    D["lo"], D["hi"] = {}, {}
-    for w in set(D4_CORE["lb"]) | set(D4_CONF["ext"]):
-        # page: window of w bars back incl. current for drive uses i-15..i (16 bars) at lb=16; ext uses i-45..i (46 bars) at 45
-        span = w if w in D4_CORE["lb"] else w + 1
-        D["lo"][w] = pd.Series(l).rolling(span, min_periods=1).min().tolist()
-        D["hi"][w] = pd.Series(h).rolling(span, min_periods=1).max().tolist()
-    D["pbody"] = [0.0] + list(np.cumsum(np.abs(np.asarray(c) - np.asarray(o))))
-    return D
-
-
-def d4_outcomes(day, o, h, l, c, A, opt):
-    """For every minute and side: option R / win (1 OTM, +10% / -25% / 30 min, after spread) and SPY turn / jump."""
-    n = len(c)
-    R = np.full((n, 2), np.nan)
-    W = np.full((n, 2), np.nan)
-    TURN = np.full((n, 2), np.nan)
-    JUMP = np.full((n, 2), np.nan)
-    for i in range(15, n - 2):
-        a = max(A[i], 1e-6)
-        for side in (0, 1):
-            Lg = side == 0
-            e0 = o[i + 1]
-            tu = ju = 0.0
-            done_t = done_j = False
-            for k in range(i + 1, min(n, i + 31)):
-                fav = (h[k] - e0) if Lg else (e0 - l[k])
-                adv = (e0 - l[k]) if Lg else (h[k] - e0)
-                if not done_t:
-                    if adv >= .5 * a:
-                        done_t = True
-                    elif fav >= 1 * a:
-                        tu, done_t = 1.0, True
-                if not done_j:
-                    if adv >= .5 * a:
-                        done_j = True
-                    elif fav >= 2 * a:
-                        ju, done_j = 1.0, True
-                if done_t and done_j:
-                    break
-            TURN[i, side], JUMP[i, side] = tu, ju
-            px = c[i]
-            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
-            rec = opt.get(dots_occ(day, "C" if Lg else "P", K1))
-            if rec is None:
-                continue
-            j0 = i + 1
-            e = rec["open"][j0]
-            if not (e > 0):
-                nx = [j for j in range(j0, min(j0 + 3, 390)) if rec["open"][j] > 0]
-                if not nx:
-                    continue
-                j0 = nx[0]
-                e = rec["open"][j0]
-            sl = dots_slip(e)
-            r, win, last = None, 0.0, e
-            for k in range(j0, min(390, j0 + 60)):
-                if rec["close"][k] > 0:
-                    last = rec["close"][k]
-                    lo_, hi_ = rec["low"][k], rec["high"][k]
-                else:
-                    lo_ = hi_ = last
-                if lo_ <= e * .75:
-                    r = r if r is not None else -.25
-                    break
-                if hi_ >= e * 1.10 and r is None:
-                    r, win = .10, 1.0
-                    break
-                if k - j0 == 29 and r is None:
-                    r = last / e - 1
-            if r is None:
-                r = last / e - 1
-            R[i, side], W[i, side] = 100 * (r - 2 * sl / e), win
-    return R, W, TURN, JUMP
-
-
-def d4_vix_closes():
-    """Daily VIX closes from Cboe (fallback: none -> VIXY level is used)."""
-    import urllib.request
-    try:
-        txt = urllib.request.urlopen("https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv", timeout=30).read().decode()
-        df = pd.read_csv(io.StringIO(txt))
-        df["d"] = pd.to_datetime(df.iloc[:, 0]).dt.date
-        return dict(zip(df["d"], df.iloc[:, 4].astype(float)))
-    except Exception as e:  # noqa: BLE001
-        print("  VIX history not reachable:", str(e)[:120])
-        return {}
-
-
-import io  # noqa: E402
-
-
-def dots4_main():
-    from alpaca.data.historical import OptionHistoricalDataClient
-    os.makedirs(OUT, exist_ok=True)
-    t0 = time.time()
-    end = datetime.now(timezone.utc) - timedelta(minutes=20)
-    start = end - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
-    print(f"WHITE DOTS v4 RULE TUNER: {start:%Y-%m-%d} -> {end:%Y-%m-%d}", flush=True)
-    df1, feed = fetch_1m("SPY", start, end)
-    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
-    oc = OptionHistoricalDataClient(key, sec)
-    vix = d4_vix_closes()
-    days = []
-    prev_close, prev_range = None, None
-    for day, gall in df1.groupby(df1.index.date):
-        hmd = gall.index.hour * 100 + gall.index.minute
-        g = gall[(hmd >= 930) & (hmd < 1600)]
-        if len(g) < 300:
-            continue
-        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
-        mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
-        ok = (mm >= 0) & (mm < 390)
-        for col in sess:
-            sess[col][mm[ok]] = g[col].to_numpy()[ok]
-        for col in sess:
-            sess[col] = pd.Series(sess[col]).fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
-        o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
-        h2, l2 = dots_clean(o, h, l, c)
-        ind = dots_compute(o, h2, l2, c)
-        D = d4_day_lists(o, h2, l2, c, ind)
-        lo_s, hi_s = int(math.floor(l2.min())) - 3, int(math.ceil(h2.max())) + 3
-        need = [dots_occ(day, cp, k) for cp in ("C", "P") for k in range(lo_s, hi_s + 1)]
-        opt = dots_fetch_options(oc, need, day)
-        R, W, TU, JU = d4_outcomes(day, o, h2, l2, c, D["A"], opt)
-        prior = [d for d in vix if d < day]
-        vx = vix[max(prior)] if prior else np.nan
-        a30 = float(np.mean(D["A"][20:30]))
-        days.append(dict(day=day, D=D, R=R, W=W, TU=TU, JU=JU,
-                         reg=dict(vix=vx, gap=abs(o[0] / prev_close - 1) * 100 if prev_close else np.nan,
-                                  or30=(h2[:30].max() - l2[:30].min()) / max(a30, 1e-6), prevrng=prev_range if prev_range else np.nan,
-                                  weekday=day.weekday())))
-        prev_close, prev_range = c[-1], (h2.max() - l2.min()) / c[-1] * 100
-        print(f"  {day}: {len(opt)} contracts, {time.time() - t0:.0f}s", flush=True)
-    nd = len(days)
-    cut = int(nd * 2 / 3)
-    for k, dd in enumerate(days):
-        dd["train"] = k < cut
-    # regime buckets (terciles set on TRAIN days)
-    regs = {}
-    for rk in ("vix", "gap", "or30", "prevrng"):
-        vals = np.array([dd["reg"][rk] for dd in days if dd["train"] and np.isfinite(dd["reg"][rk])])
-        if len(vals) < 9:
-            continue
-        q1, q2 = np.quantile(vals, [1 / 3, 2 / 3])
-        regs[rk] = (q1, q2)
-        for dd in days:
-            v = dd["reg"][rk]
-            dd.setdefault("b", {})[rk] = (None if not np.isfinite(v) else (0 if v <= q1 else (1 if v <= q2 else 2)))
-    for dd in days:
-        dd.setdefault("b", {})["weekday"] = dd["reg"]["weekday"]
-    reg_names = {"vix": ["low VIX", "mid VIX", "high VIX"], "gap": ["small gap", "mid gap", "big gap"],
-                 "or30": ["tight first 30 min", "normal first 30 min", "wide first 30 min"],
-                 "prevrng": ["quiet day before", "normal day before", "wide day before"],
-                 "weekday": ["Mon", "Tue", "Wed", "Thu", "Fri"]}
-    TOD = [(0, 90, "9:30-11"), (90, 210, "11-1"), (210, 330, "1-3"), (330, 390, "after 3")]
-
-    def tod_b(i):
-        return 0 if i < 90 else (1 if i < 210 else (2 if i < 330 else 3))
-
-    # baseline: every minute 9:45-3:00, both sides
-    def base(part):
-        rr, ww, tt, jj = [], [], [], []
-        for dd in days:
-            if dd["train"] != part:
-                continue
-            rr.append(dd["R"][15:330].ravel())
-            ww.append(dd["W"][15:330].ravel())
-            tt.append(dd["TU"][15:330].ravel())
-            jj.append(dd["JU"][15:330].ravel())
-        f_ = lambda z: float(np.nanmean(np.concatenate(z))) if z else np.nan  # noqa: E731
-        return f_(rr), f_(ww), f_(tt), f_(jj)
-    BASE = {True: base(True), False: base(False)}
-
-    # flatten every day x minute x side into one global index for fast scoring
-    GR = np.concatenate([dd["R"].ravel() for dd in days])
-    GW = np.concatenate([dd["W"].ravel() for dd in days])
-    GT = np.nan_to_num(np.concatenate([dd["TU"].ravel() for dd in days]))
-    GJ = np.nan_to_num(np.concatenate([dd["JU"].ravel() for dd in days]))
-    GTR = np.concatenate([np.full(dd["R"].size, dd["train"]) for dd in days]).astype(int)
-    offs = np.cumsum([0] + [dd["R"].size for dd in days])
-    DIMS = {}
-    for rk in reg_names:
-        DIMS[rk] = np.concatenate([np.full(dd["R"].size, -1 if dd["b"].get(rk) is None else dd["b"][rk]) for dd in days]).astype(int)
-    DIMS["tod"] = np.concatenate([np.repeat([0 if i < 90 else (1 if i < 210 else (2 if i < 330 else 3)) for i in range(dd["R"].shape[0])], 2)
-                                  for dd in days]).astype(int)
-    DIMS["side"] = np.concatenate([np.tile([0, 1], dd["R"].shape[0]) for dd in days]).astype(int)
-    GRv = np.isfinite(GR)
-    GR0 = np.where(GRv, GR, 0.0)
-    GW0 = np.where(GRv, GW, 0.0)
-
-    def agg(idx):
-        idx = np.asarray(idx, dtype=np.int64)
-        acc = {}
-        if not len(idx):
-            return acc
-        tr = GTR[idx]
-        rv, r0, w0, t_, j_ = GRv[idx].astype(float), GR0[idx], GW0[idx], GT[idx], GJ[idx]
-        groups = [("all", np.zeros(len(idx), int), 1)] + [(dm, DIMS[dm][idx], 5) for dm in DIMS]
-        for dm, b, nb in groups:
-            ok = b >= 0
-            code = (b[ok] * 2 + tr[ok])
-            m_ = 2 * max(nb, 4)
-            n = np.bincount(code, minlength=m_)
-            sr = np.bincount(code, weights=r0[ok], minlength=m_)
-            sw = np.bincount(code, weights=w0[ok], minlength=m_)
-            nr = np.bincount(code, weights=rv[ok], minlength=m_)
-            stt = np.bincount(code, weights=t_[ok], minlength=m_)
-            sj = np.bincount(code, weights=j_[ok], minlength=m_)
-            for cc in np.nonzero(n)[0]:
-                key = "all" if dm == "all" else (dm, int(cc // 2))
-                acc[(key, bool(cc % 2))] = [int(n[cc]), float(sr[cc]), float(stt[cc]), float(sj[cc]), float(sw[cc]), float(nr[cc])]
-        return acc
-
-    def score(settings, kind="dots"):
-        out = []
-        for P in settings:
-            idx = []
-            for di, dd in enumerate(days):
-                dots, arrows, kills = d4_signals(dd["D"], P)
-                b0 = offs[di]
-                if kind == "arrows":
-                    idx.extend(b0 + i * 2 + s for i, s in arrows)
-                elif kind == "white":
-                    idx.extend(b0 + i * 2 + s for i, s, w in dots if w == 0)
-                else:
-                    idx.extend(b0 + i * 2 + s for i, s, w in dots)
-            out.append((P, agg(idx)))
-        return out
-
-    def st(acc, k, part):
-        a_ = acc.get((k, part))
-        if not a_ or a_[0] == 0:
-            return dict(n=0, r=np.nan, w=np.nan, tu=np.nan, ju=np.nan)
-        return dict(n=a_[0], r=a_[1] / a_[5] if a_[5] else np.nan, w=a_[4] / a_[5] if a_[5] else np.nan, tu=a_[2] / a_[0], ju=a_[3] / a_[0])
-
-    # stage 1: every core setting (confirm layer at your values)
-    core = [dict(D4_DEF, **dict(zip(D4_CORE, combo))) for combo in itertools.product(*D4_CORE.values())]
-    print(f"stage 1: {len(core)} settings", flush=True)
-    S1 = []
-    for k0 in range(0, len(core), 2000):
-        S1 += score(core[k0:k0 + 2000], "dots")
-        print(f"  {k0 + 2000} settings, {time.time() - t0:.0f}s", flush=True)
-    print(f"  done {time.time() - t0:.0f}s", flush=True)
-    ntr = sum(dd["train"] for dd in days)
-    nte = nd - ntr
-
-    def row(P, acc, extra=""):
-        a, b = st(acc, "all", True), st(acc, "all", False)
-        lab = " ".join(f"{k}={P[k]}" for k in D4_CORE)
-        return (lab, a, b)
-
-    rows = [row(P, acc) for P, acc in S1]
-    cur = next(r for (P, acc), r in zip(S1, rows) if all(P[k] == D4_DEF[k] for k in D4_CORE))
-    out_csv = []
-    for (P, acc), (lab, a, b) in zip(S1, rows):
-        out_csv.append(dict(setting=lab, **{f"train_{k}": v for k, v in a.items()}, **{f"test_{k}": v for k, v in b.items()},
-                            train_per_day=a["n"] / max(ntr, 1), test_per_day=b["n"] / max(nte, 1)))
-    pd.DataFrame(out_csv).to_csv(f"{OUT}/dots_v4_settings.csv", index=False)
-
-    def fmt(lab, a, b):
-        return (f"| {lab} | {a['n'] / max(ntr, 1):.1f} | {100 * a['w']:.0f}% \\| {100 * b['w']:.0f}% | {a['r']:+.2f} \\| {b['r']:+.2f} | "
-                f"{100 * a['tu']:.0f}% \\| {100 * b['tu']:.0f}% | {100 * a['ju']:.0f}% \\| {100 * b['ju']:.0f}% |")
-    H = ("| Setting | Dots/day | Win (train \\| test) | Avg R % | Turn 1 ATR first | Jump 2 ATR first |\n|---|---|---|---|---|---|")
-    bt, bf = BASE[True], BASE[False]
-    L = [f"# White dot rules - every setting, {nd} days, real option prices (backtest only, page unchanged)", "",
-         f"Feed {feed}. TRAIN {days[0]['day']} to {days[cut - 1]['day']} ({ntr} days), TEST {days[cut]['day']} to {days[-1]['day']} ({nte} days).",
-         "Win / Avg R: 1 OTM 0DTE, +10% target, -25% stop, out at 30 min, after the spread. "
-         "Turn = SPY moves 1 ATR your way before 0.5 ATR against (30 min). Jump = 2 ATR your way first.", "",
-         "## Baseline: every minute 9:45-3:00, both directions (what random entries get)", H,
-         f"| every minute | - | {100 * bt[1]:.0f}% \\| {100 * bf[1]:.0f}% | {bt[0]:+.2f} \\| {bf[0]:+.2f} | {100 * bt[2]:.0f}% \\| {100 * bf[2]:.0f}% | {100 * bt[3]:.0f}% \\| {100 * bf[3]:.0f}% |",
-         "", "## Your current dot rules", H, fmt(*cur), ""]
-    good = [r for r in rows if r[1]["n"] >= 150 and r[2]["n"] >= 60]
-    L += ["## Best 30 settings for the option trade (ranked by the worse of train and test R)", H]
-    for r in sorted(good, key=lambda r: -min(r[1]["r"], r[2]["r"]))[:30]:
-        L.append(fmt(*r))
-    L += ["", "## Best 30 settings for catching a real turn (ranked by the worse of train and test turn rate)", H]
-    for r in sorted(good, key=lambda r: -min(r[1]["tu"], r[2]["tu"]))[:30]:
-        L.append(fmt(*r))
-    L += ["", "## Best 20 for catching a jump (2 ATR first)", H]
-    for r in sorted(good, key=lambda r: -min(r[1]["ju"], r[2]["ju"]))[:20]:
-        L.append(fmt(*r))
-    # each rule number on its own
-    L += ["", "## Each rule number on its own (average over every other setting; train | test)", "",
-          "| Rule | Value | Dots/day | Avg R % | Turn | Jump |", "|---|---|---|---|---|---|"]
-    names = dict(lb="drive lookback (bars)", drive="drive size (ATR)", stall="stall bars", tol="new-extreme tolerance (ATR)",
-                 away="max bounce before reset (ATR)", body="stall candle size (ATR)")
-    for k in D4_CORE:
-        for v in D4_CORE[k]:
-            sub = [r for (P, acc), r in zip(S1, rows) if P[k] == v]
-            f_ = lambda key, part: np.nanmean([x[1 if part else 2][key] for x in sub])  # noqa: E731
-            L.append(f"| {names[k]} | {v}{' (yours)' if v == D4_DEF[k] else ''} | {np.mean([x[1]['n'] for x in sub]) / max(ntr, 1):.1f} | "
-                     f"{f_('r', 1):+.2f} \\| {f_('r', 0):+.2f} | {100 * f_('tu', 1):.0f}% \\| {100 * f_('tu', 0):.0f}% | "
-                     f"{100 * f_('ju', 1):.0f}% \\| {100 * f_('ju', 0):.0f}% |")
-    # by kind of day: best setting picked on TRAIN for each bucket, judged on TEST, vs your rules in the same bucket
-    L += ["", "## Does the best setting change with the day? (picked on TRAIN days of that kind, judged on TEST days of that kind)", "",
-          "| Kind of day | Best setting on train | Train R | Test R | Test turn | Your rules: test R | Your rules: test turn | Test dots |",
-          "|---|---|---|---|---|---|---|---|"]
-    cur_acc = next(acc for P, acc in S1 if all(P[k] == D4_DEF[k] for k in D4_CORE))
-    dims = [(rk, b) for rk in reg_names if rk in regs or rk == "weekday" for b in range(len(reg_names[rk]))] + \
-        [("tod", b) for b in range(4)] + [("side", 0), ("side", 1)]
-    for rk, b in dims:
-        k_ = (rk, b)
-        cand = [(P, acc) for P, acc in S1 if st(acc, k_, True)["n"] >= 40 and st(acc, k_, False)["n"] >= 15]
-        if not cand:
-            continue
-        P, acc = max(cand, key=lambda pa: st(pa[1], k_, True)["r"])
-        a, t_, cu = st(acc, k_, True), st(acc, k_, False), st(cur_acc, k_, False)
-        nm = reg_names.get(rk, ["9:30-11", "11-1", "1-3", "after 3"] if rk == "tod" else ["calls", "puts"])[b] if rk in reg_names else \
-            (["9:30-11", "11-1", "1-3", "after 3"][b] if rk == "tod" else ["calls", "puts"][b])
-        if rk in regs:
-            q1, q2 = regs[rk]
-            nm += f" ({'<=' + format(q1, '.3g') if b == 0 else (format(q1, '.3g') + '-' + format(q2, '.3g') if b == 1 else '>' + format(q2, '.3g'))})"
-        lab = " ".join(f"{kk}={P[kk]}" for kk in D4_CORE)
-        L.append(f"| {nm} | {lab} | {a['r']:+.2f} | {t_['r']:+.2f} | {100 * t_['tu']:.0f}% | {cu['r']:+.2f} | {100 * cu['tu']:.0f}% | {t_['n']} |")
-    # stage 2: the confirm layer (arrows / gray dots) - one number at a time around the top 5 core settings + 1500 random full combos
-    top5 = [P for (P, acc), r in sorted(zip(S1, rows), key=lambda z: -min(z[1][1]["tu"], z[1][2]["tu"]) if z[1][1]["n"] >= 150 else 9)[:5]]
-    S2set = []
-    for P in top5 + [dict(D4_DEF)]:
-        for k, vals in D4_CONF.items():
-            for v in vals:
-                S2set.append(dict(P, **{k: v}))
-    rng4 = np.random.default_rng(11)
-    for _ in range(1500):
-        P = {k: v[int(rng4.integers(len(v)))] for k, v in {**D4_CORE, **D4_CONF}.items()}
-        S2set.append(P)
-    print(f"stage 2: {len(S2set)} settings (arrows)", flush=True)
-    S2 = score(S2set, "arrows")
-    L += ["", "## Arrows (the confirm layer): best 25 full settings, all 13 numbers (train | test)", "",
-          "| Setting | Arrows/day | Win | Avg R % | Turn | Jump |", "|---|---|---|---|---|---|"]
-    r2 = []
-    for P, acc in S2:
-        a, b = st(acc, "all", True), st(acc, "all", False)
-        if a["n"] >= 60 and b["n"] >= 25:
-            r2.append((" ".join(f"{k}={P[k]}" for k in list(D4_CORE) + list(D4_CONF)), a, b))
-    for lab, a, b in sorted(r2, key=lambda r: -min(r[1]["tu"], r[2]["tu"]))[:25]:
-        L.append(f"| {lab} | {a['n'] / max(ntr, 1):.1f} | {100 * a['w']:.0f}% \\| {100 * b['w']:.0f}% | {a['r']:+.2f} \\| {b['r']:+.2f} | "
-                 f"{100 * a['tu']:.0f}% \\| {100 * b['tu']:.0f}% | {100 * a['ju']:.0f}% \\| {100 * b['ju']:.0f}% |")
-    cur2 = [x for (P, acc), x in zip(S2, [(None, st(acc, "all", True), st(acc, "all", False)) for P, acc in S2])
-            if all(P[k] == D4_DEF[k] for k in D4_DEF)]
-    if cur2:
-        a, b = cur2[0][1], cur2[0][2]
-        L += ["", f"Your current arrows: {a['n'] / max(ntr, 1):.1f}/day, R {a['r']:+.2f} | {b['r']:+.2f}, turn {100 * a['tu']:.0f}% | {100 * b['tu']:.0f}%."]
-    pd.DataFrame([dict(setting=lab, **{f"train_{k}": v for k, v in a.items()}, **{f"test_{k}": v for k, v in b.items()})
-                  for lab, a, b in r2]).to_csv(f"{OUT}/dots_v4_arrows.csv", index=False)
-    with open(f"{OUT}/DOTS_V4_TUNE.md", "w") as f:
-        f.write("\n".join(L) + "\n")
-    print("\n".join(L[:50]), flush=True)
-    print(f"total {time.time() - t0:.0f}s", flush=True)
-
-
-
-
-# ------------------------------------------------------------------------------------------------------------
-# v5 STRICT ARROWS - THE REAL TEST. The 25 best arrow recipes from v4 are locked in BEFORE looking at the
-# 6 months nobody has touched (the half-year before the v4 window). Scored as turns / jumps on SPY and as real
-# 0DTE option trades with SPY-ATR exits (and the old % exits) at 2 ITM, ATM and 1 OTM. Also answers:
-# "do dots go green as a contract even after heat?" - for dots, arrows and random minutes.
-# ------------------------------------------------------------------------------------------------------------
-D5_TOP = """lb=20 drive=4.0 stall=1 tol=0.5 away=0.75 body=0.5 late=1.5 window=15 stretch=80 ext=90 maxbx=3 snap=1 mindr=1.5
-lb=8 drive=3.5 stall=3 tol=0.2 away=0.75 body=0.4 late=4.0 window=15 stretch=60 ext=90 maxbx=20 snap=2 mindr=1.5
-lb=20 drive=4.0 stall=1 tol=0.5 away=0.75 body=1.0 late=1.5 window=20 stretch=70 ext=90 maxbx=3 snap=4 mindr=3.0
-lb=20 drive=3.0 stall=3 tol=0.05 away=1.0 body=0.6 late=4.0 window=20 stretch=80 ext=90 maxbx=12 snap=2 mindr=1.5
-lb=30 drive=1.5 stall=3 tol=0.3 away=1.0 body=0.3 late=2.5 window=15 stretch=80 ext=90 maxbx=12 snap=3 mindr=3.0
-lb=30 drive=1.5 stall=1 tol=0.3 away=0.75 body=1.0 late=4.0 window=20 stretch=80 ext=90 maxbx=3 snap=6 mindr=3.0
-lb=16 drive=3.0 stall=3 tol=0.3 away=2.5 body=0.3 late=2.5 window=20 stretch=90 ext=90 maxbx=3 snap=2 mindr=1.5
-lb=10 drive=3.5 stall=4 tol=0.2 away=1.0 body=0.4 late=1.5 window=20 stretch=80 ext=90 maxbx=8 snap=6 mindr=1.5
-lb=8 drive=3.5 stall=5 tol=0.3 away=1.5 body=0.8 late=1.5 window=5 stretch=90 ext=90 maxbx=3 snap=2 mindr=2.5
-lb=10 drive=4.0 stall=4 tol=0.2 away=2.0 body=1.0 late=2.5 window=5 stretch=90 ext=60 maxbx=3 snap=2 mindr=2.0
-lb=8 drive=3.5 stall=1 tol=0.1 away=0.75 body=0.6 late=3.0 window=5 stretch=80 ext=60 maxbx=5 snap=2 mindr=2.5
-lb=8 drive=1.5 stall=2 tol=0.5 away=1.0 body=0.8 late=3.0 window=15 stretch=70 ext=90 maxbx=3 snap=4 mindr=1.0
-lb=25 drive=4.0 stall=2 tol=0.1 away=0.75 body=0.6 late=2.5 window=20 stretch=80 ext=90 maxbx=12 snap=2 mindr=1.5
-lb=10 drive=4.0 stall=4 tol=0.1 away=1.0 body=0.8 late=1.5 window=10 stretch=60 ext=60 maxbx=20 snap=4 mindr=3.0
-lb=10 drive=4.0 stall=4 tol=0.05 away=0.75 body=0.6 late=1.5 window=10 stretch=40 ext=90 maxbx=5 snap=1 mindr=1.0
-lb=8 drive=3.5 stall=5 tol=0.1 away=1.0 body=0.4 late=3.0 window=5 stretch=70 ext=60 maxbx=8 snap=6 mindr=1.5
-lb=8 drive=3.5 stall=1 tol=0.05 away=0.75 body=0.4 late=3.0 window=5 stretch=50 ext=60 maxbx=12 snap=6 mindr=1.0
-lb=8 drive=3.5 stall=2 tol=0.2 away=2.5 body=0.3 late=2.5 window=5 stretch=80 ext=60 maxbx=3 snap=2 mindr=3.0
-lb=25 drive=4.0 stall=5 tol=0.2 away=1.0 body=0.4 late=4.0 window=3 stretch=80 ext=90 maxbx=20 snap=3 mindr=1.5
-lb=8 drive=3.5 stall=2 tol=0.1 away=0.75 body=1.0 late=2.5 window=15 stretch=40 ext=45 maxbx=3 snap=6 mindr=2.5
-lb=25 drive=3.5 stall=5 tol=0.3 away=1.0 body=0.3 late=2.0 window=15 stretch=80 ext=60 maxbx=20 snap=2 mindr=1.5
-lb=10 drive=4.0 stall=5 tol=0.05 away=0.75 body=0.3 late=3.0 window=20 stretch=90 ext=90 maxbx=8 snap=4 mindr=2.0
-lb=13 drive=4.0 stall=3 tol=0.05 away=2.5 body=0.8 late=1.5 window=20 stretch=90 ext=60 maxbx=3 snap=2 mindr=2.0
-lb=8 drive=3.5 stall=3 tol=0.1 away=0.75 body=0.3 late=3.0 window=15 stretch=60 ext=45 maxbx=12 snap=3 mindr=3.0
-lb=30 drive=1.0 stall=3 tol=0.2 away=0.75 body=0.4 late=1.5 window=5 stretch=80 ext=90 maxbx=20 snap=6 mindr=2.5"""
-
-
-def d5_parse(line):
-    P = {}
-    for kv in line.split():
-        k, v = kv.split("=")
-        P[k] = int(v) if k in ("lb", "stall", "window", "stretch", "ext", "maxbx", "snap") else float(v)
-    return P
-
-
-D5_RECIPES = [d5_parse(x) for x in D5_TOP.strip().splitlines()]
-D5_EXITS = ["SPY +1 ATR / -0.5 ATR", "SPY +2 ATR / -0.5 ATR", "SPY +1 ATR half, runner trend line, -0.5 ATR", "option +10% / -25%", "option +20% / -20%"]
-D5_STRIKES = {"2 ITM": -3, "ATM": -1, "1 OTM": 0}
-
-
-def d5_trade(i, Lg, S, rec, exit_name):
-    """Real option trade from the next minute's open. SPY-based exits fill at the option close of the minute SPY touches the level."""
-    o, h, l, c, ef, A = S["o"], S["h"], S["l"], S["c"], S["ef"], S["A"]
-    j0 = i + 1
-    if j0 >= 389:
-        return None
-    e = rec["open"][j0]
-    if not (e > 0):
-        nx = [j for j in range(j0, min(j0 + 3, 390)) if rec["open"][j] > 0]
-        if not nx:
-            return None
-        j0 = nx[0]
-        e = rec["open"][j0]
-    sl = dots_slip(e)
-    a = max(A[i], 1e-6)
-    s0 = o[j0]
-    d = 1 if Lg else -1
+def t7_result(rec, j0, e, sess, i, Lg):
+    """From a buy at minute j0 for price e: +10% before -25%? heat first, best in 15 / 60 min, and plan A
+    (sell at +10%, stop at -25%, else out at 30 min) after 1c a side."""
     last = e
-    half = None
-    maxh = 0.0
-    for k in range(j0, min(390, j0 + 60)):
-        if rec["close"][k] > 0:
-            last = rec["close"][k]
-            hi_, lo_ = rec["high"][k], rec["low"][k]
-        else:
-            hi_ = lo_ = last
-        maxh = max(maxh, hi_ / e - 1)
-        fav = (h[k] - s0) if Lg else (s0 - l[k])
-        adv = (s0 - l[k]) if Lg else (h[k] - s0)
-        m = k - j0
-        if exit_name.startswith("SPY"):
-            tgt = 2.0 if "+2 ATR" in exit_name else 1.0
-            if adv >= .5 * a:
-                px = last if half is None else last
-                r = (px - sl) / e - 1 if half is None else 0.5 * half + 0.5 * ((px - sl) / e - 1)
-                return dict(r=r, m=m, maxh=maxh)
-            if "half" in exit_name:
-                if half is None and fav >= tgt * a:
-                    half = (last - sl) / e - 1
-                    continue
-                if half is not None and m >= 1 and ((c[k] < ef[k]) if Lg else (c[k] > ef[k])):
-                    return dict(r=0.5 * half + 0.5 * ((last - sl) / e - 1), m=m, maxh=maxh)
-            elif fav >= tgt * a:
-                return dict(r=(last - sl) / e - 1, m=m, maxh=maxh)
-            if m >= (45 if tgt == 2.0 else 30) and half is None:
-                return dict(r=(last - sl) / e - 1, m=m, maxh=maxh)
-        else:
-            up, dn = (.10, -.25) if "+10%" in exit_name else (.20, -.20)
-            if lo_ <= e * (1 + dn):
-                return dict(r=dn - sl / e, m=m, maxh=maxh)
-            if hi_ >= e * (1 + up):
-                return dict(r=up - sl / e, m=m, maxh=maxh)
-            if m >= 30:
-                return dict(r=(last - sl) / e - 1, m=m, maxh=maxh)
-    r = (last - sl) / e - 1
-    if half is not None:
-        r = 0.5 * half + 0.5 * r
-    return dict(r=r, m=60, maxh=maxh)
+    heat, best15, best60, first = 0.0, 0.0, 0.0, None
+    exitp = None
+    for k, j in enumerate(range(j0, min(j0 + 61, 390))):
+        hh, ll, cc = rec["high"][j], rec["low"][j], rec["close"][j]
+        if not (cc > 0):
+            hh = ll = cc = last
+        last = cc
+        if first is None:
+            heat = min(heat, ll / e - 1)
+            if ll <= e * 0.75:
+                first = "stop"
+            elif hh >= e * 1.10:
+                first = "tp"
+        if exitp is None:
+            if ll <= e * 0.75:
+                exitp = e * 0.75
+            elif hh >= e * 1.10:
+                exitp = e * 1.10
+            elif k >= 30:
+                exitp = cc
+        if k <= 15:
+            best15 = max(best15, hh / e - 1)
+        best60 = max(best60, hh / e - 1)
+    if exitp is None:
+        exitp = last
+    return dict(tp_first=1.0 if first == "tp" else 0.0, heat=heat, best15=best15, best60=best60,
+                R=(max(exitp - 0.01, 0) / (e + 0.01) - 1))
 
 
-def d5_green(i, Lg, rec):
-    """Did the contract ever trade above entry + spread? How much heat first? Within 30 and 60 min."""
-    j0 = i + 1
-    if j0 >= 389 or rec is None:
-        return None
-    e = rec["open"][j0]
-    if not (e > 0):
-        return None
-    sl = dots_slip(e)
-    heat, g30, g60, p10, heat_before = 0.0, 0, 0, 0, None
-    for k in range(j0, min(390, j0 + 60)):
-        if not (rec["close"][k] > 0):
-            continue
-        heat = min(heat, rec["low"][k] / e - 1)
-        if rec["high"][k] >= e + 2 * sl:
-            if heat_before is None:
-                heat_before = heat
-            g60 = 1
-            if k - j0 < 30:
-                g30 = 1
-        if rec["high"][k] >= e * 1.10:
-            p10 = 1
-    return dict(g30=g30, g60=g60, p10=p10, heat_before=heat_before if heat_before is not None else np.nan, max_heat=heat)
-
-
-def dots5_main():
+def dots7_main():
     from alpaca.data.historical import OptionHistoricalDataClient
     os.makedirs(OUT, exist_ok=True)
     t0 = time.time()
+    months = float(os.getenv("DOTS_MONTHS", "12") or 12)
     now = datetime.now(timezone.utc) - timedelta(minutes=20)
-    v4_start = now - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
-    start = v4_start - timedelta(days=int(DOTS_MONTHS * 30.5) + 5)
-    print(f"WHITE DOTS v5 STRICT ARROWS: {start:%Y-%m-%d} -> {now:%Y-%m-%d} (holdout before {v4_start:%Y-%m-%d})", flush=True)
+    start = now - timedelta(days=int(months * 30.5) + 5)
+    mid = (now - timedelta(days=int(months * 30.5 / 2))).astimezone(NY).date()
+    print(f"ENTRY TIMING v7: {start:%Y-%m-%d} -> {now:%Y-%m-%d}", flush=True)
     df1, feed = fetch_1m("SPY", start, now)
-    key, sec = os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip()
-    oc = OptionHistoricalDataClient(key, sec)
-    rng5 = np.random.default_rng(5)
-    rows = []          # one row per (mark kind, day, minute, side) with outcomes
-    feat_rows = []     # strict-arrow features
-    prev = None
+    oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+    rows = []
     for day, gall in df1.groupby(df1.index.date):
         hmd = gall.index.hour * 100 + gall.index.minute
         g = gall[(hmd >= 930) & (hmd < 1600)]
-        pre = gall[(hmd >= 400) & (hmd < 930)]
         if len(g) < 300:
             continue
-        period = "HOLDOUT (untouched)" if day < v4_start.astimezone(NY).date() else "v4 window"
-        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close", "volume")}
+        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
         mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
         ok = (mm >= 0) & (mm < 390)
         for col in sess:
             sess[col][mm[ok]] = g[col].to_numpy()[ok]
-        for col in ("open", "high", "low", "close"):
+        for col in sess:
             sess[col] = pd.Series(sess[col]).fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
-        sess["volume"] = np.nan_to_num(sess["volume"])
         o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
         h2, l2 = dots_clean(o, h, l, c)
         sess["high"], sess["low"] = h2, l2
         ind = dots_compute(o, h2, l2, c)
-        ex = dots3_extra(o, h2, l2, c, sess["volume"])
-        D = d4_day_lists(o, h2, l2, c, ind)
-        S = dict(o=o, h=h2, l=l2, c=c, ef=ind["ef"], A=ind["A"])
-        cur_sigs = dots_signals(o, h2, l2, c, ind)
-        marks = {}
-        marks["your white dots (all)"] = [(s["i"], 0 if s["side"] == "long" else 1) for s in cur_sigs if s["kind"] == "stall"]
-        d0, a0, _ = d4_signals(D, dict(D4_DEF))
-        marks["your arrows"] = a0
-        det_all = {}
-        union = set()
-        for ri, P in enumerate(D5_RECIPES):
-            det = {}
-            _, ar, _ = d4_signals(D, P, detail=det)
-            marks[f"recipe {ri + 1:02d}"] = ar
-            for k_, v_ in det.items():
-                det_all.setdefault(k_, v_)
-            union.update(ar)
-        marks["ANY strict recipe"] = sorted(union)
-        n_r = max(1, len(marks["your white dots (all)"]))
-        marks["random minutes"] = [(int(rng5.integers(15, 330)), int(rng5.integers(0, 2))) for _ in range(n_r)]
-        lo_s, hi_s = int(math.floor(l2.min())) - 5, int(math.ceil(h2.max())) + 5
-        need = [dots_occ(day, cp, k) for cp in ("C", "P") for k in range(lo_s, hi_s + 1)]
-        opt = dots_fetch_options(oc, need, day)
-        cache = {}
-        for kind, lst in marks.items():
-            for i, sd in lst:
-                if i >= 388:
-                    continue
-                Lg = sd == 0
-                if (i, sd) not in cache:
-                    a = max(ind["A"][i], 1e-6)
-                    e0 = o[i + 1]
-                    tu = ju = 0.0
-                    dt_ = dj = False
-                    for k in range(i + 1, min(390, i + 31)):
-                        fav = (h2[k] - e0) if Lg else (e0 - l2[k])
-                        adv = (e0 - l2[k]) if Lg else (h2[k] - e0)
-                        if not dt_:
-                            if adv >= .5 * a:
-                                dt_ = True
-                            elif fav >= a:
-                                tu, dt_ = 1.0, True
-                        if not dj:
-                            if adv >= .5 * a:
-                                dj = True
-                            elif fav >= 2 * a:
-                                ju, dj = 1.0, True
-                    px = c[i]
-                    K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
-                    res = dict(turn=tu, jump=ju)
-                    for sn, off in D5_STRIKES.items():
-                        K = K1 + off if Lg else K1 - off
-                        rec = opt.get(dots_occ(day, "C" if Lg else "P", K))
-                        if rec is None:
-                            continue
-                        for en in D5_EXITS:
-                            t_ = d5_trade(i, Lg, S, rec, en)
-                            if t_ is not None:
-                                res[f"{sn}|{en}"] = 100 * t_["r"]
-                        if sn == "1 OTM":
-                            gr = d5_green(i, Lg, rec)
-                            if gr:
-                                res.update({f"g_{k}": v for k, v in gr.items()})
-                    cache[(i, sd)] = res
-                rows.append(dict(kind=kind, period=period, day=day, i=i, side=sd, **cache[(i, sd)]))
-        ctx = dict(prev_close=prev["close"] if prev else None, prev_high=prev["high"] if prev else None,
-                   prev_low=prev["low"] if prev else None, on_high=float(pre["high"].max()) if len(pre) else None,
-                   on_low=float(pre["low"].min()) if len(pre) else None, weekday=day.weekday(), gex=None)
-        for i, sd in marks["ANY strict recipe"]:
-            if i >= 388:
-                continue
-            sig = dict(i=i, side="long" if sd == 0 else "short", kind="add", weak=0, **det_all.get((i, sd), {}))
-            fz = dots3_features(i, sig["side"], sig, sess, ind, ex, ctx, cur_sigs)
-            fz.pop("vix_15m_helping_pct", None)
-            fz.pop("vix_day_helping_pct", None)
-            for k_ in ("gex_net_positive", "gex_dist_flip_atr", "gex_dist_wall_atr"):
-                fz.pop(k_, None)
-            feat_rows.append(dict(period=period, day=day, i=i, side=sd, **fz, **cache.get((i, sd), {})))
-        prev = dict(close=c[-1], high=h2.max(), low=l2.min())
-        print(f"  {day} [{period[:7]}]: dots {len(marks['your white dots (all)'])}, strict {len(union)}, {time.time() - t0:.0f}s", flush=True)
-    A_ = pd.DataFrame(rows)
-    A_.to_csv(f"{OUT}/dots_v5_marks.csv", index=False)
-    Fz = pd.DataFrame(feat_rows)
-    Fz.to_csv(f"{OUT}/dots_v5_strict_features.csv", index=False)
-    periods = ["HOLDOUT (untouched)", "v4 window"]
-    nd = {p: A_[A_.period == p].day.nunique() for p in periods}
-    L = [f"# White dots v5 - strict arrows on 6 months nobody touched", "",
-         f"Feed {feed}. HOLDOUT = {A_[A_.period == periods[0]].day.min()} to {A_[A_.period == periods[0]].day.max()} ({nd[periods[0]]} days) - "
-         f"never used by any earlier test. v4 window = {A_[A_.period == periods[1]].day.min()} to {A_[A_.period == periods[1]].day.max()} ({nd[periods[1]]} days).",
-         "The 25 recipes were locked in from v4 before this run. Turn = SPY 1 ATR your way before 0.5 ATR against (30 min). Jump = 2 ATR first.",
-         "Option trades: real 0DTE bars, entry next minute open, spread 1c/2c/3c a side. SPY-ATR exits fill at the option close of the minute SPY touches.", ""]
-    # 1) do dots go green?
-    L += ["## Do the contracts go green, even after heat? (1 OTM, within 60 min)", "",
-          "| Marks | Period | Count | Green within 30 min | Green within 60 min | Reached +10% | Median heat before green | Median worst heat |",
-          "|---|---|---|---|---|---|---|---|"]
-    for kind in ["your white dots (all)", "your arrows", "ANY strict recipe", "random minutes"]:
-        for p in periods:
-            x = A_[(A_.kind == kind) & (A_.period == p)].dropna(subset=["g_g60"]) if "g_g60" in A_ else A_.iloc[:0]
-            if len(x):
-                L.append(f"| {kind} | {p} | {len(x)} | {100 * x.g_g30.mean():.0f}% | {100 * x.g_g60.mean():.0f}% | {100 * x.g_p10.mean():.0f}% | "
-                         f"{100 * x.g_heat_before.median():.0f}% | {100 * x.g_max_heat.median():.0f}% |")
-    # 2) turns and trades per mark kind
-    cols = [f"{sn}|{en}" for sn in D5_STRIKES for en in D5_EXITS]
-    L += ["", "## Turn / jump and the best option trade for each kind of mark", "",
-          "| Marks | Period | Per day | Turn | Jump | Best exit + strike (avg % per trade after spread) |", "|---|---|---|---|---|---|"]
-    best_cols = {}
-    for kind in ["random minutes", "your white dots (all)", "your arrows", "ANY strict recipe"] + [f"recipe {k:02d}" for k in range(1, 26)]:
-        for p in periods:
-            x = A_[(A_.kind == kind) & (A_.period == p)]
-            if not len(x):
-                continue
-            means = {cc: x[cc].mean() for cc in cols if cc in x}
-            bc = max(means, key=lambda k: -1e9 if not np.isfinite(means[k]) else means[k]) if means else None
-            if p == "v4 window":
-                best_cols[kind] = bc
-            top = ", ".join(f"{k_}: {v:+.2f}%" for k_, v in sorted(means.items(), key=lambda kv: -np.nan_to_num(kv[1], nan=-1e9))[:2])
-            L.append(f"| {kind} | {p} | {len(x) / max(nd[p], 1):.1f} | {100 * x.turn.mean():.0f}% | {100 * x.jump.mean():.0f}% | {top} |")
-    # 3) every exit x strike for the strict union, both periods
-    L += ["", "## ANY strict recipe - every exit x strike (avg % per trade after spread | win rate)", "",
-          "| Strike | Exit | v4 window | HOLDOUT |", "|---|---|---|---|"]
-    xs = {p: A_[(A_.kind == "ANY strict recipe") & (A_.period == p)] for p in periods}
-    for cc in cols:
-        cells = []
-        for p in ["v4 window", "HOLDOUT (untouched)"]:
-            v = xs[p][cc].dropna() if cc in xs[p] else pd.Series(dtype=float)
-            cells.append(f"{v.mean():+.2f}% \\| {100 * (v > 0).mean():.0f}% (n={len(v)})" if len(v) else "-")
-        sn, en = cc.split("|")
-        L.append(f"| {sn} | {en} | {cells[0]} | {cells[1]} |")
-    # 4) $2,000 on the holdout with the exit picked on the v4 window
-    L += ["", "## $2,000 on the HOLDOUT months (exit + strike picked on the v4 window only; next trade at least 15 min later)", "",
-          "| Marks | Exit + strike | Size | v4 window | HOLDOUT | Holdout trades | Holdout win | Holdout worst drawdown |", "|---|---|---|---|---|---|---|---|"]
-    for kind in ["ANY strict recipe", "your arrows", "your white dots (all)", "random minutes"]:
-        bc = best_cols.get(kind)
-        if not bc:
+        dots = [s for s in dots_signals(o, h2, l2, c, ind) if s["kind"] == "stall" and s["i"] < 380]
+        if not dots:
             continue
-        for size in (.25, .5):
-            res = []
-            for p in ["v4 window", "HOLDOUT (untouched)"]:
-                x = A_[(A_.kind == kind) & (A_.period == p)].sort_values(["day", "i"])
-                eq, pk, dd_, free_day, free_i, n_, w_ = 2000.0, 2000.0, 0.0, None, -1, 0, 0
-                for _, r in x.iterrows():
-                    if not np.isfinite(r.get(bc, np.nan)):
-                        continue
-                    if r.day == free_day and r.i < free_i:
-                        continue
-                    eq *= 1 + size * r[bc] / 100
-                    pk = max(pk, eq)
-                    dd_ = max(dd_, (pk - eq) / pk)
-                    free_day, free_i = r.day, r.i + 15
-                    n_ += 1
-                    w_ += r[bc] > 0
-                res.append((eq, n_, w_, dd_))
-            L.append(f"| {kind} | {bc} | {int(size * 100)}% | ${res[0][0]:,.0f} | ${res[1][0]:,.0f} | {res[1][1]} | "
-                     f"{100 * res[1][2] / max(res[1][1], 1):.0f}% | {100 * res[1][3]:.0f}% |")
-    # 5) what makes strict arrows move: every reading, split in thirds (thirds set on v4 window), turn rate in each, both periods
-    if len(Fz):
-        L += ["", "## What makes a strict arrow move - every reading in thirds (turn rate low / mid / high third: v4 window | HOLDOUT)", "",
-              "| Reading | Low third | Mid third | High third | Same direction both periods? |", "|---|---|---|---|---|"]
-        tr_ = Fz[Fz.period == "v4 window"]
-        fcols = [cc for cc in Fz.columns if cc not in ("period", "day", "i", "side", "turn", "jump") and not cc.startswith("g_") and "|" not in cc]
-        out5 = []
-        for fe in fcols:
-            v = tr_[fe].dropna()
-            if v.nunique() < 3 or len(v) < 30:
+        need, pick = [], []
+        for s in dots:
+            Lg = s["side"] == "long"
+            px = c[s["i"]]
+            K1 = math.floor(px) + 1 if Lg else (px - 1 if float(px).is_integer() else math.floor(px))
+            for sn, off in T7_STRIKES.items():
+                K = K1 + off if Lg else K1 - off
+                sym = dots_occ(day, "C" if Lg else "P", K)
+                need.append(sym)
+                pick.append((s, sn, sym))
+        opt = dots_fetch_options(oc, need, day)
+        for s, sn, sym in pick:
+            rec = opt.get(sym)
+            if rec is None:
                 continue
-            q1, q2 = v.quantile([1 / 3, 2 / 3])
-            cells, ends = [], []
-            for p in ["v4 window", "HOLDOUT (untouched)"]:
-                x = Fz[Fz.period == p]
-                b = np.where(x[fe] <= q1, 0, np.where(x[fe] <= q2, 1, 2))
-                t_ = [x.turn[(b == k_) & x[fe].notna()].mean() for k_ in range(3)]
-                cells.append(t_)
-                ends.append(t_[2] - t_[0])
-            same = np.sign(ends[0]) == np.sign(ends[1]) and abs(ends[0]) > .05 and abs(ends[1]) > .05
-            out5.append((same, min(abs(ends[0]), abs(ends[1])) if same else 0, fe, cells, (q1, q2)))
-        for same, sc, fe, cells, (q1, q2) in sorted(out5, key=lambda z: (-z[0], -z[1])):
-            L.append(f"| {fe} (cuts {q1:.3g} / {q2:.3g}) | " + " | ".join(f"{100 * cells[0][k_]:.0f}% \\| {100 * cells[1][k_]:.0f}%" for k_ in range(3))
-                     + f" | {'YES' if same else 'no'} |")
-    with open(f"{OUT}/DOTS_V5_STRICT.md", "w") as f:
+            i, Lg = s["i"], s["side"] == "long"
+            base = t7_entry("w0", i, Lg, sess, ind, rec)
+            if base is None:
+                continue
+            b_res = t7_result(rec, base[0], base[1], sess, i, Lg)
+            for pname, code in T7_PLANS.items():
+                en = t7_entry(code, i, Lg, sess, ind, rec)
+                r = dict(day=day, half="2nd half" if day >= mid else "1st half", i=i, am=i < 210, side=s["side"],
+                         weak=s.get("weak", 0), strike=sn, plan=pname, taken=en is not None, base_R=b_res["R"], base_e=base[1])
+                if en is not None:
+                    r.update(t7_result(rec, en[0], en[1], sess, i, Lg))
+                    r["e"] = en[1]
+                    r["wait"] = en[0] - base[0]
+                rows.append(r)
+        print(f"  {day}: dots {len(dots)}, {time.time() - t0:.0f}s", flush=True)
+    A = pd.DataFrame(rows)
+    A.to_csv(f"{OUT}/entry_timing_v7.csv", index=False)
+    L = ["# Entry timing: buy at the dot, or wait?", "",
+         f"Feed {feed}. {A.day.min()} to {A.day.max()}, {A.day.nunique()} days, {A[A.plan == list(T7_PLANS)[0]].shape[0]} dot-contracts.",
+         "Same dots and same contract each time; only the buy moment changes. Real 0DTE option bars, 1c spread a side.",
+         "Plan A = sell all at +10%, stop at -25%, else out at 30 min. +10% first = hit +10% before -25%.",
+         "Skipped = the plan never triggered within 5 minutes (so you'd have sat out). 'Skipped dots at the dot' shows what those would have done.", ""]
+    for sn in T7_STRIKES:
+        L += [f"## {sn}", "",
+              "| Entry plan | Taken | Avg wait | Price vs dot | +10% first | Median heat | Best in 15m | Plan A avg | Plan A win | 1st half / 2nd half | Before 1:00 | Skipped dots at the dot |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for pname in T7_PLANS:
+            x = A[(A.strike == sn) & (A.plan == pname)]
+            t = x[x.taken]
+            sk = x[~x.taken]
+            if not len(t):
+                continue
+            hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+            L.append(f"| {pname} | {100 * len(t) / len(x):.0f}% | {t.wait.mean():.1f}m | {100 * (t.e / t.base_e - 1).mean():+.1f}% | "
+                     f"{100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.best15.median():+.0f}% | "
+                     f"{100 * t.R.mean():+.2f}% | {100 * (t.R > 0).mean():.0f}% | {100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | "
+                     f"{100 * t[t.am].R.mean():+.2f}% | {(f'{100 * sk.base_R.mean():+.2f}% (n={len(sk)})') if len(sk) else '-'} |")
+        L.append("")
+    L += ["How to read it: a plan helps if its Plan A avg beats 'at the dot' in BOTH halves. A filter plan (green candle, fear/greed under",
+          "its average, quits driving, limit bids) also helps if the dots it skipped did worse at the dot than the ones it took."]
+    with open(f"{OUT}/ENTRY_TIMING.md", "w") as f:
         f.write("\n".join(L) + "\n")
-    print("\n".join(L[:80]), flush=True)
+    print("\n".join(L), flush=True)
     print(f"total {time.time() - t0:.0f}s", flush=True)
 
 
 if __name__ == "__main__" and os.getenv("DOTS", "1").strip() == "1":
-    dots5_main()
+    dots7_main()
     sys.exit(0)
-# ======================================= END WHITE DOTS BLOCK ===============================================
+# ======================================= END ENTRY TIMING BLOCK ===============================================
 
 
 def fake_1m(symbol, start, end):
