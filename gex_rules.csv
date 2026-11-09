@@ -39,3 +39,4 @@ t,candle,sym,rule,tags,side,close,atr1,ttm,vwap_atr,fear,greed,seen_after_min,fi
 2026-11-06T13:17:08-05:00,13:16,QQQ,1m AGREE FLIP,FULL,PUTS,655.58,0.585,down,,25,29,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
 2026-11-06T13:18:08-05:00,13:17,SPY,1m AGREE FLIP,FULL,PUTS,736.3,0.464,down,,27,26,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
 2026-11-09T11:04:08-05:00,11:03,SPY,1m WHIPSAW,R1,CALLS,751.25,0.326,TURNING away,11.15,89,76,0.1,FIRE,SPY261109C00754000,0.41,0.21,752.23,90 calls 0-1DTE > 4 priced 0.40-0.80 > 3 delta 0.15+ > 3 spread ok > 3 liquid (83 greeks worked out here)
+2026-11-09T14:40:08-05:00,14:39,QQQ,1m WHIPSAW,R1 R2,CALLS,680.2,0.453,WITH you,12.04,34,100,0.1,FIRE,QQQ261109C00681000,0.67,0.38,681.56,82 calls 0-1DTE > 5 priced 0.40-0.80 > 3 delta 0.15+ > 3 spread ok > 3 liquid (65 greeks worked out here)
