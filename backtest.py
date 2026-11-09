@@ -594,6 +594,7 @@ def dots7_main():
     rows2 = []
     rows3 = []
     rows4 = []
+    rows5 = []
     for day, gall in df1.groupby(df1.index.date):
         hmd = gall.index.hour * 100 + gall.index.minute
         g = gall[(hmd >= 930) & (hmd < 1600)]
@@ -756,6 +757,16 @@ def dots7_main():
             base = t7_entry("w0", i, Lg, sess, ind, rec)
             if base is None:
                 continue
+            if sn in ("1 OTM", "ATM"):
+                b_r = t7_result(rec, base[0], base[1], sess, i, Lg)["R"]
+                busy = 100 * ind["A"][i] / c[i] >= 0.048
+                for pct in range(0, 16):
+                    en = base if pct == 0 else t7_entry(f"dip{pct}", i, Lg, sess, ind, rec)
+                    r5 = dict(half="2nd half" if day >= mid else "1st half", strike=sn, pct=pct, am=i < 210, busy=busy, taken=en is not None, base_R=b_r)
+                    if en is not None:
+                        q = t7_result(rec, en[0], en[1], sess, i, Lg)
+                        r5.update(R=q["R"], tp=q["tp_first"], heat=q["heat"])
+                    rows5.append(r5)
             bk = next(b[2] for b in T7_BUCKETS if b[0] <= i < b[1])
             for code in T7_FILL_BIDS:
                 en = t7_entry(code, i, Lg, sess, ind, rec)
@@ -913,6 +924,26 @@ def dots7_main():
                                  f"{100 * len(t) / len(x):.0f}% | {100 * t.tp_first.mean():.0f}% | {100 * t.heat.median():.0f}% | {100 * t.R.mean():+.2f}% | "
                                  f"{100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {100 * t[t.am.astype(bool)].R.mean():+.2f}% |")
             L.append("")
+    # ---- every bid depth 0-15%
+    P5 = pd.DataFrame(rows5)
+    if len(P5):
+        nd = max(A.day.nunique(), 1)
+        for sn in ("1 OTM", "ATM"):
+            for gname, gm in (("every dot, all day", P5.pct >= 0), ("before 1:00", P5.am), ("busy day", P5.busy), ("busy day + before 1:00", P5.busy & P5.am)):
+                L += [f"## Every bid depth: {sn}, {gname}", "",
+                      "| Bid under | Filled | Fills/day | +10% first | Median heat | Avg per trade | 1st half / 2nd half | Missed dots, bought at the dot | Sum of trade % per day (fills x avg, a rough volume-of-edge gauge, not account %) |",
+                      "|---|---|---|---|---|---|---|---|---|"]
+                for pct in range(0, 16):
+                    x = P5[(P5.strike == sn) & (P5.pct == pct) & gm]
+                    t = x[x.taken]
+                    sk = x[~x.taken]
+                    if len(t) < 30:
+                        continue
+                    hv = [t[t.half == hf].R.mean() for hf in ("1st half", "2nd half")]
+                    L.append(f"| {'at the dot' if pct == 0 else str(pct) + '%'} | {100 * len(t) / len(x):.0f}% | {len(t) / nd:.1f} | {100 * t.tp.mean():.0f}% | {100 * t.heat.median():.0f}% | "
+                             f"{100 * t.R.mean():+.2f}% | {100 * hv[0]:+.2f}% / {100 * hv[1]:+.2f}% | {(f'{100 * sk.base_R.mean():+.2f}%') if len(sk) else '-'} | "
+                             f"{100 * t.R.sum() / nd:+.1f}% |")
+                L.append("")
     # ---- page colors at entry + color exits
     for code, bname in (("at the dot (next minute)", "at the dot"), ("limit bid 10% under the dot price (5 min max)", "10% under")):
         E1 = A[(A.strike == "1 OTM") & (A.plan == code)]
