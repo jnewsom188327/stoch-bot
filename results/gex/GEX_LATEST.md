@@ -1,28 +1,28 @@
 # GEX latest
 
-2026-11-09 14:28:23 ET. Log only. This run places no orders.
+2026-11-09 15:21:49 ET. Log only. This run places no orders.
 
 Sign convention: dealers long calls (call GEX positive) and short puts (put GEX negative). Dollar GEX is the hedge notional for a 1% move in the underlying. Open interest is the overnight print, so this is an estimate.
 
-SPY: spot above the 0DTE flip by 2.32 pts (0.31%); nearest wall is the call wall at 750.00, 2.06 pts (0.27%) away.
-QQQ: spot above the 0DTE flip by 6.12 pts (0.90%); the call wall and the put wall are the same distance, 2.97 pts (0.44%) away.
+SPY: no 0DTE gamma flip (cumulative GEX did not cross zero); the call wall and the put wall are the same distance, 0.12 pts (0.02%) away.
+QQQ: spot above the 0DTE flip by 21.83 pts (3.21%); the call wall and the put wall are the same distance, 1.03 pts (0.15%) away.
 
-SPY top |GEX| strikes: 755.00 ($261.00M), 750.00 ($242.69M), 751.00 ($69.06M).
-QQQ top |GEX| strikes: 680.00 ($104.75M), 674.00 ($64.14M), 672.00 ($63.46M).
+SPY top |GEX| strikes: 755.00 ($580.66M), 756.00 ($154.67M), 757.00 ($109.78M).
+QQQ top |GEX| strikes: 680.00 ($217.30M), 672.00 ($42.98M), 675.00 ($30.34M).
 
 |  | SPY | QQQ |
 |---|---:|---:|
-| Spot | 752.06 | 677.03 |
-| 0DTE flip | 749.74 | 670.92 |
-| All-expiry flip | 749.64 | 671.96 |
-| 0DTE call wall | 750.00 | 680.00 |
+| Spot | 755.12 | 681.03 |
+| 0DTE flip |  | 659.20 |
+| All-expiry flip | 754.04 | 679.09 |
+| 0DTE call wall | 755.00 | 680.00 |
 | 0DTE put wall | 755.00 | 680.00 |
-| Net GEX 0DTE | $9.11M | $259.27M |
-| Net GEX all | $413.01M | $354.75M |
-| Vol-adj net 0DTE | $76.38B | $15.31B |
-| Vol-adj net all | $79.28B | $15.18B |
-| Missing greeks | 376/896 | 373/1006 |
-| OI used | 658564 | 345001 |
+| Net GEX 0DTE | -$214.42M | $238.27M |
+| Net GEX all | $222.94M | $383.72M |
+| Vol-adj net 0DTE | $115.22B | $43.70B |
+| Vol-adj net all | $120.00B | $44.35B |
+| Missing greeks | 389/904 | 381/990 |
+| OI used | 659340 | 344683 |
 
 The one-line reading uses the 0DTE flip and walls when that expiry is in the snapshot. CSV distances are level minus spot: positive means the level is above spot.
 
