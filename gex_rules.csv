@@ -38,3 +38,4 @@ t,candle,sym,rule,tags,side,close,atr1,ttm,vwap_atr,fear,greed,seen_after_min,fi
 2026-11-06T13:12:08-05:00,13:11,QQQ,1m FAILED POP,R3 R4,PUTS,655.82,0.566,TURNING your way,6.32,16,64,0.1,,,,,654.12,no contract: 39 puts 0-1DTE > 4 priced 0.40-0.80 > 2 delta 0.15+ > 2 spread ok > 2 liquid > best one only -4% at the target (needs +10%) (76 greeks worked out here)
 2026-11-06T13:17:08-05:00,13:16,QQQ,1m AGREE FLIP,FULL,PUTS,655.58,0.585,down,,25,29,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
 2026-11-06T13:18:08-05:00,13:17,SPY,1m AGREE FLIP,FULL,PUTS,736.3,0.464,down,,27,26,0.1,LOG,,,,,"log only - your agree flip, graded later, never traded"
+2026-11-09T11:04:08-05:00,11:03,SPY,1m WHIPSAW,R1,CALLS,751.25,0.326,TURNING away,11.15,89,76,0.1,FIRE,SPY261109C00754000,0.41,0.21,752.23,90 calls 0-1DTE > 4 priced 0.40-0.80 > 3 delta 0.15+ > 3 spread ok > 3 liquid (83 greeks worked out here)
