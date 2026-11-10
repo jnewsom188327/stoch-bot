@@ -1,28 +1,28 @@
 # GEX latest
 
-2026-11-10 14:30:19 ET. Log only. This run places no orders.
+2026-11-10 15:17:54 ET. Log only. This run places no orders.
 
 Sign convention: dealers long calls (call GEX positive) and short puts (put GEX negative). Dollar GEX is the hedge notional for a 1% move in the underlying. Open interest is the overnight print, so this is an estimate.
 
-SPY: spot above the 0DTE flip by 12.31 pts (1.64%); the call wall and the put wall are the same distance, 1.51 pts (0.20%) away.
-QQQ: spot above the 0DTE flip by 10.04 pts (1.49%); nearest wall is the call wall at 672.00, 0.05 pts (0.01%) away.
+SPY: spot above the 0DTE flip by 19.55 pts (2.61%); the call wall and the put wall are the same distance, 1.16 pts (0.16%) away.
+QQQ: spot above the 0DTE flip by 1.95 pts (0.29%); nearest wall is the call wall at 672.00, 1.01 pts (0.15%) away.
 
-SPY top |GEX| strikes: 750.00 ($610.02M), 730.00 ($442.05M), 745.00 ($406.03M).
-QQQ top |GEX| strikes: 650.00 ($237.68M), 672.00 ($227.28M), 685.00 ($182.01M).
+SPY top |GEX| strikes: 750.00 ($748.51M), 730.00 ($423.91M), 748.00 ($405.78M).
+QQQ top |GEX| strikes: 672.00 ($271.28M), 650.00 ($224.71M), 685.00 ($188.22M).
 
 |  | SPY | QQQ |
 |---|---:|---:|
-| Spot | 748.49 | 671.95 |
-| 0DTE flip | 736.18 | 661.91 |
-| All-expiry flip | 757.80 |  |
+| Spot | 748.84 | 673.01 |
+| 0DTE flip | 729.28 | 671.06 |
+| All-expiry flip | 750.50 | 674.94 |
 | 0DTE call wall | 750.00 | 672.00 |
 | 0DTE put wall | 750.00 | 671.00 |
-| Net GEX 0DTE | $1.61B | $373.93M |
-| Net GEX all | $404.68M | -$114.19M |
-| Vol-adj net 0DTE | -$11.89B | -$16.72B |
-| Vol-adj net all | -$14.03B | -$18.34B |
-| Missing greeks | 407/896 | 396/1046 |
-| OI used | 1115025 | 613774 |
+| Net GEX 0DTE | $1.72B | $409.61M |
+| Net GEX all | $535.44M | -$25.85M |
+| Vol-adj net 0DTE | $29.72B | $1.45B |
+| Vol-adj net all | $28.84B | $239.34M |
+| Missing greeks | 388/896 | 420/1046 |
+| OI used | 1115025 | 615793 |
 
 The one-line reading uses the 0DTE flip and walls when that expiry is in the snapshot. CSV distances are level minus spot: positive means the level is above spot.
 
