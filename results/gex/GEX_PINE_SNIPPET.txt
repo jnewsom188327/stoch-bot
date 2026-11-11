@@ -1,14 +1,14 @@
 //@version=6
-// GEX levels captured 2026-11-11 13:16:18 ET. Paste onto a SPY or QQQ chart.
+// GEX levels captured 2026-11-11 14:16:50 ET. Paste onto a SPY or QQQ chart.
 // Horizontal lines are the 0DTE gamma flip, call wall, and put wall.
 // Falls back to all-expiry levels when that snapshot had no 0DTE contracts.
 // Convention: dealers long calls, short puts. Not an order signal.
 indicator("GEX flip and walls", overlay=true)
-spyFlip = input.float(757.4918, "SPY gamma flip")
+spyFlip = input.float(756.5988, "SPY gamma flip")
 spyCall = input.float(760.0, "SPY call wall")
 spyPut = input.float(763.0, "SPY put wall")
-qqqFlip = input.float(689.0197, "QQQ gamma flip")
-qqqCall = input.float(695.0, "QQQ call wall")
+qqqFlip = input.float(679.4398, "QQQ gamma flip")
+qqqCall = input.float(690.0, "QQQ call wall")
 qqqPut = input.float(695.0, "QQQ put wall")
 isSpy = syminfo.ticker == "SPY"
 isQqq = syminfo.ticker == "QQQ"
