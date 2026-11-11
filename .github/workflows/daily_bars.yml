@@ -1,0 +1,31 @@
+name: Daily bars for the stress test
+on:
+  schedule:
+    - cron: "20 21 * * 1-5"   # 4:20 PM New York in winter (5:20 PM in summer), weekdays
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  bars:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Pull today's SPY and option prices (data only - no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+        run: python bars_daily.py
+      - name: Save
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          git add results
+          if ! git diff --cached --quiet; then
+            git commit -m "daily bars $(date -u +%F)"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
