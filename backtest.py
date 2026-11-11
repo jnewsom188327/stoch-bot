@@ -223,13 +223,8 @@ def fetch_1m(symbol, start, end):
 
 
 # ============================================================================================================
-# ENTRY TIMING v7 - BUY AT THE DOT OR WAIT? (BACKTEST ONLY, NO ORDERS). Runs by default while this block is in the file; set DOTS=0 or delete it to go back.
-# Paste this whole block directly ABOVE the line:  def fake_1m(symbol, start, end):   (near the top, right after fetch_1m)
-# To go back to your normal backtests, delete the block (or set DOTS=0 in the workflow env).
-# What it does: SPY 1-minute bars for the last DOTS_MONTHS months -> the exact white-dot logic from the Gamma Field page
-# (Vix Fix fear/greed, TTM, stall dots + x kills) -> real 0DTE option bars from Alpaca for every strike it could pick
-# -> every trading plan we found (clock strikes, trims, runners, sizing, one add) compounded from $2,000 with whole contracts,
-# spread costs, a per-trade dollar cap and your account's settlement rules. Writes results/DOTS_6MO.md plus CSVs.
+# DOTS ON FUTURES (MES) - BACKTEST ONLY, NO ORDERS. Runs by default while this block is in the file; set DOTS=0 or delete it to go back.
+# SPY 1-minute bars stand in for MES (MES ~ SPY x 10 points, $5/point, so $1 of SPY = $50 per MES contract).
 # ============================================================================================================
 import math  # noqa: E402
 DOTS_MONTHS = float(os.getenv("DOTS_MONTHS", "6") or 6)
@@ -381,76 +376,203 @@ def dots_signals(o, h, l, c, ind):
     return sorted(out, key=lambda s: s["i"])
 
 
-def dots_occ(day, cp, k):
-    return f"SPY{day:%y%m%d}{cp}{int(round(k * 1000)):08d}"
+def t7_page_states(o, h, l, c, v, ind):
+    """Same as the chart page: TTM state (2 bars up/down, latched), AGREE shading, trend-line color, squeeze."""
+    n = len(c)
+    m, F, G, fA, gA = ind["m"], ind["F"], ind["G"], ind["fA"], ind["gA"]
+    st, state = np.zeros(n), 0
+    for i in range(n):
+        if i >= 2 and m[i] > m[i - 1] > m[i - 2]:
+            state = 1
+        if i >= 2 and m[i] < m[i - 1] < m[i - 2]:
+            state = -1
+        st[i] = state
+    ag = np.zeros(n)
+    for i in range(1, n):
+        if st[i] == 1 and gA[i] > gA[i - 1] and fA[i] < fA[i - 1]:
+            ag[i] = 1
+        elif st[i] == -1 and gA[i] < gA[i - 1] and fA[i] > fA[i - 1]:
+            ag[i] = -1
+    ef, es = dots_ema(c, 13), dots_ema(c, 34)
+    tp = (h + l + c) / 3
+    vw = np.cumsum(tp * v) / np.maximum(np.cumsum(v), 1e-9)
+    vw = np.where(np.cumsum(v) > 0, vw, tp)
+    col = np.zeros(n)
+    for i in range(n):
+        tr_ = 1 if (ef[i] > es[i] and c[i] > vw[i]) else -1 if (ef[i] < es[i] and c[i] < vw[i]) else 0
+        fl = i >= 2 and all(c[k] < ef[k] and ef[k] < ef[k - 1] for k in (i, i - 1))
+        fs = i >= 2 and all(c[k] > ef[k] and ef[k] > ef[k - 1] for k in (i, i - 1))
+        col[i] = (1 if fl else 2) if tr_ == 1 else (-1 if fs else -2) if tr_ == -1 else 0
+    tr = np.r_[h[0] - l[0], np.maximum.reduce([h[1:] - l[1:], abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])])]
+    kc = dots_rma(tr, 20)
+    sq = np.array([2 * np.std(c[max(0, i - 19):i + 1]) < 1.5 * kc[i] for i in range(n)])
+    return dict(st=st, ag=ag, col=col, sq=sq)
 
 
-def dots_fetch_options(oc, contracts, day):
-    """Real 1-minute OHLC for each contract on `day`, as arrays of 390 (NaN = no trade that minute)."""
-    from alpaca.data.requests import OptionBarsRequest
-    from alpaca.data.timeframe import TimeFrame
-    start = pd.Timestamp(day, tz=NY) + pd.Timedelta(hours=9, minutes=30)
-    end = start + pd.Timedelta(minutes=390)
-    out = {}
-    contracts = sorted(set(contracts))
-    for k0 in range(0, len(contracts), 60):
-        chunk = contracts[k0:k0 + 60]
-        df = None
-        for attempt in range(4):
-            try:
-                df = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=chunk, timeframe=TimeFrame.Minute,
-                                                          start=start.tz_convert("UTC").to_pydatetime(),
-                                                          end=end.tz_convert("UTC").to_pydatetime())).df
+FUT_TICK = 0.025      # 1 MES tick (0.25 pt) in SPY dollars
+FUT_FEE = 1.24        # round-trip commission + exchange fees per MES contract, $
+FUT_MULT = 50.0       # $ per $1 of SPY per MES contract
+FUT_STOPS = {"swing (past the last 5 bars' extreme)": "swing", "1 ATR": "a1", "2 ATR": "a2"}
+FUT_EXITS = {"+1 ATR target": "t1", "+2 ATR target": "t2", "+3 ATR target": "t3", "trend line break": "tl",
+             "fear/greed curl": "fg", "out at 15 min": "m15", "out at 30 min": "m30"}
+FUT_ENTRIES = {"at the dot (next open)": "mkt", "limit 0.25 ATR better (5 min)": "lim"}
+
+
+def fut_trade(sess, ind, ef, i, Lg, ent, stp, ext):
+    """One MES trade on a dot at minute i. Returns ($ per contract after costs, R multiple, minutes held) or None."""
+    o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
+    d = 1 if Lg else -1
+    A = max(float(ind["A"][i]), 1e-6)
+    j0 = i + 1
+    if j0 >= 389:
+        return None
+    if ent == "mkt":
+        e = float(o[j0])
+    else:
+        tgt = float(c[i]) - d * 0.25 * A
+        j0 = next((j for j in range(i + 1, min(i + 6, 389)) if (l[j] <= tgt if Lg else h[j] >= tgt)), None)
+        if j0 is None:
+            return None
+        e = min(tgt, float(o[j0])) if Lg else max(tgt, float(o[j0]))
+    if stp == "swing":
+        sp = (float(l[max(0, i - 4):i + 1].min()) - FUT_TICK) if Lg else (float(h[max(0, i - 4):i + 1].max()) + FUT_TICK)
+        if (e - sp) * d <= FUT_TICK:
+            sp = e - d * 0.5 * A
+    else:
+        sp = e - d * (1 if stp == "a1" else 2) * A
+    risk = abs(e - sp)
+    S_ = ind["F"] if Lg else ind["G"]
+    tg = e + d * {"t1": 1, "t2": 2, "t3": 3}.get(ext, 99) * A
+    smin, px, k, armed = 999.0, None, 0, False
+    for k, j in enumerate(range(j0, min(j0 + 61, 390))):
+        if (l[j] <= sp) if Lg else (h[j] >= sp):
+            px = sp - d * FUT_TICK  # stop fills a tick worse
+            break
+        if ext in ("t1", "t2", "t3") and ((h[j] >= tg) if Lg else (l[j] <= tg)):
+            px = tg
+            break
+        if ext == "tl":
+            if not armed and ((c[j] > ef[j]) if Lg else (c[j] < ef[j])):
+                armed = True  # price crossed the trend line your way; from here a close back through it is the exit
+            elif armed and ((c[j] < ef[j]) if Lg else (c[j] > ef[j])):
+                px = float(c[j]) - d * FUT_TICK
                 break
-            except Exception as e:  # noqa: BLE001
-                print(f"  option bars {day} retry {attempt + 1}: {str(e)[:120]}", flush=True)
-                time.sleep(4 * (attempt + 1))
-        if df is None or not len(df) or not isinstance(df.index, pd.MultiIndex):
-            continue
-        for sym, g in df.groupby(level=0):
-            g = g.droplevel(0)
-            ix = g.index.tz_convert(NY)
-            mm = (ix.hour * 60 + ix.minute - 570).to_numpy()
-            ok = (mm >= 0) & (mm < 390)
-            rec = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
-            for col in rec:
-                rec[col][mm[ok]] = g[col].to_numpy()[ok]
-            out[sym] = rec
-    return out
+        if ext == "fg":
+            smin = min(smin, float(S_[j]))
+            if k >= 1 and smin <= 20 and S_[j] >= smin + 3:
+                px = float(c[j]) - d * FUT_TICK
+                break
+        if (ext == "m15" and k >= 15) or (ext == "m30" and k >= 30):
+            px = float(c[j]) - d * FUT_TICK
+            break
+    if px is None:
+        px = float(c[min(j0 + 60, 389)]) - d * FUT_TICK
+    pnl = (px - e) * d - FUT_TICK  # entry slippage one tick
+    usd = pnl * FUT_MULT - FUT_FEE
+    return usd, usd / (risk * FUT_MULT + FUT_FEE), k
 
 
-
-# ------------------------- RAW BARS EXPORT (for the Edge Stress Test) -------------------------
-# Saves SPY 1-minute bars and every nearby 0DTE call/put's 1-minute bars for the days in BARS_DAYS
-# (comma list, e.g. 2026-11-09) to results/bars_<day>.json. Data only, no orders.
-def bars_main():
-    from alpaca.data.historical import OptionHistoricalDataClient
-    import json as _j
+def fut_main():
     os.makedirs(OUT, exist_ok=True)
-    days = [d.strip() for d in (os.getenv("BARS_DAYS", "") or datetime.now(NY).strftime("%Y-%m-%d")).split(",") if d.strip()]
-    oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
-    for ds in days:
-        day = pd.Timestamp(ds).date()
-        st = pd.Timestamp(ds, tz=NY) + pd.Timedelta(hours=9)
-        df1, feed = fetch_1m("SPY", st.tz_convert("UTC").to_pydatetime(), (st + pd.Timedelta(hours=8)).tz_convert("UTC").to_pydatetime())
-        g = df1[(df1.index.tz_convert(NY).date == day)]
-        hm = g.index.tz_convert(NY).hour * 100 + g.index.tz_convert(NY).minute
-        g = g[(hm >= 930) & (hm < 1600)]
-        lo, hi = math.floor(g["low"].min()) - 2, math.ceil(g["high"].max()) + 2
-        syms = [dots_occ(day, cp, k) for k in range(lo, hi + 1) for cp in ("C", "P")]
-        opt = dots_fetch_options(oc, syms, day)
-        out = {"day": ds, "feed": feed,
-               "spy": [[ix.tz_convert(NY).isoformat(), float(r.open), float(r.high), float(r.low), float(r.close), float(getattr(r, "volume", 0) or 0)] for ix, r in g.iterrows()],
-               "opt": {s: [[i, float(v["open"][i]), float(v["high"][i]), float(v["low"][i]), float(v["close"][i])] for i in range(390) if v["close"][i] > 0] for s, v in opt.items()}}
-        with open(f"{OUT}/bars_{ds}.json", "w") as f:
-            _j.dump(out, f)
-        print(f"{ds}: SPY {len(out['spy'])} bars, {len(out['opt'])} contracts, strikes {lo}-{hi}", flush=True)
+    t0 = time.time()
+    months = float(os.getenv("DOTS_MONTHS", "12") or 12)
+    now = datetime.now(timezone.utc) - timedelta(minutes=20)
+    start = now - timedelta(days=int(months * 30.5) + 5)
+    mid = (now - timedelta(days=int(months * 30.5 / 2))).astimezone(NY).date()
+    print(f"DOTS ON FUTURES: {start:%Y-%m-%d} -> {now:%Y-%m-%d}", flush=True)
+    df1, feed = fetch_1m("SPY", start, now)
+    rows = []
+    for day, gall in df1.groupby(df1.index.date):
+        hmd = gall.index.hour * 100 + gall.index.minute
+        g = gall[(hmd >= 930) & (hmd < 1600)]
+        if len(g) < 300:
+            continue
+        sess = {col: np.full(390, np.nan) for col in ("open", "high", "low", "close")}
+        mm = (g.index.hour * 60 + g.index.minute - 570).to_numpy()
+        ok = (mm >= 0) & (mm < 390)
+        for col in sess:
+            sess[col][mm[ok]] = g[col].to_numpy()[ok]
+        for col in sess:
+            sess[col] = pd.Series(sess[col]).fillna(pd.Series(sess["close"]).ffill()).bfill().to_numpy()
+        vol = np.zeros(390)
+        if "volume" in g:
+            vol[mm[ok]] = np.nan_to_num(g["volume"].to_numpy()[ok])
+        o, h, l, c = sess["open"], sess["high"], sess["low"], sess["close"]
+        h2, l2 = dots_clean(o, h, l, c)
+        sess["high"], sess["low"] = h2, l2
+        ind = dots_compute(o, h2, l2, c)
+        PG = t7_page_states(o, h2, l2, c, vol, ind)
+        ef = dots_ema(c, 13)
+        dots = [s for s in dots_signals(o, h2, l2, c, ind) if s["kind"] == "stall" and 5 <= s["i"] < 380]
+        for s in dots:
+            i, Lg = s["i"], s["side"] == "long"
+            dd = 1 if Lg else -1
+            S_, O_ = (ind["F"], ind["G"]) if Lg else (ind["G"], ind["F"])
+            SA = ind["fA"] if Lg else ind["gA"]
+            feat = dict(day=day, half="2nd half" if day >= mid else "1st half", am=i < 210, side=s["side"],
+                        busy=100 * ind["A"][i] / c[i] >= 0.048, calm=(h2[:i + 1].max() - l2[:i + 1].min()) / max(ind["A"][i], 1e-6) <= 11.5,
+                        trend_way=dd * PG["col"][i] > 0, pegged=S_[max(0, i - 6):i + 1].max() >= 95 and O_[max(0, i - 10):i + 1].min() <= 10,
+                        rules=bool(S_[max(0, i - 10):i + 1].max() >= 90 and (S_[max(0, i - 2):i + 1] >= 80).sum() >= 2 and SA[i] < SA[i - 1] and i >= 30))
+            for en, ent in FUT_ENTRIES.items():
+                for sn, stp in FUT_STOPS.items():
+                    for xn, ext in FUT_EXITS.items():
+                        r = fut_trade(sess, ind, ef, i, Lg, ent, stp, ext)
+                        if r is None:
+                            continue
+                        rows.append(dict(feat, entry=en, stop=sn, exit=xn, usd=r[0], R=r[1], mins=r[2]))
+        print(f"  {day}: dots {len(dots)}, {time.time() - t0:.0f}s", flush=True)
+    F = pd.DataFrame(rows)
+    nd = max(F.day.nunique(), 1)
+    F.to_csv(f"{OUT}/dots_futures.csv", index=False)
+
+    def stats(t):
+        t = t.sort_values("day")
+        eq = t.usd.cumsum()
+        dd = float((eq - eq.cummax()).min()) if len(eq) else 0.0
+        gw, gl = t.usd[t.usd > 0].sum(), -t.usd[t.usd < 0].sum()
+        hv = [t[t.half == hf].usd.mean() for hf in ("1st half", "2nd half")]
+        return (f"{len(t) / nd:.1f} | {100 * (t.usd > 0).mean():.0f}% | ${t.usd.mean():+.2f} | {t.R.mean():+.2f}R | "
+                f"{(gw / gl if gl > 0 else float('inf')):.2f} | ${hv[0]:+.2f} / ${hv[1]:+.2f} | ${t.usd.sum() / nd:+.1f} | ${dd:,.0f} | {t.mins.mean():.0f}m")
+    hdr = "| Trades/day | Win rate | Avg $/trade | Avg R | Profit factor | 1st half / 2nd half ($/trade) | $/day | Worst drawdown | Avg hold |"
+    L = ["# Dots on futures (MES)", "",
+         f"Feed {feed}. {F.day.min()} to {F.day.max()}, {nd} days. SPY 1-minute bars stand in for MES: $1 of SPY = $50 per MES contract.",
+         "Every white dot, 1 MES contract, one trade per dot (overlaps allowed). Costs: 1 tick slippage in and out, stops fill 1 tick worse, $1.24 fees round trip.",
+         "R = result divided by the money at risk to the stop. Max hold 60 min. Worst drawdown = biggest dip in the running total over the year, 1 contract.", ""]
+    for en in FUT_ENTRIES:
+        L += [f"## Every stop x exit, every dot ({en})", "", "| Stop | Exit " + hdr, "|---|---|---|---|---|---|---|---|---|---|---|"]
+        x = F[F.entry == en]
+        for sn in FUT_STOPS:
+            for xn in FUT_EXITS:
+                t = x[(x.stop == sn) & (x.exit == xn)]
+                if len(t):
+                    L.append(f"| {sn} | {xn} | " + stats(t) + " |")
+        L.append("")
+    grp = F.groupby(["entry", "stop", "exit"]).usd.mean().sort_values(ascending=False)
+    top = list(grp.index[:3])
+    filters = [("every dot", lambda t: t.day == t.day), ("before 1:00", lambda t: t.am), ("busy day", lambda t: t.busy), ("day not stretched", lambda t: t.calm),
+               ("trend line your way", lambda t: t.trend_way), ("busy + trend line your way", lambda t: t.busy & t.trend_way),
+               ("pegged + other side bottomed", lambda t: t.pegged), ("pegged + calm day", lambda t: t.pegged & t.calm),
+               ("your rules: 10:00+, stressed, solid fear, averages turned", lambda t: t.rules), ("calls only", lambda t: t.side == "long"), ("puts only", lambda t: t.side == "short")]
+    for (en, sn, xn) in top:
+        L += [f"## Filters on: {en} · stop {sn} · exit {xn}", "", "| Filter " + hdr, "|---|---|---|---|---|---|---|---|---|---|"]
+        x = F[(F.entry == en) & (F.stop == sn) & (F.exit == xn)]
+        for nm, fn in filters:
+            t = x[fn(x).astype(bool)]
+            if len(t) >= 20:
+                L.append(f"| {nm} | " + stats(t) + " |")
+        L.append("")
+    L += ["How to read it: a setup has an edge on futures only if Avg $/trade is positive in BOTH halves after costs.",
+          "$/day is per MES contract with every qualifying dot taken; you'd take fewer, one at a time."]
+    with open(f"{OUT}/DOTS_FUTURES.md", "w") as f:
+        f.write("\n".join(L) + "\n")
+    print("\n".join(L), flush=True)
+    print(f"total {time.time() - t0:.0f}s", flush=True)
 
 
 if __name__ == "__main__" and os.getenv("DOTS", "1").strip() == "1":
-    bars_main()
+    fut_main()
     sys.exit(0)
-# ===================================== END RAW BARS EXPORT ===========================================
+# ======================================= END DOTS ON FUTURES BLOCK ===============================================
 
 
 def fake_1m(symbol, start, end):
