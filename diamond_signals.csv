@@ -400,3 +400,9 @@ date,candle,closed,seen,book,ticker,tf,diamond,candle_close,spot,swing_stop,acti
 2026-11-13,14:30,14:33,14:33:06,TUNED,QQQ,3,RED,679.06,678.86,680.34,outside the entry window (9:45-14:30),3.04,2.96,71.4,66.6,56.8,same candle,2.8
 2026-11-13,14:58,15:00,15:00:06,YOURS,SPY,2,GREEN,753.65,753.68,752.42,outside the entry window (9:45-14:30),1.7,1.03,80.5,53.0,48.8,same candle,1.26
 2026-11-13,14:58,15:00,15:00:06,YOURS,QQQ,2,GREEN,679.75,679.75,678.08,outside the entry window (9:45-14:30),2.43,1.77,81.7,55.9,52.9,same candle,2.16
+2026-11-13,15:37,15:38,15:38:06,YOURS,QQQ,1,GREEN,678.96,678.96,678.43,outside the entry window (9:45-14:30),2.09,2.0,59.6,52.7,21.3,same candle,1.27
+2026-11-13,15:38,15:39,15:39:06,YOURS,SPY,1,GREEN,752.56,752.56,752.44,outside the entry window (9:45-14:30),2.13,2.07,76.3,82.2,30.7,VIX FIX first,1.13
+2026-11-13,15:42,15:43,15:43:06,YOURS,SPY,1,GREEN,752.68,752.73,752.31,outside the entry window (9:45-14:30),2.15,2.01,82.9,76.3,23.8,TTM first,1.23
+2026-11-13,15:45,15:46,15:46:06,TUNED,QQQ,1,GREEN,679.05,679.05,678.31,outside the entry window (9:45-14:30),3.16,2.62,73.3,57.8,34.7,same candle,1.23
+2026-11-13,15:48,15:50,15:50:06,YOURS,SPY,2,GREEN,753.44,753.66,752.31,outside the entry window (9:45-14:30),1.48,1.25,74.3,54.2,55.1,VIX FIX first,1.38
+2026-11-13,15:48,15:50,15:50:06,YOURS,QQQ,2,GREEN,679.9,680.26,678.31,outside the entry window (9:45-14:30),1.25,0.95,55.6,25.1,54.3,VIX FIX first,1.59
