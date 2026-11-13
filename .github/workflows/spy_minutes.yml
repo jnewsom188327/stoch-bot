@@ -1,0 +1,42 @@
+name: SPY 1-minute history (data only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Pull one year of SPY 1-minute bars (no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          from bars_daily import fetch_1m
+          end = datetime.now(timezone.utc) - timedelta(minutes=20)
+          start = datetime(2025, 10, 20, tzinfo=timezone.utc)
+          df, feed = fetch_1m("SPY", start, end)
+          df = df.between_time("09:30", "15:59")
+          df.index.name = "t"
+          os.makedirs("results", exist_ok=True)
+          df.round(4).to_csv("results/spy_1m.csv.gz", compression="gzip")
+          print(len(df), "bars", df.index[0], "->", df.index[-1], "feed", feed)
+          PY
+      - name: Save
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          git add results/spy_1m.csv.gz
+          if ! git diff --cached --quiet; then
+            git commit -m "SPY 1-minute history"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
