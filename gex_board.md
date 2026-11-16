@@ -1,4 +1,4 @@
-# GEX + FLOW SCAN - Mon Nov 16, 03:40 PM ET
+# GEX + FLOW SCAN - Mon Nov 16, 03:50 PM ET
 Log only, no orders. Options feed: indicative. Flow = real time (volume change x price). FIRE = score 45+ with a bias: the bot picks the 0.40-0.80 contract with the most juice for the move and follows its real bid for 60 minutes. Score and fires are being graded, not proven.
 
 ## 1m RULES on SPY / QQQ - loose (0 signals today, last 10)
