@@ -1,9 +1,9 @@
-# GEX + FLOW SCAN - Mon Nov 16, 01:00 PM ET
+# GEX + FLOW SCAN - Mon Nov 16, 01:10 PM ET
 Log only, no orders. Options feed: indicative. Flow = real time (volume change x price). FIRE = score 45+ with a bias: the bot picks the 0.40-0.80 contract with the most juice for the move and follows its real bid for 60 minutes. Score and fires are being graded, not proven.
 
 ## 1m RULES on SPY / QQQ - loose (0 signals today, last 10)
 Whipsaw (R1, +R2 TTM with/turning, +R5 near VWAP, +R6 both) and failed pop (R3, +R4 TTM not turning away). Every signal fires if a 0-1 DTE contract qualifies. Full list: gex_rules.csv.
-Last 1m check 13:00:08 ET, last candle  | **ERROR: 1m candles: <html>
+Last 1m check 13:10:08 ET, last candle  | **ERROR: 1m candles: <html>
 <head><title>401 Authorization Required</title></head>
 <body>
 <center><h1>401 Authorization Required</h1></cen**
