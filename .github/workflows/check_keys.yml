@@ -1,0 +1,21 @@
+name: Check Alpaca keys (shows no secrets)
+on:
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check
+        env:
+          K: ${{ secrets.ALPACA_KEY }}
+          S: ${{ secrets.ALPACA_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import os
+          for name in ("K", "S"):
+              v = os.environ.get(name, "")
+              label = "ALPACA_KEY" if name == "K" else "ALPACA_SECRET"
+              print(label, "length", len(v), "| starts with", v[:2] if name == "K" else "--",
+                    "| only letters and numbers:", v.strip().isalnum() and v.strip().isascii(),
+                    "| spaces at the ends:", v != v.strip())
+          PY
