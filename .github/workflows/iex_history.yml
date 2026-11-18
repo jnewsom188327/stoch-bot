@@ -1,0 +1,72 @@
+name: IEX price history (data only)
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "tickers, comma separated"
+        default: "SPY,QQQ"
+      start:
+        description: "first day"
+        default: "2025-10-20"
+permissions:
+  contents: write
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Pull IEX 1-minute prices (the same feed the Fire bot reads live - no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          SYMS: ${{ github.event.inputs.symbols }}
+          START: ${{ github.event.inputs.start }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          import pandas as pd
+          from alpaca.data.enums import Adjustment, DataFeed
+          from alpaca.data.historical import StockHistoricalDataClient
+          from alpaca.data.requests import StockBarsRequest
+          from alpaca.data.timeframe import TimeFrame
+          client = StockHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+          start = datetime.fromisoformat((os.getenv("START") or "2025-10-20").strip()).replace(tzinfo=timezone.utc)
+          end = datetime.now(timezone.utc) - timedelta(minutes=20)
+          for sym in [s.strip().upper() for s in (os.getenv("SYMS") or "SPY,QQQ").split(",") if s.strip()]:
+              parts, cur = [], start
+              while cur < end:
+                  nxt = min(cur + timedelta(days=60), end)
+                  df = client.get_stock_bars(StockBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Minute, start=cur, end=nxt,
+                                                              feed=DataFeed.IEX, adjustment=Adjustment.SPLIT)).df
+                  if len(df):
+                      parts.append(df)
+                  print(f"{sym} IEX {cur:%Y-%m-%d} -> {nxt:%Y-%m-%d}: {len(df):,} bars", flush=True)
+                  cur = nxt
+              df = pd.concat(parts)
+              if isinstance(df.index, pd.MultiIndex):
+                  df = df.reset_index(level=0, drop=True)
+              df = df[~df.index.duplicated()].sort_index()
+              df.index = df.index.tz_convert("America/New_York")
+              df = df.between_time("09:30", "15:59")[["open", "high", "low", "close", "volume"]].astype(float)
+              df.index.name = "t"
+              path = f"results/{sym.lower()}_1m_iex.csv.gz"
+              df.round(4).to_csv(path, compression="gzip")
+              print(f"{sym}: saved {len(df):,} bars, {df.index[0]:%Y-%m-%d} to {df.index[-1]:%Y-%m-%d} -> {path}", flush=True)
+          PY
+      - name: Save
+        if: always()
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          git add results/*_1m_iex.csv.gz 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "IEX price history"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
