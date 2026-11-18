@@ -110,7 +110,7 @@ def main():
         if day.weekday() >= 5:
             print(f"{ds}: weekend, skipped"); continue
         st = pd.Timestamp(ds, tz=NY) + pd.Timedelta(hours=9)
-        df1, feed = fetch_1m("SPY", st.tz_convert("UTC").to_pydatetime(), (st + pd.Timedelta(hours=8)).tz_convert("UTC").to_pydatetime())
+        df1, feed = fetch_1m("SPY", st.tz_convert("UTC").to_pydatetime(), min(st + pd.Timedelta(hours=7), pd.Timestamp.now(tz=NY) - pd.Timedelta(minutes=16)).tz_convert("UTC").to_pydatetime())
         g = df1[(df1.index.tz_convert(NY).date == day)]
         hm = g.index.tz_convert(NY).hour * 100 + g.index.tz_convert(NY).minute
         g = g[(hm >= 930) & (hm < 1600)]
