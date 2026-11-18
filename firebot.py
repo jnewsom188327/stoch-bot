@@ -200,6 +200,8 @@ def today_1m(dc, sym, today):
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
     start = datetime.combine(today, datetime.min.time(), ET).replace(hour=9, minute=30).astimezone(timezone.utc)
+    if now_et().astimezone(timezone.utc) <= start:
+        return None
     req = StockBarsRequest(symbol_or_symbols=[sym], timeframe=TimeFrame.Minute, start=start,
                            end=now_et().astimezone(timezone.utc), feed=DataFeed.IEX)
     df = dc.get_stock_bars(req).df
