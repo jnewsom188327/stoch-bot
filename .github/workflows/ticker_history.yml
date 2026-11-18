@@ -1,0 +1,115 @@
+name: Any ticker history (data only)
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "ticker, e.g. META"
+        default: "META"
+      start:
+        description: "first day (Alpaca options data starts Feb 2024)"
+        default: "2024-02-01"
+permissions:
+  contents: write
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 175
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Pull prices and options (no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          SYM: ${{ github.event.inputs.symbol }}
+          START: ${{ github.event.inputs.start }}
+        run: |
+          python - <<'EOF'
+          import gzip, json, math, os, time
+          from datetime import datetime, timedelta, timezone
+          import pandas as pd
+          from bars_daily import fetch_1m
+          from alpaca.data.historical import OptionHistoricalDataClient
+          from alpaca.data.requests import OptionBarsRequest
+          from alpaca.data.timeframe import TimeFrame
+          NY = "America/New_York"
+          SYM = os.getenv("SYM", "META").strip().upper()
+          START = os.getenv("START", "2024-02-01").strip() or "2024-02-01"
+          CSV, OUT = f"results/{SYM.lower()}_1m.csv.gz", f"results/opt_{SYM.lower()}"
+          oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+          t0 = time.time()
+          if not os.path.exists(CSV):
+              end = datetime.now(timezone.utc) - timedelta(minutes=20)
+              df, feed = fetch_1m(SYM, datetime.fromisoformat(START).replace(tzinfo=timezone.utc), end)
+              df = df.between_time("09:30", "15:59")
+              df.index.name = "t"
+              df.round(4).to_csv(CSV, compression="gzip")
+              print(SYM, len(df), "bars", feed, flush=True)
+          bars = pd.read_csv(CSV)
+          bars["day"] = bars["t"].str[:10]
+          days = sorted(bars["day"].unique())
+          os.makedirs(OUT, exist_ok=True)
+          done = True
+          for day in days:
+              if os.path.exists(f"{OUT}/{day}.json.gz"):
+                  continue
+              if time.time() - t0 > 160 * 60:
+                  done = False
+                  break
+              g = bars[bars["day"] == day]
+              px = float(g["close"].iloc[-1])
+              step = 0.5 if px < 50 else 1.0 if px < 150 else 2.5 if px < 1000 else 5.0
+              exps, d = [], pd.Timestamp(day)
+              while len(exps) < 5:                     # today + the next 4 weekdays (catches daily, M/W/F and weekly expirations)
+                  if d.weekday() < 5:
+                      exps.append(d)
+                  d += timedelta(days=1)
+              lo = math.floor((g["low"].min() * 0.985) / step) * step
+              hi = math.ceil((g["high"].max() * 1.015) / step) * step
+              strikes = [round(lo + i * step, 2) for i in range(int(round((hi - lo) / step)) + 1)]
+              syms = [f"{SYM}{e:%y%m%d}{cp}{int(round(K * 1000)):08d}" for e in exps for cp in "CP" for K in strikes]
+              start = pd.Timestamp(day).tz_localize(NY) + pd.Timedelta(hours=9, minutes=30)
+              stop = start + pd.Timedelta(minutes=391)
+              out = {}
+              for k0 in range(0, len(syms), 100):
+                  res = None
+                  for attempt in range(5):
+                      try:
+                          res = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=syms[k0:k0 + 100], timeframe=TimeFrame.Minute,
+                                                                     start=start.tz_convert("UTC").to_pydatetime(),
+                                                                     end=stop.tz_convert("UTC").to_pydatetime())).df
+                          break
+                      except Exception as e:
+                          print(f"  {day} failed ({attempt + 1}/5): {str(e)[:200]}", flush=True)
+                          time.sleep(5 * (attempt + 1))
+                  if res is None or not len(res) or not isinstance(res.index, pd.MultiIndex):
+                      continue
+                  for s_, b in res.groupby(level=0):
+                      b = b.droplevel(0)
+                      b.index = b.index.tz_convert(NY)
+                      i = ((b.index - start) / pd.Timedelta(minutes=1)).astype(int)
+                      rows = [[int(k), round(float(r.open), 2), round(float(r.high), 2), round(float(r.low), 2), round(float(r.close), 2), int(r.volume)]
+                              for k, r in zip(i, b.itertuples()) if 0 <= k < 390]
+                      if rows:
+                          out[s_] = rows
+              with gzip.open(f"{OUT}/{day}.json.gz", "wt") as f:
+                  json.dump({"day": day, "opt": out}, f, separators=(",", ":"))
+              print(f"{SYM} {day}: {len(out)} of {len(syms)} contracts ({time.time() - t0:.0f}s)", flush=True)
+          left = [x for x in days if not os.path.exists(f"{OUT}/{x}.json.gz")]
+          print("FINISHED - all days saved" if not left else f"{len(left)} days left - run it again", flush=True)
+          EOF
+      - name: Save
+        if: always()
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          S=$(echo "${{ github.event.inputs.symbol }}" | tr '[:upper:]' '[:lower:]')
+          git add "results/${S}_1m.csv.gz" "results/opt_${S}" 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "${S} history"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
