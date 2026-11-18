@@ -1,0 +1,100 @@
+name: Older QQQ history Feb 2024 - Oct 2025 (data only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 175
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Pull older QQQ and option prices (no orders)
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+        run: |
+          python - <<'EOF'
+          import gzip, json, math, os, time
+          from datetime import datetime, timedelta, timezone
+          import pandas as pd
+          from bars_daily import fetch_1m
+          from alpaca.data.historical import OptionHistoricalDataClient
+          from alpaca.data.requests import OptionBarsRequest
+          from alpaca.data.timeframe import TimeFrame
+          NY = "America/New_York"
+          SYM, START, END = "QQQ", "2024-02-01", "2025-11-01"
+          CSV, OUT = "results/qqq_1m_old.csv.gz", "results/opt_qqq_old"
+          oc = OptionHistoricalDataClient(os.getenv("ALPACA_KEY", "").strip(), os.getenv("ALPACA_SECRET", "").strip())
+          t0 = time.time()
+          if not os.path.exists(CSV):
+              df, feed = fetch_1m(SYM, datetime.fromisoformat(START).replace(tzinfo=timezone.utc),
+                                  datetime.fromisoformat(END).replace(tzinfo=timezone.utc))
+              df = df.between_time("09:30", "15:59")
+              df.index.name = "t"
+              df.round(4).to_csv(CSV, compression="gzip")
+              print(SYM, len(df), "bars", feed, flush=True)
+          bars = pd.read_csv(CSV)
+          bars["day"] = bars["t"].str[:10]
+          days = sorted(bars["day"].unique())
+          os.makedirs(OUT, exist_ok=True)
+          for n, day in enumerate(days):
+              if os.path.exists(f"{OUT}/{day}.json.gz"):
+                  continue
+              g = bars[bars["day"] == day]
+              nxt = days[n + 1] if n + 1 < len(days) else None
+              if nxt is None:
+                  d = pd.Timestamp(day) + timedelta(days=1)
+                  while d.weekday() >= 5:
+                      d += timedelta(days=1)
+                  nxt = f"{d:%Y-%m-%d}"
+              lo, hi = math.floor(g["low"].min()) - 3, math.ceil(g["high"].max()) + 3
+              syms = [f"{SYM}{pd.Timestamp(e):%y%m%d}{cp}{K * 1000:08d}" for e in (day, nxt) for cp in "CP" for K in range(lo, hi + 1)]
+              start = pd.Timestamp(day).tz_localize(NY) + pd.Timedelta(hours=9, minutes=30)
+              stop = start + pd.Timedelta(minutes=391)
+              out = {}
+              for k0 in range(0, len(syms), 60):
+                  res = None
+                  for attempt in range(5):
+                      try:
+                          res = oc.get_option_bars(OptionBarsRequest(symbol_or_symbols=syms[k0:k0 + 60], timeframe=TimeFrame.Minute,
+                                                                     start=start.tz_convert("UTC").to_pydatetime(),
+                                                                     end=stop.tz_convert("UTC").to_pydatetime())).df
+                          break
+                      except Exception as e:
+                          print(f"  {day} failed ({attempt + 1}/5): {str(e)[:200]}", flush=True)
+                          time.sleep(5 * (attempt + 1))
+                  if res is None or not len(res) or not isinstance(res.index, pd.MultiIndex):
+                      continue
+                  for s_, b in res.groupby(level=0):
+                      b = b.droplevel(0)
+                      b.index = b.index.tz_convert(NY)
+                      i = ((b.index - start) / pd.Timedelta(minutes=1)).astype(int)
+                      rows = [[int(k), round(float(r.open), 2), round(float(r.high), 2), round(float(r.low), 2), round(float(r.close), 2), int(r.volume)]
+                              for k, r in zip(i, b.itertuples()) if 0 <= k < 390]
+                      if rows:
+                          out[s_] = rows
+              with gzip.open(f"{OUT}/{day}.json.gz", "wt") as f:
+                  json.dump({"day": day, "exp1": nxt, "opt": out}, f, separators=(",", ":"))
+              print(f"{day}: {len(out)} of {len(syms)} contracts ({time.time() - t0:.0f}s)", flush=True)
+              if time.time() - t0 > 160 * 60:
+                  print("Time limit reached - run it again to continue.", flush=True)
+                  break
+          left = [d for d in days if not os.path.exists(f"{OUT}/{d}.json.gz")]
+          print("FINISHED - all days saved" if not left else f"{len(left)} days left - run it again", flush=True)
+          EOF
+      - name: Save
+        if: always()
+        run: |
+          git config user.name "stoch-bot"
+          git config user.email "stoch-bot@users.noreply.github.com"
+          git add results/qqq_1m_old.csv.gz results/opt_qqq_old 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "older QQQ history"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
