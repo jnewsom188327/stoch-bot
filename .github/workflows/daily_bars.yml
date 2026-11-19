@@ -25,6 +25,7 @@ jobs:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           DAYS_IN: ${{ inputs.days }}
+          MIN_BARS: "100"
         run: |
           if [ -n "$DAYS_IN" ]; then
             export BARS_DAYS="$DAYS_IN"

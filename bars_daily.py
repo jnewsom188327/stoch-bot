@@ -114,7 +114,7 @@ def main():
         g = df1[(df1.index.tz_convert(NY).date == day)]
         hm = g.index.tz_convert(NY).hour * 100 + g.index.tz_convert(NY).minute
         g = g[(hm >= 930) & (hm < 1600)]
-        if len(g) < 300:
+        if len(g) < int(os.getenv("MIN_BARS", "300")):
             print(f"{ds}: only {len(g)} SPY bars (holiday or half day?), skipped"); continue
         lo, hi = math.floor(g["low"].min()) - 2, math.ceil(g["high"].max()) + 2
         syms = [dots_occ(day, cp, k) for k in range(lo, hi + 1) for cp in ("C", "P")]
