@@ -61,9 +61,47 @@ async function main() {
     }
   }
 
+  // Robinhood agent account too, when the bot trades there
+  let rhLines = [];
+  if ((process.env.SPY0DTE_BROKER || "").toLowerCase() === "robinhood") {
+    try {
+      const { RobinhoodBroker } = require("./rh");
+      const br = new RobinhoodBroker({ accountNumber: process.env.RH_ACCOUNT || "", log });
+      await br.setup();
+      const rpos = await br.openOptionPositions();
+      log("safety_check_robinhood", { account: "…" + br.acct.slice(-4), optionPositions: rpos.map((x) => `${x.chain_symbol} ${x.option_id.slice(0, 8)} x${x.quantity} ${x.type}`) });
+      for (const pz of rpos) {
+        try {
+          for (const o of (await br.openOptionOrders()).filter((o) => (o.legs || []).some((l) => l.option_id === pz.option_id))) {
+            await br.cancel(o.id);
+            log("cancelled_order", { broker: "robinhood", orderId: o.id, type: o.type, trigger: o.trigger });
+          }
+          const side = pz.type === "short" ? "buy" : "sell";
+          let left = Math.round(Math.abs(+pz.quantity));
+          for (let tries = 0; tries < 8 && left > 0; tries++) {
+            const q = await br.optionBid(pz.option_id);
+            const px = q ? (side === "sell" ? q.bid : q.ask) : 0;
+            if (!(px > 0)) { log("no_price", { broker: "robinhood", option: pz.option_id }); await sleep(5000); continue; }
+            const id = await br.placeById({ option_id: pz.option_id, side, qty: left, limit: r2(px) });
+            log("order_close", { broker: "robinhood", side, qty: left, limit: r2(px) });
+            await sleep(5000);
+            let st = await br.order(id);
+            if (st.status !== "FILLED") st = await br.cancel(id);
+            const f = Math.round(+(st.filledQuantity || 0));
+            if (f > 0) { left -= f; log("closed", { broker: "robinhood", qty: f, price: st.averagePrice }); }
+          }
+          if (left > 0) { problems++; log("STILL_OPEN", { broker: "robinhood", option: pz.option_id, qty: left, note: "CHECK YOUR ROBINHOOD APP" }); }
+        } catch (e) { problems++; log("ERROR", { broker: "robinhood", err: String(e.message || e).slice(0, 300), note: "CHECK YOUR ROBINHOOD APP" }); }
+      }
+      rhLines = rpos.length ? [`Robinhood agent account: closed ${rpos.length} open option position(s).`] : ["Robinhood agent account: no open option positions."];
+      if (rpos.length) positions.push(...rpos.map((x) => ({ instrument: { symbol: "Robinhood " + x.option_id.slice(0, 8) }, quantity: x.quantity })));
+    } catch (e) { problems++; log("ERROR", { broker: "robinhood", err: String(e.message || e).slice(0, 300), note: "CHECK YOUR ROBINHOOD APP" }); }
+  }
+
   const md = [
     `## Safety close · ${t.day} · ${etNow().hms} ET`,
     "",
+    ...rhLines,
     positions.length ? `Open option positions found: ${positions.map((x) => `${x.instrument.symbol} x${x.quantity}`).join(", ")}` : "No open option positions. Nothing to do.",
     ...lines.filter((l) => !["safety_check"].includes(l.event)).map((l) => `- ${l.at} ${l.event} ${JSON.stringify(Object.fromEntries(Object.entries(l).filter(([k]) => !["at", "event"].includes(k))))}`),
     problems ? "\n**⚠ Something is still open or errored. Check your Public account now.**" : "",

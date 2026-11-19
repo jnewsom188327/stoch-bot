@@ -53,7 +53,66 @@ function settle(o) {
   }
 }
 const calls = [];
+// ---------- fake Robinhood MCP (shapes copied from the real server's replies) ----------
+const RH = process.env.MOCK_BROKER === "robinhood";
+const rhState = { NEW: "confirmed", PENDING_NEW: "queued", FILLED: "filled", CANCELLED: "cancelled", REJECTED: "rejected" };
+const idToSym = (id) => id.replace(/^opt-/, "");
+function rhTool(name, a) {
+  const D = (data) => ({ data, guide: "" });
+  if (name === "get_accounts") return D({ accounts: [{ account_number: "5SM0MAIN", type: "margin", agentic_allowed: false, option_level: "option_level_3" }, { account_number: "528047145", type: "limited_margin", agentic_allowed: true, option_level: "option_level_3", nickname: "MCP" }] });
+  if (name === "get_trade_approval_setting") return D({ setting: { account_number: a.account_number, human_must_approve_trades: false } });
+  if (name === "get_option_chains") return D({ chains: [{ id: "chain-spy", symbol: "SPY", expiration_dates: [day] }] });
+  if (name === "get_option_instruments") {
+    const t = a.type === "call" ? "C" : "P";
+    const sym = "SPY" + a.expiration_dates.slice(2, 4) + a.expiration_dates.slice(5, 7) + a.expiration_dates.slice(8, 10) + t + String(Math.round(+a.strike_price * 1000)).padStart(8, "0");
+    return D({ instruments: [{ id: "opt-" + sym, expiration_date: a.expiration_dates, strike_price: a.strike_price, type: a.type, state: "active", tradability: "tradable" }] });
+  }
+  if (name === "get_portfolio") return D({ cash: "1000", buying_power: { buying_power: "1000.0000" } });
+  if (name === "place_option_order") {
+    const l = a.legs[0], id = "rh-" + (orders.size + 1);
+    const nowMin = (NOW - base) / 60000;
+    const tooEarly = a.type === "stop_market" && nowMin < 15;
+    orders.set(id, { orderId: id, instrument: { symbol: idToSym(l.option_id), type: "OPTION" }, orderSide: l.side.toUpperCase(), orderType: a.type === "stop_market" ? "STOP" : "LIMIT", quantity: a.quantity, limitPrice: a.price, stopPrice: a.stop_price, status: tooEarly ? "REJECTED" : process.env.MOCK_STOP_STUCK && a.type === "stop_market" ? "PENDING_NEW" : "NEW", placedMs: NOW });
+    return process.env.MOCK_NO_ID ? D({ message: "Order submitted" }) : D({ order: { id, state: "queued" } });
+  }
+  if (name === "get_option_orders" && !a.order_id) {
+    const list = [...orders.values()].filter((o) => (a.state_group !== "open" || ["NEW", "PENDING_NEW"].includes(o.status)) && (!a.created_at_gte || o.placedMs >= Date.parse(a.created_at_gte)));
+    return D({ orders: list.map((o) => ({ id: o.orderId, state: rhState[o.status], quantity: o.quantity, legs: [{ option_id: "opt-" + o.instrument.symbol, side: o.orderSide.toLowerCase() }] })) });
+  }
+  if (name === "get_option_orders") {
+    const o = orders.get(a.order_id);
+    if (!o) return D({ orders: [] });
+    settle(o);
+    const q = o.status === "FILLED" ? +o.quantity : 0;
+    return D({ orders: [{ id: o.orderId, state: rhState[o.status] || "confirmed", quantity: o.quantity, processed_quantity: String(q), processed_premium: q ? String(Math.round(q * 100 * +o.averagePrice)) : "", updated_at: new RealDate(NOW).toISOString(), legs: [{ option_id: "opt-" + o.instrument.symbol, executions: q ? [{ price: o.averagePrice, quantity: String(q), timestamp: o.filledAt }] : [] }] }] });
+  }
+  if (name === "cancel_option_order") { const o = orders.get(a.order_id); if (o && (o.status === "NEW" || o.status === "PENDING_NEW")) o.status = "CANCELLED"; return D({}); }
+  if (name === "get_option_positions") {
+    const sym = a.option_ids ? idToSym(a.option_ids) : null;
+    if (process.env.MOCK_BREAK && NOW >= base + 75 * 60000) return D({ positions: [] }); // 10:45: broker "loses" the position
+    return D({ positions: Object.entries(pos).filter(([s, q]) => q && (!sym || s === sym)).map(([s, q]) => ({ option_id: "opt-" + s, type: "long", quantity: String(q) })) });
+  }
+  throw new Error("fake RH: unknown tool " + name);
+}
+const realFetch = global.fetch;
 global.fetch = async (url, opts = {}) => {
+  const u0 = new URL(url);
+  if (u0.host === "api.robinhood.com") { calls.push("RH token"); return { ok: true, status: 200, headers: { get: () => "application/json" }, text: async () => JSON.stringify({ access_token: "at2", refresh_token: "rt2", expires_in: 3600 }) }; }
+  if (u0.host === "agent.robinhood.com") {
+    const msg = JSON.parse(opts.body);
+    calls.push("RH " + (msg.params && msg.params.name || msg.method));
+    const hdr = (ct) => ({ get: (k) => (k.toLowerCase() === "content-type" ? ct : k.toLowerCase() === "mcp-session-id" ? "sess-1" : null) });
+    if (!msg.id) return { ok: true, status: 202, headers: hdr("application/json"), text: async () => "" };
+    if (msg.method === "initialize") return { ok: true, status: 200, headers: hdr("application/json"), text: async () => JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "rh" } } }) };
+    let result;
+    try { result = { content: [{ type: "text", text: JSON.stringify(rhTool(msg.params.name, msg.params.arguments)) }] }; }
+    catch (e) { result = { isError: true, content: [{ type: "text", text: String(e.message) }] }; }
+    const sse = `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result })}\n\n`;
+    return { ok: true, status: 200, headers: hdr("text/event-stream"), text: async () => sse };
+  }
+  return publicFetch(url, opts);
+};
+async function publicFetch(url, opts = {}) {
   const u = new URL(url), p = u.pathname, m = opts.method || "GET", body = opts.body ? JSON.parse(opts.body) : null;
   calls.push(`${m} ${p}`);
   const ok = (j) => ({ ok: true, status: 200, text: async () => JSON.stringify(j) });
@@ -86,9 +145,14 @@ global.fetch = async (url, opts = {}) => {
     return ok(o);
   }
   return { ok: false, status: 400, text: async () => "unknown " + p };
-};
+}
 
 process.env.PUBLIC_API_SECRET = "fake";
+if (RH) {
+  process.env.SPY0DTE_BROKER = "robinhood";
+  process.env.RH_TOKEN_KEY = "test-key";
+  require(path.join(TMP, "rh.js")).saveTokens({ client_id: "c1", access_token: "at1", refresh_token: "rt1", expires_at: NOW + 3600e3 });
+}
 process.env.SPY0DTE_LIVE = mode === "live" ? "yes" : "";
 process.env.MODE = "run";
 process.on("exit", () => {

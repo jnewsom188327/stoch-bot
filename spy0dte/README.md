@@ -3,6 +3,11 @@
 Trades the Edge Stress Test white dots and pane arrows (SPY + call/put; arrows are not traded) on SPY 0DTE options through Public.
 **Starts in DRY RUN:** real Public prices, every decision made and logged, no orders sent.
 
+## Where orders go
+Prices always come from Public (so marks match the backtest). Orders go to:
+- **Public** (default), or
+- **Robinhood agent (MCP) account**: set repo variable `SPY0DTE_BROKER` = `robinhood`, then run the **Robinhood login** workflow once (it opens an issue with the sign-in link; paste the `http://localhost:1455/callback?...` address you land on as a comment). The login is saved encrypted in `spy0dte/rh_tokens.enc` and refreshes itself; if it ever expires, the summary says so: run the login again. On Robinhood the first entry is 9:45 (Robinhood refuses option stop orders before then) and trade approvals must be off for the agent account.
+
 ## Turn it on / off
 | What | Where |
 |---|---|
@@ -28,7 +33,7 @@ Runs by itself every weekday: starts 9:20 ET, works 9:25–3:10, posts a summary
 `SPY 0DTE safety close` checks the Public account every weekday at 3:30 PM ET and closes **any** open option position (not just the bot's), cancelling that contract's open orders first, then a limit at the bid. It runs whether or not the bot is running, and acts on the real account even in dry run. It opens a GitHub issue only if it had to close something or something failed. Off switch: repo variable `SPY0DTE_SAFETY` = `off`.
 
 ## Files
-`bot.js` the minute loop · `engine.js` rules · `marks.js` live marks · `core.js` loads CORE from `build_day.js` · `public.js` API · `ledger.js` money · `summary.js` daily report · `safety.js` 3:30 safety close
+`bot.js` the minute loop · `engine.js` rules · `marks.js` live marks · `core.js` loads CORE from `build_day.js` · `public.js` API · `ledger.js` money · `summary.js` daily report · `rh.js` Robinhood broker + login store · `rh_login.js` one-time sign-in · `safety.js` 3:30 safety close
 State: `state.json` · logs: `logs/<day>.jsonl` · `trades.csv` · `summaries/<day>.md`
 
 ## Tests (no key needed)

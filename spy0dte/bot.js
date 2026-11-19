@@ -12,6 +12,7 @@ const { writeSummary } = require("./summary");
 const DIR = __dirname;
 const STATE = path.join(DIR, "state.json");
 const LIVE = process.env.SPY0DTE_LIVE === "yes";
+const BROKER = (process.env.SPY0DTE_BROKER || "public").toLowerCase(); // where orders go: public | robinhood (prices always from Public)
 const MODE = process.env.MODE || "run"; // run | check
 const HALF_DAYS = { "2026-11-27": true, "2026-12-24": true, "2027-11-26": true, "2027-12-24": true }; // 1:00 PM closes
 
@@ -52,13 +53,20 @@ async function main() {
 
   const api = new PublicAPI(process.env.PUBLIC_API_SECRET, { accountId: process.env.PUBLIC_ACCOUNT_ID || "" });
   await api.auth();
-  log("start", { mode: LIVE ? "LIVE" : "DRY RUN", account: "…" + String(api.accountId).slice(-4), balance: st.balance });
+  let broker = api;
+  if (BROKER === "robinhood") {
+    const { RobinhoodBroker } = require("./rh");
+    broker = new RobinhoodBroker({ accountNumber: process.env.RH_ACCOUNT || "", log });
+    const info = await broker.setup();
+    log("robinhood", { account: "…" + info.account.slice(-4), type: info.type, optionLevel: info.optionLevel });
+  }
+  log("start", { mode: LIVE ? "LIVE" : "DRY RUN", orders: BROKER, prices: "Public …" + String(api.accountId).slice(-4), balance: st.balance });
 
-  if (MODE === "check") return check(api, day, log);
+  if (MODE === "check") return check(api, day, log, broker);
 
   newDay(st, day);
   if (LIVE) { // live: the day starts from what's really in the account
-    st.balance = Math.round((await api.optionsBuyingPower()) * 100) / 100;
+    st.balance = Math.round((await broker.optionsBuyingPower()) * 100) / 100;
     st.dayStart = st.balance;
     log("buying_power", { optionsBuyingPower: st.balance });
   }
@@ -89,7 +97,9 @@ async function main() {
     optCache[sym] = closedOnly(await api.bars(sym, "OPTION"), nowReal).map((b) => ({ t: coreT(b), o: +b.open, h: +b.high, l: +b.low, c: +b.close }));
   };
 
-  const eng = new Engine({ state: st, market, broker: LIVE ? api : null, log, cfg: half ? { lastEntryTod: 90, flattenAtTod: 200 } : {} });
+  const cfg = half ? { lastEntryTod: 90, flattenAtTod: 200 } : {};
+  if (BROKER === "robinhood") cfg.firstEntryTod = 15; // Robinhood refuses option stop orders before 9:45
+  const eng = new Engine({ state: st, market, broker: LIVE ? broker : null, log, cfg });
   const endMin = half ? 13 * 60 : 15 * 60 + 10;
   const stats = { marks: 0, taken: 0, skipped: {} };
   let lastBarT = 0, sawToday = false, error = null;
@@ -145,7 +155,7 @@ async function main() {
     if (st.halt || st.reviewHold) {
       if (!eng.pos && !eng.pending) { log("done_for_day", { why: st.halt || st.reviewHold }); break; }
     }
-    await sleep(LIVE && (eng.pos || eng.pending) ? 3000 : 5000);
+    await sleep(LIVE && eng.pos ? 1500 : LIVE && eng.pending ? 3000 : 5000); // in a trade: watch the quote every 1.5 s
   }
   if (eng.pos || eng.pending) {
     try { await eng.flatten("end of the run"); } catch (e) { log("FLATTEN_FAILED", { err: String(e.message || e), note: "CHECK YOUR PUBLIC ACCOUNT" }); }
@@ -160,7 +170,17 @@ async function main() {
 }
 
 // MODE=check: proves the key works and shows what the bot sees, sends nothing
-async function check(api, day, log) {
+async function check(api, day, log, broker) {
+  if (broker && broker !== api) {
+    log("check_robinhood_buying_power", { buyingPower: await broker.optionsBuyingPower() });
+    const spy0 = await api.bars("SPY", "EQUITY");
+    const lastC = spy0.length ? +spy0[spy0.length - 1].close : 0;
+    if (lastC) {
+      const ex = (await broker.mcp.call("get_option_chains", { underlying_symbol: "SPY" })).chains.find((c) => c.symbol === "SPY").expiration_dates[0];
+      const sym = osi(ex, "C", Math.floor(lastC) + 1);
+      log("check_robinhood_contract", { sym, option_id: await broker.optionId(sym), positionQty: await broker.positionQty(sym) });
+    }
+  }
   const spy = await api.bars("SPY", "EQUITY");
   log("check_spy_bars", { count: spy.length, last: spy.length ? spy[spy.length - 1] : null });
   const last = spy[spy.length - 1];

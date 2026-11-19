@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Get the latest repo (Robinhood login)
+        run: git pull --ff-only origin main || true
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -29,9 +31,19 @@ jobs:
         env:
           PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
           PUBLIC_ACCOUNT_ID: ${{ vars.PUBLIC_ACCOUNT_ID }}
+          SPY0DTE_BROKER: ${{ vars.SPY0DTE_BROKER }}
+          RH_ACCOUNT: ${{ vars.RH_ACCOUNT }}
+          RH_TOKEN_KEY: ${{ secrets.RH_TOKEN_KEY }}
           SPY0DTE_SAFETY: ${{ vars.SPY0DTE_SAFETY }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && 'yes' || '' }}
         run: node spy0dte/safety.js
+      - name: Save the Robinhood login if it was refreshed
+        if: always()
+        run: |
+          git config user.name "spy0dte-bot"
+          git config user.email "spy0dte-bot@users.noreply.github.com"
+          git add spy0dte/rh_tokens.enc 2>/dev/null || true
+          if ! git diff --cached --quiet; then git commit -m "rh login refresh"; for i in 1 2 3; do git pull --rebase origin main && git push && break; sleep 5; done; fi
       - name: Tell you if it had to act (GitHub issue = phone notification)
         if: always()
         env:
