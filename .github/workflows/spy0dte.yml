@@ -1,0 +1,72 @@
+name: SPY 0DTE bot
+
+# Runs each market day 9:25 AM - 3:10 PM New York time, checking every minute.
+# DRY RUN unless the repo variable SPY0DTE_LIVE is set to exactly: yes
+on:
+  schedule:
+    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
+    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run = today's session, check = test the key + parity test (no orders)"
+        default: "check"
+      clear_review:
+        description: "yes = clear the 2-of-10 stop hold after you've reviewed"
+        default: "no"
+      reset:
+        description: "yes = put the bot back to $1,000 stage 1"
+        default: "no"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: spy0dte
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the latest bot state
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Parity test (live marks = Edge Stress Test marks)
+        if: github.event.inputs.mode == 'check'
+        run: node spy0dte/test_parity.js
+      - name: Run the bot
+        env:
+          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
+          PUBLIC_ACCOUNT_ID: ${{ vars.PUBLIC_ACCOUNT_ID }}
+          SPY0DTE_LIVE: ${{ vars.SPY0DTE_LIVE }}
+          MODE: ${{ github.event.inputs.mode || 'run' }}
+          CLEAR_REVIEW: ${{ github.event.inputs.clear_review || 'no' }}
+          RESET: ${{ github.event.inputs.reset || 'no' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'yes' || '' }}
+        run: node spy0dte/bot.js
+      - name: Save state + logs
+        if: always()
+        run: |
+          git config user.name "spy0dte-bot"
+          git config user.email "spy0dte-bot@users.noreply.github.com"
+          git add spy0dte/state.json spy0dte/logs spy0dte/summaries spy0dte/trades.csv 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "spy0dte $(TZ=America/New_York date +%F)"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
+      - name: Send the summary (GitHub issue = phone notification)
+        if: always() && (github.event.inputs.mode || 'run') == 'run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          D=$(TZ=America/New_York date +%F)
+          F="spy0dte/summaries/$D.md"
+          if [ -f "$F" ]; then
+            gh issue create --title "SPY 0DTE bot · $D · $(cat "spy0dte/summaries/$D.title")" --body-file "$F" || true
+          fi

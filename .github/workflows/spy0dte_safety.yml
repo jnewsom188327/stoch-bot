@@ -1,0 +1,46 @@
+name: SPY 0DTE safety close
+
+# 3:30 PM New York, every weekday: closes ANY open option position in the Public account with a limit at the bid,
+# whether or not the main bot is running. Turn off with repo variable SPY0DTE_SAFETY = off.
+on:
+  schedule:
+    - cron: "30 19 * * 1-5"   # 3:30 PM New York in summer (EDT)
+    - cron: "30 20 * * 1-5"   # 3:30 PM New York in winter (EST); the script ignores whichever isn't 3:30
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: spy0dte-safety   # separate from the main bot, so it runs even while the bot is running
+  cancel-in-progress: false
+
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Close any open option position
+        env:
+          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
+          PUBLIC_ACCOUNT_ID: ${{ vars.PUBLIC_ACCOUNT_ID }}
+          SPY0DTE_SAFETY: ${{ vars.SPY0DTE_SAFETY }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'yes' || '' }}
+        run: node spy0dte/safety.js
+      - name: Tell you if it had to act (GitHub issue = phone notification)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          D=$(TZ=America/New_York date +%F)
+          N="spy0dte/summaries/$D-safety.notify"
+          F="spy0dte/summaries/$D-safety.md"
+          if [ -f "$N" ] || [ "${{ job.status }}" != "success" ]; then
+            [ -f "$F" ] || echo "Safety close failed to run. Check your Public account and the Actions log." > "$F"
+            gh issue create --title "⚠ SPY 0DTE safety close · $D · $(cat "$N" 2>/dev/null || echo 'did not finish')" --body-file "$F" || true
+          fi
