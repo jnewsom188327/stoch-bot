@@ -173,10 +173,19 @@ class RobinhoodBroker {
     };
     if (o.type === "STOP") args.stop_price = o.stop.toFixed(2);
     else args.price = o.limit.toFixed(2);
-    const r = await this.mcp.call("place_option_order", args);
+    const since = new Date(Date.now() - 120000).toISOString();
+    let r = null, err = null;
+    try { r = await this.mcp.call("place_option_order", args); } catch (e) { err = e; }
     if (r && r.customer_approval_required) throw new Error("Robinhood sent the order to you for approval: turn off trade approvals for the agent account");
-    const id = (r && ((r.order && r.order.id) || r.id || r.order_id || (r.orders && r.orders[0] && r.orders[0].id))) || null;
-    if (!id) throw new Error(`Robinhood place_option_order: no order id in reply ${JSON.stringify(r).slice(0, 300)}`);
+    let id = (r && ((r.order && r.order.id) || r.id || r.order_id || (r.orders && r.orders[0] && r.orders[0].id))) || null;
+    if (!id) {
+      // the reply didn't give an id (or the call errored after Robinhood took it): find the order we just sent
+      await sleep(1500);
+      const o = await this.mcp.call("get_option_orders", { account_number: this.acct, created_at_gte: since });
+      const mine = ((o && o.orders) || []).find((x) => (x.legs || []).some((l) => l.option_id === option_id && l.side === args.legs[0].side) && String(+x.quantity) === String(+args.quantity));
+      if (mine) { id = mine.id; this.log("rh_order_found", { id, note: "order id read back from the order list" }); }
+    }
+    if (!id) throw err || new Error(`Robinhood place_option_order: no order id in reply ${JSON.stringify(r).slice(0, 300)}`);
     return id;
   }
 
@@ -214,6 +223,13 @@ class RobinhoodBroker {
   async optionsBuyingPower() {
     const r = await this.mcp.call("get_portfolio", { account_number: this.acct });
     return +((r && r.buying_power && r.buying_power.buying_power) || 0);
+  }
+
+  // emergency: cancel every open order in the agent account (it only holds the bot's orders)
+  async cancelAllOpen() {
+    const open = await this.openOptionOrders();
+    for (const o of open) { try { await this.cancel(o.id); } catch (e) { this.log("rh_cancel_note", { id: o.id, err: String(e.message).slice(0, 200) }); } }
+    return open.length;
   }
 
   // used by the safety close

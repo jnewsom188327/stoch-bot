@@ -73,7 +73,11 @@ function rhTool(name, a) {
     const nowMin = (NOW - base) / 60000;
     const tooEarly = a.type === "stop_market" && nowMin < 15;
     orders.set(id, { orderId: id, instrument: { symbol: idToSym(l.option_id), type: "OPTION" }, orderSide: l.side.toUpperCase(), orderType: a.type === "stop_market" ? "STOP" : "LIMIT", quantity: a.quantity, limitPrice: a.price, stopPrice: a.stop_price, status: tooEarly ? "REJECTED" : process.env.MOCK_STOP_STUCK && a.type === "stop_market" ? "PENDING_NEW" : "NEW", placedMs: NOW });
-    return D({ order: { id, state: "queued" } });
+    return process.env.MOCK_NO_ID ? D({ message: "Order submitted" }) : D({ order: { id, state: "queued" } });
+  }
+  if (name === "get_option_orders" && !a.order_id) {
+    const list = [...orders.values()].filter((o) => (a.state_group !== "open" || ["NEW", "PENDING_NEW"].includes(o.status)) && (!a.created_at_gte || o.placedMs >= Date.parse(a.created_at_gte)));
+    return D({ orders: list.map((o) => ({ id: o.orderId, state: rhState[o.status], quantity: o.quantity, legs: [{ option_id: "opt-" + o.instrument.symbol, side: o.orderSide.toLowerCase() }] })) });
   }
   if (name === "get_option_orders") {
     const o = orders.get(a.order_id);

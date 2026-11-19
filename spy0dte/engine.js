@@ -340,6 +340,10 @@ class Engine {
         await this.closed(this.pos.left, px, why);
       }
     }
+    if (this.live && this.br.cancelAllOpen) {
+      const n = await this.br.cancelAllOpen().catch((e) => { this.log("cancel_all_failed", { err: String(e.message).slice(0, 200) }); return 0; });
+      if (n) this.log("cancelled_open_orders", { count: n });
+    }
     if (halt) this.st.halt = this.st.halt || why;
   }
 }
