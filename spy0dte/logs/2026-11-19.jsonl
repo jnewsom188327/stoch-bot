@@ -1,0 +1,53 @@
+{"at":"09:28:37","event":"robinhood","account":"…7145","type":"limited_margin","optionLevel":"option_level_3"}
+{"at":"09:28:37","event":"start","mode":"LIVE","orders":"robinhood","prices":"Public …4008","balance":1000}
+{"at":"09:28:37","event":"buying_power","optionsBuyingPower":1000}
+{"at":"09:28:37","event":"watching","until":"3:10 PM"}
+{"at":"09:57:08","event":"marks","bar":"09:56","marks":["P:SPY C tw0 ag-1"]}
+{"at":"09:57:08","event":"mark_skip","mark":{"t":"9:56","k":"P","src":"SPY","s":"C","tod":26,"tw":0,"ag":-1,"px":735.95},"why":"trend line not your way"}
+{"at":"10:00:05","event":"marks","bar":"09:59","marks":["D C tw0 ag-1"]}
+{"at":"10:00:05","event":"mark_skip","mark":{"t":"9:59","k":"D","src":"","s":"C","tod":29,"tw":0,"ag":-1,"px":736.25},"why":"trend line not your way"}
+{"at":"10:04:04","event":"marks","bar":"10:03","marks":["P:SPY C tw0 ag-1"]}
+{"at":"10:04:04","event":"mark_skip","mark":{"t":"10:03","k":"P","src":"SPY","s":"C","tod":33,"tw":0,"ag":-1,"px":736.69},"why":"trend line not your way"}
+{"at":"10:05:06","event":"marks","bar":"10:04","marks":["D C tw0 ag1"]}
+{"at":"10:05:06","event":"mark_skip","mark":{"t":"10:04","k":"D","src":"","s":"C","tod":34,"tw":0,"ag":1,"px":737.21},"why":"trend line not your way"}
+{"at":"10:14:06","event":"marks","bar":"10:13","marks":["P:SPY C tw0 ag0"]}
+{"at":"10:14:06","event":"mark_skip","mark":{"t":"10:13","k":"P","src":"SPY","s":"C","tod":43,"tw":0,"ag":0,"px":735.69},"why":"trend line not your way"}
+{"at":"10:18:04","event":"marks","bar":"10:17","marks":["D C tw0 ag0"]}
+{"at":"10:18:04","event":"mark_skip","mark":{"t":"10:17","k":"D","src":"","s":"C","tod":47,"tw":0,"ag":0,"px":733.84},"why":"trend line not your way"}
+{"at":"10:25:08","event":"marks","bar":"10:24","marks":["D C tw0 ag0"]}
+{"at":"10:25:08","event":"mark_skip","mark":{"t":"10:24","k":"D","src":"","s":"C","tod":54,"tw":0,"ag":0,"px":731.82},"why":"trend line not your way"}
+{"at":"10:28:05","event":"marks","bar":"10:27","marks":["D C tw0 ag0"]}
+{"at":"10:28:05","event":"mark_skip","mark":{"t":"10:27","k":"D","src":"","s":"C","tod":57,"tw":0,"ag":0,"px":731.02},"why":"trend line not your way"}
+{"at":"10:33:08","event":"marks","bar":"10:32","marks":["P:SPY C tw0 ag0"]}
+{"at":"10:33:08","event":"mark_skip","mark":{"t":"10:32","k":"P","src":"SPY","s":"C","tod":62,"tw":0,"ag":0,"px":729.05},"why":"trend line not your way"}
+{"at":"10:38:06","event":"marks","bar":"10:37","marks":["P:SPY C tw0 ag0"]}
+{"at":"10:38:06","event":"mark_skip","mark":{"t":"10:37","k":"P","src":"SPY","s":"C","tod":67,"tw":0,"ag":0,"px":726.75},"why":"trend line not your way"}
+{"at":"10:41:03","event":"marks","bar":"10:40","marks":["A C tw0 ag1"]}
+{"at":"10:41:03","event":"mark_skip","mark":{"t":"10:40","k":"A","src":"","s":"C","tod":70,"tw":0,"ag":1,"px":727.64},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"10:55:08","event":"marks","bar":"10:54","marks":["P:put P tw1 ag0"]}
+{"at":"10:55:08","event":"order_buy","mark":{"t":"10:54","k":"P","src":"put","s":"P","tod":84,"tw":1,"ag":0,"px":727.14},"sym":"SPY261119P00727000","qty":3,"limit":3.09,"ref":3.26,"bid":3.25,"ask":3.27,"budget":1000}
+{"at":"10:55:24","event":"entry_fill","sym":"SPY261119P00727000","qty":3,"price":3.09,"stop":0.77}
+{"at":"10:55:27","event":"stop_confirmed","sym":"SPY261119P00727000","status":"NEW","sec":2}
+{"at":"10:55:27","event":"order_stop","sym":"SPY261119P00727000","qty":3,"stop":0.77}
+{"at":"11:00:05","event":"marks","bar":"10:59","marks":["P:put P tw1 ag-1"]}
+{"at":"11:00:05","event":"mark_skip","mark":{"t":"10:59","k":"P","src":"put","s":"P","tod":89,"tw":1,"ag":-1,"px":729.12},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:02:04","event":"marks","bar":"11:01","marks":["P:SPY P tw1 ag-1"]}
+{"at":"11:02:04","event":"mark_skip","mark":{"t":"11:01","k":"P","src":"SPY","s":"P","tod":91,"tw":1,"ag":-1,"px":728.81},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:04:04","event":"marks","bar":"11:03","marks":["P:SPY P tw1 ag-1"]}
+{"at":"11:04:04","event":"mark_skip","mark":{"t":"11:03","k":"P","src":"SPY","s":"P","tod":93,"tw":1,"ag":-1,"px":729.96},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:06:03","event":"marks","bar":"11:05","marks":["P:SPY P tw1 ag-1"]}
+{"at":"11:06:03","event":"mark_skip","mark":{"t":"11:05","k":"P","src":"SPY","s":"P","tod":95,"tw":1,"ag":-1,"px":729.17},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:07:04","event":"marks","bar":"11:06","marks":["D P tw1 ag0"]}
+{"at":"11:07:04","event":"mark_skip","mark":{"t":"11:06","k":"D","src":"","s":"P","tod":96,"tw":1,"ag":0,"px":729.06},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:08:04","event":"marks","bar":"11:07","marks":["D P tw1 ag1","P:SPY P tw1 ag1","P:put P tw1 ag1"]}
+{"at":"11:08:04","event":"mark_skip","mark":{"t":"11:07","k":"D","src":"","s":"P","tod":97,"tw":1,"ag":1,"px":728.22},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:08:04","event":"mark_skip","mark":{"t":"11:07","k":"P","src":"SPY","s":"P","tod":97,"tw":1,"ag":1,"px":728.22},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:08:04","event":"mark_skip","mark":{"t":"11:07","k":"P","src":"put","s":"P","tod":97,"tw":1,"ag":1,"px":728.22},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:13:04","event":"marks","bar":"11:12","marks":["P:SPY P tw1 ag0"]}
+{"at":"11:13:04","event":"mark_skip","mark":{"t":"11:12","k":"P","src":"SPY","s":"P","tod":102,"tw":1,"ag":0,"px":729.12},"why":"in a trade (marks that print while in a trade are ignored)"}
+{"at":"11:23:54","event":"ERROR","err":"Error: stop order CANCELLED: \n    at Engine.manage (/home/runner/work/stoch-bot/stoch-bot/spy0dte/engine.js:218:74)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async Engine.tick (/home/runner/work/stoch-bot/stoch-bot/spy0dte/engine.js:131:19)\n    at async main (/home/runner/work/stoch-bot/stoch-bot/spy0dte/bot.js:145:9)"}
+{"at":"11:23:54","event":"flatten","why":"error: closing everything and stopping for the day"}
+{"at":"11:23:55","event":"order_sell","sym":"SPY261119P00727000","qty":3,"limit":2.06,"why":"error: closing everything and stopping for the day"}
+{"at":"11:23:59","event":"exit","sym":"SPY261119P00727000","qty":3,"px":2.06,"why":"error: closing everything and stopping for the day"}
+{"at":"11:23:59","event":"trade","day":"2026-11-19","mark":{"t":"10:54","k":"P","src":"put","s":"P","tod":84,"tw":1,"ag":0,"px":727.14},"sym":"SPY261119P00727000","qty":3,"entry":3.09,"ret":-33.9,"pnl":-315,"balance":685,"exits":"3@2.05 error: closing everything and stopping for the day","dry":false}
+{"at":"11:23:59","event":"shutoff","why":"down 30% on the day"}

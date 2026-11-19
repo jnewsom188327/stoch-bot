@@ -1,0 +1,2 @@
+day,mark_time,mark,side,contract,qty,entry,return_pct,pnl,balance,exits,dry_run
+2026-11-19,10:54,P:put,P,SPY261119P00727000,3,3.09,-33.9,-315,685,"3@2.05 error: closing everything and stopping for the day",no
