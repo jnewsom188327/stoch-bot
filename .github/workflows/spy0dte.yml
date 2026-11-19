@@ -15,7 +15,7 @@ on:
         description: "yes = clear the 2-of-10 stop hold after you've reviewed"
         default: "no"
       reset:
-        description: "yes = put the bot back to $1,000 stage 1"
+        description: "yes = reset the bot's ledger (dry-run balance back to $1,000)"
         default: "no"
 
 permissions:
@@ -44,6 +44,9 @@ jobs:
         env:
           PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
           PUBLIC_ACCOUNT_ID: ${{ vars.PUBLIC_ACCOUNT_ID }}
+          SPY0DTE_BROKER: ${{ vars.SPY0DTE_BROKER }}
+          RH_ACCOUNT: ${{ vars.RH_ACCOUNT }}
+          RH_TOKEN_KEY: ${{ secrets.RH_TOKEN_KEY }}
           SPY0DTE_LIVE: ${{ vars.SPY0DTE_LIVE }}
           MODE: ${{ github.event.inputs.mode || 'run' }}
           CLEAR_REVIEW: ${{ github.event.inputs.clear_review || 'no' }}
@@ -55,7 +58,7 @@ jobs:
         run: |
           git config user.name "spy0dte-bot"
           git config user.email "spy0dte-bot@users.noreply.github.com"
-          git add spy0dte/state.json spy0dte/logs spy0dte/summaries spy0dte/trades.csv 2>/dev/null || true
+          git add spy0dte/state.json spy0dte/logs spy0dte/summaries spy0dte/trades.csv spy0dte/rh_tokens.enc 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "spy0dte $(TZ=America/New_York date +%F)"
             for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done

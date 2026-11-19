@@ -6,6 +6,9 @@ const CFG = {
   startStake: 1000,
   kinds: ["D", "P"],     // white dots + pane arrows (SPY, call, put); "A" (arrows) not traded
   lastEntryTod: 210,     // minutes after 9:30 -> no new entries from 1:00 PM
+  firstEntryTod: 10,     // backtest: no marks before 9:40 (Robinhood: 15, its option stops are refused before 9:45)
+  posCheckSec: 20,       // live: how often the position is checked against the broker
+  stopCheckSec: 5,       // live: how often the resting stop is checked for a fill
   minPrice: 0.8,         // skip contracts under $0.80
   maxSpread: 0.10,       // skip if (ask-bid)/mid > 10%
   staleSec: 30,          // skip if the quote is older than this
@@ -70,6 +73,7 @@ class Engine {
     if (this.pos || (this.lastExitBarT != null && m.ts <= this.lastExitBarT)) return "in a trade (marks that print while in a trade are ignored)";
     if (!this.cfg.kinds.includes(m.k)) return "arrows not traded (dots + pane arrows only)";
     if (m.tod >= this.cfg.lastEntryTod) return "after 1:00 PM";
+    if (m.tod < this.cfg.firstEntryTod) return "before the first entry time";
     if (m.tw !== 1) return "trend line not your way";
     if (m.ag === -1) return "shading against you";
     return null;
@@ -114,7 +118,7 @@ class Engine {
       const filled = Math.round(+(o.filledQuantity || 0));
       if (filled > 0) { // partly filled before the cancel: keep what we got
         this.log("entry_partial", { sym: p.sym, filled, of: p.qty });
-        return this.openPosition(p, filled, +o.averagePrice, this.mk.nowC() - 60);
+        return this.openPosition(p, filled, +o.averagePrice, this.barOf(o.filledAt));
       }
     }
     this.log("entry_cancel", { sym: p.sym, limit: p.limit, why });
@@ -140,6 +144,7 @@ class Engine {
     }
     const o = await this.br.order(p.id);
     if (o.status === "FILLED") { this.pending = null; return this.openPosition(p, Math.round(+o.filledQuantity), +o.averagePrice, this.barOf(o.filledAt)); }
+    if (o.status === "PARTIALLY_FILLED") return this.cancelPending("part filled: keep what filled and protect it now");
     if (["REJECTED", "CANCELLED", "EXPIRED"].includes(o.status)) { this.pending = null; throw new Error(`entry order ${o.status}: ${o.rejectReason || ""}`); }
     if (nowC >= p.placedC + c.cancelMin * 60) await this.cancelPending("not filled in 5 minutes");
   }
@@ -176,7 +181,7 @@ class Engine {
         o = await this.br.order(pos.stopId).catch(() => null);
         if (o && WORKING.includes(o.status)) break;
         if (o && o.status === "FILLED") { this.log("order_stop", { sym: pos.sym, qty, stop: level, note: "filled at once" }); return this.closed(pos.left, +o.averagePrice, pos.sold ? "breakeven stop" : `stop -${Math.round(pos.stopPct * 100)}%`, !pos.sold); }
-        if (Date.now() - t0 >= c.stopConfirmSec * 1000) throw new Error(`stop order not working at Public after ${c.stopConfirmSec}s (status ${o ? o.status : "unknown"}${o && o.rejectReason ? ": " + o.rejectReason : ""})`);
+        if (Date.now() - t0 >= c.stopConfirmSec * 1000) throw new Error(`stop order not working at the broker after ${c.stopConfirmSec}s (status ${o ? o.status : "unknown"}${o && o.rejectReason ? ": " + o.rejectReason : ""})`);
         await new Promise((r) => setTimeout(r, 2000));
       }
       this.log("stop_confirmed", { sym: pos.sym, status: o.status, sec: Math.round((Date.now() - t0) / 1000) });
@@ -205,14 +210,18 @@ class Engine {
       }
       return;
     }
-    // LIVE: did the broker stop fill?
-    if (pos.stopId) {
+    // LIVE: did the broker stop fill? (checked every few seconds; the quote below is checked every tick)
+    if (pos.stopId && (!pos.stopCheckedAt || Date.now() - pos.stopCheckedAt >= c.stopCheckSec * 1000)) {
+      pos.stopCheckedAt = Date.now();
       const o = await this.br.order(pos.stopId);
       if (o.status === "FILLED") return this.closed(pos.left, +o.averagePrice, pos.sold ? "breakeven stop" : `stop -${Math.round(pos.stopPct * 100)}%`, !pos.sold);
       if (["REJECTED", "CANCELLED", "EXPIRED"].includes(o.status)) throw new Error(`stop order ${o.status}: ${o.rejectReason || ""}`);
     }
-    const have = await this.br.positionQty(pos.sym);
-    if (have !== pos.left) throw new Error(`position check: Public shows ${have} ${pos.sym}, bot expects ${pos.left}`);
+    if (!pos.checkedAt || Date.now() - pos.checkedAt >= c.posCheckSec * 1000) {
+      const have = await this.br.positionQty(pos.sym);
+      pos.checkedAt = Date.now();
+      if (have !== pos.left) throw new Error(`position check: the broker shows ${have} ${pos.sym}, bot expects ${pos.left}`);
+    }
     const q = await this.mk.quote(pos.sym);
     if (!q || !(q.bid > 0)) return;
     this.exitBarT = Math.floor(nowC / 60) * 60; // a live exit happens during this minute's bar

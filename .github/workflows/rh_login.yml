@@ -1,0 +1,42 @@
+name: Robinhood login
+
+# One-time (or whenever the bot says the login expired): signs the bot in to your Robinhood agent account.
+# It opens a GitHub issue with the sign-in link; paste the address you land on as a comment there.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: rh-login
+  cancel-in-progress: true
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the latest repo
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Sign in to Robinhood
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
+          RH_TOKEN_KEY: ${{ secrets.RH_TOKEN_KEY }}
+        run: node spy0dte/rh_login.js
+      - name: Save the (encrypted) login
+        if: always()
+        run: |
+          git config user.name "spy0dte-bot"
+          git config user.email "spy0dte-bot@users.noreply.github.com"
+          git add spy0dte/rh_tokens.enc 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Robinhood login saved (encrypted)"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 5; done
+          fi
