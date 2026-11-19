@@ -47,7 +47,7 @@ async function main() {
     "",
     "2. Sign in to Robinhood and approve. Pick your **MCP** agent account if asked.",
     "3. You'll land on a page that won't load (`localhost`). That's expected. **Copy the whole address** from the address bar (it starts with `http://localhost:1455/callback?code=`).",
-    "4. Paste it as a **comment on this issue**. The bot picks it up within a few seconds, saves the login, and deletes your comment.",
+    "4. **Right away** (the code expires in about a minute), paste it as a **comment on this issue**. Tip: have this issue open in a second tab so you can paste fast. The bot picks it up within 2 seconds, saves the login, and deletes your comment.",
   ].join("\n");
   const issueUrl = gh(`issue create -R ${REPO} --title "Robinhood login: tap the link inside (20 min)" --body-file -`, body).trim();
   const issue = issueUrl.split("/").pop();
@@ -57,7 +57,7 @@ async function main() {
   let code = null, commentId = null;
   const t0 = Date.now();
   while (!code && Date.now() - t0 < 20 * 60 * 1000) {
-    await sleep(5000);
+    await sleep(2000);
     const comments = JSON.parse(gh(`api repos/${REPO}/issues/${issue}/comments`));
     for (const c of comments) {
       const m = String(c.body).match(/https?:\/\/localhost:1455\/callback\?[^\s)>]+/);
@@ -67,19 +67,23 @@ async function main() {
       if (u.searchParams.get("error")) throw new Error("Robinhood said: " + u.searchParams.get("error") + " " + (u.searchParams.get("error_description") || ""));
       code = u.searchParams.get("code");
       commentId = c.id;
+      console.log(`login link pasted ${Math.round((Date.now() - Date.parse(c.created_at)) / 1000)}s ago (comment), ${Math.round((Date.now() - t0) / 1000)}s after the issue opened; code length ${code ? code.length : 0}`);
     }
   }
   if (!code) { closeWith(issue, "Timed out: run the Robinhood login workflow again."); throw new Error("no login link pasted within 20 minutes"); }
 
-  // 4) code -> tokens
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id, code_verifier: verifier, resource: MCP_URL }),
-  });
-  const text = await res.text();
+  // 4) code -> tokens (if Robinhood rejects the resource setting, the same code is tried once without it)
+  let res, text;
+  for (const withResource of [true, false]) {
+    const form = { grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id, code_verifier: verifier };
+    if (withResource) form.resource = MCP_URL;
+    res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body: new URLSearchParams(form) });
+    text = await res.text();
+    console.log(`token exchange (${withResource ? "with" : "without"} resource): HTTP ${res.status} ${res.ok ? "" : text.slice(0, 200)}`);
+    if (res.ok) break;
+  }
   try { gh(`api -X DELETE repos/${REPO}/issues/comments/${commentId}`); } catch {}
-  if (!res.ok) { closeWith(issue, `Login failed (HTTP ${res.status}). Run the workflow again.`); throw new Error(`token exchange failed: HTTP ${res.status} ${text.slice(0, 300)}`); }
+  if (!res.ok) { closeWith(issue, `Login failed (HTTP ${res.status} ${text.slice(0, 120)}). Run the workflow again and paste the address as fast as you can: the code expires quickly.`); throw new Error(`token exchange failed: HTTP ${res.status} ${text.slice(0, 300)}`); }
   const j = JSON.parse(text);
   if (!j.refresh_token) console.log("WARNING: Robinhood returned no refresh token: the login will last only", j.expires_in, "seconds");
   saveTokens({ client_id, access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (+j.expires_in || 3600) * 1000, saved_at: new Date().toISOString() });
