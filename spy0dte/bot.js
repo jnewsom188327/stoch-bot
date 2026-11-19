@@ -47,9 +47,10 @@ async function main() {
   if (process.env.CLEAR_REVIEW === "yes" && st.reviewHold) { log("review_cleared", { was: st.reviewHold }); st.reviewHold = null; st.last10 = []; }
   if (process.env.RESET === "yes") { log("reset_by_you", { from: st.balance }); Object.assign(st, freshState(), { trades: st.trades }); }
   if (process.env.RESET === "yes" || process.env.CLEAR_REVIEW === "yes") saveState(st);
-  if (MODE === "run" && st.lastRunDay === day) { console.log(`Already ran today (${day}); exiting.`); return; }
+  const RESTART = MODE === "run" && process.env.RESTART === "yes"; // you started it again by hand after a stop
+  if (MODE === "run" && st.lastRunDay === day && !RESTART) { console.log(`Already ran today (${day}); exiting.`); return; }
   // two cron times cover summer/winter clocks; only the one that lands near 9:20 ET runs (late GitHub starts allowed until 11:00)
-  if (MODE === "run" && !process.env.FORCE && (T0.min < 9 * 60 || T0.min > 11 * 60)) { console.log(`Not the 9:20 ET start (it is ${T0.hms} ET); exiting.`); return; }
+  if (MODE === "run" && !process.env.FORCE && !RESTART && (T0.min < 9 * 60 || T0.min > 11 * 60)) { console.log(`Not the 9:20 ET start (it is ${T0.hms} ET); exiting.`); return; }
 
   const api = new PublicAPI(process.env.PUBLIC_API_SECRET, { accountId: process.env.PUBLIC_ACCOUNT_ID || "" });
   await api.auth();
@@ -64,6 +65,16 @@ async function main() {
 
   if (MODE === "check") return check(api, day, log, broker);
 
+  if (RESTART) {
+    // never start blind: refuse if the broker shows any open option position or order
+    if (LIVE && broker.openOptionPositions) {
+      const pos = await broker.openOptionPositions(), ord = await broker.openOptionOrders();
+      if (pos.length || ord.length) { log("restart_refused", { openPositions: pos.length, openOrders: ord.length, note: "close these first" }); saveState(st); return; }
+    }
+    log("restart_by_you", { clearedStop: st.halt || null, balance: st.balance });
+    st.halt = null;
+    st.day = null; // the day shutoffs start fresh from the buying power right now
+  }
   newDay(st, day);
   if (LIVE) { // live: the day starts from what's really in the account
     st.balance = Math.round((await broker.optionsBuyingPower()) * 100) / 100;
