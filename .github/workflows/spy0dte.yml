@@ -17,6 +17,9 @@ on:
       reset:
         description: "yes = reset the bot's ledger (dry-run balance back to $1,000)"
         default: "no"
+      restart:
+        description: "yes = start again today after a stop (mode must be run; refuses if anything is open)"
+        default: "no"
 
 permissions:
   contents: write
@@ -51,6 +54,7 @@ jobs:
           MODE: ${{ github.event.inputs.mode || 'run' }}
           CLEAR_REVIEW: ${{ github.event.inputs.clear_review || 'no' }}
           RESET: ${{ github.event.inputs.reset || 'no' }}
+          RESTART: ${{ github.event.inputs.restart || 'no' }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && 'yes' || '' }}
         run: node spy0dte/bot.js
       - name: Save state + logs
