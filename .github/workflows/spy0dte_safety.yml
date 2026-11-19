@@ -1,11 +1,13 @@
 name: SPY 0DTE safety close
 
-# 3:30 PM New York, every weekday: closes ANY open option position in the Public account with a limit at the bid,
+# 3:30 PM New York (with backups at 3:20, 3:35, 3:45), every weekday: closes ANY open option position in the Public account with a limit at the bid,
 # whether or not the main bot is running. Turn off with repo variable SPY0DTE_SAFETY = off.
 on:
   schedule:
-    - cron: "30 19 * * 1-5"   # 3:30 PM New York in summer (EDT)
-    - cron: "30 20 * * 1-5"   # 3:30 PM New York in winter (EST); the script ignores whichever isn't 3:30
+    # GitHub sometimes skips or delays scheduled runs, so there are backups at 3:20, 3:35 and 3:45.
+    # Each run does nothing if nothing is open. The script ignores runs outside 3:20-4:14 PM New York.
+    - cron: "20,30,35,45 19 * * 1-5"   # summer (EDT)
+    - cron: "20,30,35,45 20 * * 1-5"   # winter (EST)
   workflow_dispatch:
 
 permissions:
