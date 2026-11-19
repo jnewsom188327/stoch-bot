@@ -1,5 +1,5 @@
 {
- "balance": 685,
+ "balance": 327.74,
  "trades": [
   {
    "day": "2026-11-19",
@@ -21,15 +21,37 @@
    "balance": 685,
    "exits": "3@2.05 error: closing everything and stopping for the day",
    "dry": false
+  },
+  {
+   "day": "2026-11-19",
+   "mark": {
+    "t": "11:31",
+    "k": "P",
+    "src": "SPY",
+    "s": "P",
+    "tod": 121,
+    "tw": 1,
+    "ag": 0,
+    "px": 728.41
+   },
+   "sym": "SPY261119P00728000",
+   "qty": 2,
+   "entry": 2.48,
+   "ret": -22.9,
+   "pnl": -363,
+   "balance": 327.74,
+   "exits": "3@1.28 error: closing everything and stopping for the day",
+   "dry": false
   }
  ],
  "last10": [
+  0,
   0
  ],
  "day": "2026-11-19",
  "halt": "down 30% on the day",
  "reviewHold": null,
- "dayStart": 1000,
+ "dayStart": 690.74,
  "dayBest": 0,
  "lastRunDay": "2026-11-19"
 }
