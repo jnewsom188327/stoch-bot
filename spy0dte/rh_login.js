@@ -65,22 +65,26 @@ async function main() {
       const u = new URL(m[0].replace(/&amp;/g, "&"));
       if (u.searchParams.get("state") !== state) { console.log("ignoring a link from an older login attempt"); continue; }
       if (u.searchParams.get("error")) throw new Error("Robinhood said: " + u.searchParams.get("error") + " " + (u.searchParams.get("error_description") || ""));
-      code = u.searchParams.get("code");
+      // read the code straight from the address: URLSearchParams would turn a "+" in it into a space
+      const raw = (m[0].replace(/&amp;/g, "&").match(/[?&]code=([^&#\s]+)/) || [])[1] || "";
+      const codes = [...new Set([decodeURIComponent(raw), u.searchParams.get("code")].filter(Boolean))];
+      code = codes;
       commentId = c.id;
-      console.log(`login link pasted ${Math.round((Date.now() - Date.parse(c.created_at)) / 1000)}s ago (comment), ${Math.round((Date.now() - t0) / 1000)}s after the issue opened; code length ${code ? code.length : 0}`);
+      console.log("code characters:", [...new Set(raw.replace(/[A-Za-z0-9]/g, ""))].join("") || "letters/digits only", "| variants:", codes.length);
+      console.log(`login link pasted ${Math.round((Date.now() - Date.parse(c.created_at)) / 1000)}s ago (comment), ${Math.round((Date.now() - t0) / 1000)}s after the issue opened; code length ${raw.length}`);
     }
   }
   if (!code) { closeWith(issue, "Timed out: run the Robinhood login workflow again."); throw new Error("no login link pasted within 20 minutes"); }
 
   // 4) code -> tokens (if Robinhood rejects the resource setting, the same code is tried once without it)
   let res, text;
-  for (const withResource of [true, false]) {
-    const form = { grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id, code_verifier: verifier };
+  attempts: for (const cd of code) for (const [label, withResource, json] of [["form + resource", true, false], ["form", false, false], ["json + resource", true, true]]) {
+    const form = { grant_type: "authorization_code", code: cd, redirect_uri: REDIRECT, client_id, code_verifier: verifier };
     if (withResource) form.resource = MCP_URL;
-    res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body: new URLSearchParams(form) });
+    res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": json ? "application/json" : "application/x-www-form-urlencoded", Accept: "application/json" }, body: json ? JSON.stringify(form) : new URLSearchParams(form) });
     text = await res.text();
-    console.log(`token exchange (${withResource ? "with" : "without"} resource): HTTP ${res.status} ${res.ok ? "" : text.slice(0, 200)}`);
-    if (res.ok) break;
+    console.log(`token exchange (${label}, code variant ${code.indexOf(cd) + 1}): HTTP ${res.status} ${res.ok ? "" : text.slice(0, 200)}`);
+    if (res.ok) break attempts;
   }
   try { gh(`api -X DELETE repos/${REPO}/issues/comments/${commentId}`); } catch {}
   if (!res.ok) { closeWith(issue, `Login failed (HTTP ${res.status} ${text.slice(0, 120)}). Run the workflow again and paste the address as fast as you can: the code expires quickly.`); throw new Error(`token exchange failed: HTTP ${res.status} ${text.slice(0, 300)}`); }
