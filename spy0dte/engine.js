@@ -24,6 +24,16 @@ const CFG = {
   flattenAtTod: 338,     // 3:08 PM: nothing held into the close
   // size: always full port (live = Public's buying power at that moment; dry run = the bot's paper balance)
   pct: 1.0,
+  // Option 2 (Nov 20, 2026): strike + size by trend strength, to cut in-trade heat.
+  //   strong trend (SPY moved >= $0.30 your way in 30 min AND EMA13-EMA34 >= $0.10 your way):
+  //     1 strike in the money (2 strikes in from the old first-out strike), full port
+  //   weak trend (anything else, incl. marks before 10:01 with no 30-min reading):
+  //     3 strikes in the money (4 in from the old strike), half the port
+  // Set trendSizing: false to go back to the old first-out strike at full port.
+  trendSizing: true,
+  strongMove30: 0.30, strongEmaGap: 0.10,
+  strongSteps: 2, strongPct: 1.0,
+  weakSteps: 4, weakPct: 0.5,
   stopPct: 0.75,
   // shutoffs
   stopConfirmSec: 30,    // a stop not showing as working at Public by then = sell + stop for the day
@@ -32,6 +42,7 @@ const CFG = {
   simUnroundedFill: false, // replay-only: the sim checks fills against the un-rounded 95% price (live orders are in cents)
 };
 
+const { shiftContract } = require("./marks");
 const r2 = (x) => Math.round(x * 100) / 100;
 const WORKING = ["NEW", "PARTIALLY_FILLED", "PENDING_REPLACE"]; // Public order statuses that mean "live at the exchange"
 
@@ -81,7 +92,8 @@ class Engine {
 
   async tryEntry(m) {
     const c = this.cfg;
-    const sym = m.contract.sym; // 0DTE, the backtest's strike (first one out of the money)
+    const plan = this.planFor(m);
+    const sym = plan.sym; // 0DTE: in the money by trend strength (option 2), or the old first-out strike if trendSizing is off
     const q = await this.mk.quote(sym, m);
     if (!q) return this.log("mark_skip", { mark: brief(m), sym, why: "no quote" });
     const why = q.stale ? `stale quote (${q.ageSec}s old)` : !(q.bid > 0 && q.ask > 0) ? "no bid/ask"
@@ -94,7 +106,7 @@ class Engine {
     // Full port. Live: Public's options buying power right now (margin account: unsettled sale proceeds count),
     // but never more than the bot's own money (day-start buying power + today's closed P&L), so it never borrows.
     const bp = this.live ? await this.br.optionsBuyingPower() : null;
-    const budget = (this.live ? Math.min(bp, this.st.balance) : this.st.balance) * c.pct;
+    const budget = (this.live ? Math.min(bp, this.st.balance) : this.st.balance) * plan.pct;
     if (this.live && bp > this.st.balance + 1) this.log("size_cap", { publicBuyingPower: Math.round(bp), botMoney: Math.round(this.st.balance) });
     let qty = c.fractional ? budget / cost : Math.floor(budget / cost);
     if (this.live) qty = Math.min(qty, Math.floor(budget / (limit * 100)));
@@ -106,7 +118,16 @@ class Engine {
     if (this.live) id = await this.br.place(order);
     else if (this.mk.preflight) await this.mk.preflight(order); // dry run: Public checks the order, nothing is sent
     this.pending = { m, sym, qty, limit, fillAt: c.simUnroundedFill ? q.ref * (1 - c.entryDisc) : limit, id, markT: m.ts, placedC: this.mk.nowC() };
-    this.log(this.live ? "order_buy" : "order_buy_DRY", { mark: brief(m), sym, qty, limit, ref: q.ref, bid: q.bid, ask: q.ask, budget: Math.round(budget) });
+    this.log(this.live ? "order_buy" : "order_buy_DRY", { mark: brief(m), sym, qty, limit, ref: q.ref, bid: q.bid, ask: q.ask, budget: Math.round(budget), trend: plan.trend, mv30: m.mv30, emaGap: m.emaGap });
+  }
+
+  // Which contract and how much of the port, from the mark's trend strength (option 2)
+  planFor(m) {
+    const c = this.cfg;
+    if (!c.trendSizing) return { sym: m.contract.sym, pct: c.pct, trend: "off" };
+    const strong = m.mv30 != null && m.emaGap != null && m.mv30 >= c.strongMove30 - 1e-9 && m.emaGap >= c.strongEmaGap - 1e-9;
+    const steps = strong ? c.strongSteps : c.weakSteps;
+    return { sym: shiftContract(m.contract, steps).sym, pct: (strong ? c.strongPct : c.weakPct) * c.pct, trend: strong ? "strong" : "weak" };
   }
 
   async cancelPending(why) {
@@ -349,7 +370,7 @@ class Engine {
 }
 
 function brief(m) {
-  return { t: m.t, k: m.k, src: m.src || "", s: m.s, tod: m.tod, tw: m.tw, ag: m.ag, px: m.px };
+  return { t: m.t, k: m.k, src: m.src || "", s: m.s, tod: m.tod, tw: m.tw, ag: m.ag, px: m.px, mv30: m.mv30, emaGap: m.emaGap };
 }
 
 module.exports = { Engine, CFG };
