@@ -1,11 +1,13 @@
 // After-the-close summary: spy0dte/summaries/<day>.md (the workflow posts it as a GitHub issue so it reaches your phone)
 const fs = require("fs");
 const path = require("path");
+// the twin (SPY0DTE_TAG) keeps its own summaries and trades.csv in spy0dte/twin_<tag>/
+const dataDir = () => { const t = (process.env.SPY0DTE_TAG || "").replace(/[^a-z0-9_-]/gi, ""); return t ? path.join(__dirname, "twin_" + t) : __dirname; };
 
 const usd = (x) => (x < 0 ? "-$" : "$") + Math.abs(Math.round(x)).toLocaleString("en-US");
 
 function writeSummary({ day, live, st, events, stats, error, sawToday }) {
-  const dir = path.join(__dirname, "summaries");
+  const dir = path.join(dataDir(), "summaries");
   fs.mkdirSync(dir, { recursive: true });
   const trades = st.trades.filter((t) => t.day === day);
   const pnl = trades.reduce((a, t) => a + t.pnl, 0);
@@ -30,7 +32,7 @@ function writeSummary({ day, live, st, events, stats, error, sawToday }) {
   if (sk.length) L.push("Skipped: " + sk.map(([k, n]) => `${k} ×${n}`).join(" · "));
   if (shut.length) L.push("Events: " + shut.map((e) => `${e.at} ${e.event}${e.why ? " (" + e.why + ")" : ""}`).join(" · "));
   L.push("");
-  L.push(`Full log: spy0dte/logs/${day}.jsonl`);
+  L.push(`Full log: ${path.relative(path.join(__dirname, ".."), path.join(dataDir(), "logs", day + ".jsonl"))}`);
   const md = L.join("\n");
   const file = path.join(dir, `${day}.md`);
   const title = `${live ? "LIVE" : "DRY RUN"} · ${pnl >= 0 ? "+" : ""}${usd(pnl)} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · balance ${usd(st.balance)}${st.halt ? " · stopped" : ""}${st.reviewHold ? " · REVIEW NEEDED" : ""}${error ? " · ERROR" : ""}`;
@@ -38,7 +40,7 @@ function writeSummary({ day, live, st, events, stats, error, sawToday }) {
   fs.writeFileSync(file, md + "\n");
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n");
   // trade log CSV
-  const csv = path.join(__dirname, "trades.csv");
+  const csv = path.join(dataDir(), "trades.csv");
   if (!fs.existsSync(csv)) fs.writeFileSync(csv, "day,mark_time,mark,side,contract,qty,entry,return_pct,pnl,balance,exits,dry_run\n");
   for (const t of trades) fs.appendFileSync(csv, [t.day, t.mark.t, t.mark.k + (t.mark.src ? ":" + t.mark.src : ""), t.mark.s, t.sym, t.qty, t.entry, t.ret, t.pnl, t.balance, `"${t.exits}"`, t.dry ? "yes" : "no"].join(",") + "\n");
   console.log("\n" + md);
