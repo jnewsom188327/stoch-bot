@@ -187,6 +187,8 @@ function summary({ day, st, events, stats, error, sawToday }) {
     L.push("");
   }
   L.push(`Pane arrows: ${stats.marks} · entries placed: ${events.filter((e) => /^order_buy/.test(e.event)).length} · unfilled: ${events.filter((e) => e.event === "entry_cancel").length}`);
+  const sh = events.filter((e) => e.event === "shadow_late");
+  if (sh.length) L.push(`Shadow, 1:00-1:45 PM (logged only, not traded): ${[...new Set(sh.map((e) => e.mark.t + " " + e.mark.s))].join(", ")}`);
   const sk = Object.entries(stats.skipped).sort((a, b) => b[1] - a[1]);
   if (sk.length) L.push("Skipped: " + sk.map(([k, n]) => `${k} ×${n}`).join(" · "));
   L.push("", `Full log: spy0dte/vfrev/logs/${day}.jsonl`);

@@ -6,11 +6,13 @@
 //        calls (fear): wvf = (highest close of last 22 - low) / that close x 100, F = wvf / max(wvf, last 50) x 100
 //        puts (greed): wvs = (high - lowest close of last 22) / that close x 100, G = wvs / max(wvs, last 50) x 100
 //   3) ran hard: d x (close[i] - close[i-15]) <= -1.50
-//   4) stalled: no new day low (calls) / high (puts) in bars i-4..i vs everything before
+//   4) stalled: no new day low (calls) / high (puts) in bars i-7..i vs everything before (8 bars; was 5, changed Nov 20 after the replay sweep)
 //   5) shrinking: average |close-open| of bars i-2..i < 0.8 x the average of bars i-12..i-3
 //   6) before 1:00 PM (and no marks before 10:01)
 // Contract: 0DTE, 1 strike in the money = 2 strikes in from the first-out strike (calls K-2, puts K+2).
-// Exits: +20% sell half (1 contract: all) and stop to breakeven; rest out at minute 15; 120-min max; flat by 3:08.
+// Exits: +20% sell half (1 contract: all) and stop to breakeven; rest out at minute 15; if +20% hasn't hit by minute 45, sell it all;
+//        120-min max; flat by 3:08.
+// Shadow log (not traded): marks 1:00-1:45 PM that pass every check are logged as "shadow_late" to judge a later cutoff.
 // Everything else (entry, size, -75% broker stop, shutoffs, $0.80 / 10% spread / stale checks) is the main engine's.
 // This file does NOT change engine.js or the Robinhood bot; it only extends the Engine class.
 const { Engine } = require("./engine");
@@ -24,7 +26,8 @@ const VF = {
   stretchMin: 80,    // F or G must reach 80+
   stretchBars: 10,   // ... in bars i-9..i
   ranBars: 15, ranMin: 1.5,
-  stallBars: 5,      // bars i-4..i
+  stallBars: 8,      // bars i-7..i (8 quiet bars)
+  shadowLastTod: 255, // 1:45 PM: later marks are only logged (shadow_late), never traded
   shrinkNow: 3, shrinkBefore: 10, shrinkRatio: 0.8,
   steps: 2,          // 1 strike in the money
 };
@@ -54,10 +57,10 @@ function stretch(S, d) {
 }
 
 /** vfCheck(spyBars, m) -> { ok, why, vf } : the six entry conditions for one pane-arrow mark */
-function vfCheck(spyBars, m) {
+function vfCheck(spyBars, m, lastTod = VF.lastTod) {
   if (m.k !== "P") return { ok: false, why: "not a pane arrow" };
   if (m.tod < VF.firstTod) return { ok: false, why: "before 10:01" };
-  if (m.tod >= VF.lastTod) return { ok: false, why: "after 1:00 PM" };
+  if (m.tod >= lastTod) return { ok: false, why: "after 1:00 PM" };
   if (m.tw === 1) return { ok: false, why: "trend line with the trade (needs against)" };
   const S = series(spyBars);
   const i = S.t.indexOf(m.ts);
@@ -80,7 +83,7 @@ function vfCheck(spyBars, m) {
   const vf = { stretch: Math.round(peak * 10) / 10, ran15: Math.round(d * ran * 100) / 100, stalled, bodyNow: Math.round(bNow * 1000) / 1000, bodyBefore: Math.round(bBefore * 1000) / 1000 };
   if (peak < VF.stretchMin) return { ok: false, why: `Vix Fix stretch ${vf.stretch} < 80`, vf };
   if (ran > -VF.ranMin + 1e-9) return { ok: false, why: `didn't run hard (${(d * ran).toFixed(2)} in 15 min)`, vf };
-  if (!stalled) return { ok: false, why: `new day ${d > 0 ? "low" : "high"} in the last 5 bars`, vf };
+  if (!stalled) return { ok: false, why: `new day ${d > 0 ? "low" : "high"} in the last ${VF.stallBars} bars`, vf };
   if (!(bNow < VF.shrinkRatio * bBefore)) return { ok: false, why: "bars not shrinking", vf };
   return { ok: true, why: null, vf };
 }
@@ -88,7 +91,7 @@ function vfCheck(spyBars, m) {
 // The Engine with the vfrev entry filter, contract and exits
 const VF_CFG = {
   kinds: ["P"], lastEntryTod: VF.lastTod, firstEntryTod: VF.firstTod,
-  trendSizing: false, pct: 1.0, tp: 0.20, runnerMin: 15, maxHold: 120, flattenAtTod: 338, stopPct: 0.75,
+  trendSizing: false, pct: 1.0, tp: 0.20, runnerMin: 15, cutMin: 45, maxHold: 120, flattenAtTod: 338, stopPct: 0.75,
 };
 
 class VfEngine extends Engine {
@@ -102,6 +105,10 @@ class VfEngine extends Engine {
     if (this.pos || (this.lastExitBarT != null && m.ts <= this.lastExitBarT)) return "in a trade (marks that print while in a trade are ignored)";
     const r = vfCheck(this.spy, m);
     if (r.ok) { m.vf = r.vf; return null; }
+    if (m.tod >= this.cfg.lastEntryTod && m.tod < VF.shadowLastTod) { // would a 1:45 cutoff have taken it?
+      const s = vfCheck(this.spy, m, VF.shadowLastTod);
+      if (s.ok) this.log("shadow_late", { mark: { t: m.t, src: m.src, s: m.s, tod: m.tod }, vf: s.vf, note: "passes every check; traded only with a 1:45 cutoff" });
+    }
     return r.why;
   }
 
@@ -124,6 +131,7 @@ class VfEngine extends Engine {
     }
     if (!this.pos) return;
     if (pos.sold && i >= 1 && i >= c.runnerMin) return this.sellAll(o, "runner: minute 15");
+    if (!pos.sold && c.cutMin && i >= c.cutMin) return this.sellAll(o, `no ${tpTxt} by minute ${c.cutMin}`);
     if (i >= c.maxHold) return this.sellAll(o, "max hold 120 min");
   }
 }
