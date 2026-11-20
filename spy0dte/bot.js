@@ -9,9 +9,13 @@ const { Engine } = require("./engine");
 const { freshState, newDay } = require("./ledger");
 const { writeSummary } = require("./summary");
 
-const DIR = __dirname;
+// SPY0DTE_TAG = a second copy of the bot (the "twin") with its own state, logs and summaries in spy0dte/twin_<tag>/.
+// A twin is ALWAYS a dry run: it never sends an order, whatever the live setting says.
+const TAG = (process.env.SPY0DTE_TAG || "").replace(/[^a-z0-9_-]/gi, "");
+const DIR = TAG ? path.join(__dirname, "twin_" + TAG) : __dirname;
+fs.mkdirSync(DIR, { recursive: true });
 const STATE = path.join(DIR, "state.json");
-const LIVE = process.env.SPY0DTE_LIVE === "yes";
+const LIVE = !TAG && process.env.SPY0DTE_LIVE === "yes";
 const BROKER = (process.env.SPY0DTE_BROKER || "public").toLowerCase(); // where orders go: public | robinhood (prices always from Public)
 const MODE = process.env.MODE || "run"; // run | check
 const HALF_DAYS = { "2026-11-27": true, "2026-12-24": true, "2027-11-26": true, "2027-12-24": true }; // 1:00 PM closes
@@ -109,6 +113,8 @@ async function main() {
   };
 
   const cfg = half ? { lastEntryTod: 90, flattenAtTod: 200 } : {};
+  if (process.env.SPY0DTE_TRENDSIZING === "off") cfg.trendSizing = false; // original rules: first-out strike, full port
+  if (TAG) cfg.firstEntryTod = 15; // the twin starts at 9:45 like the Robinhood bot, so the two see the same marks
   if (BROKER === "robinhood") cfg.firstEntryTod = 15; // Robinhood refuses option stop orders before 9:45
   const eng = new Engine({ state: st, market, broker: LIVE ? broker : null, log, cfg });
   const endMin = half ? 13 * 60 : 15 * 60 + 10;
