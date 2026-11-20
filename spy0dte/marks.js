@@ -33,6 +33,26 @@ function contractFor(day, side, px) {
   const yymmdd = day.slice(2, 4) + day.slice(5, 7) + day.slice(8, 10);
   return { K, cp: Lg ? "C" : "P", sym: "SPY" + yymmdd + (Lg ? "C" : "P") + String(K * 1000).padStart(8, "0") };
 }
+// The same contract moved `steps` strikes toward the money (calls: lower strike, puts: higher strike).
+// steps 2 = "1 in the money" from the Edge Stress Test strike study, steps 4 = "3 in the money".
+function shiftContract(c, steps) {
+  if (!steps) return c;
+  const K = c.cp === "C" ? c.K - steps : c.K + steps;
+  return { K, cp: c.cp, sym: c.sym.slice(0, 10) + String(K * 1000).padStart(8, "0") };
+}
+// Trend strength at the mark, on SPY's regular-hours 1-minute closes (9:30 on):
+//   mv30   = how far SPY moved your way over the last 30 minutes ($)
+//   emaGap = EMA13 minus EMA34 your way ($), both EMAs seeded with the 9:30 close
+// Fewer than 31 bars since 9:30 (marks before 10:01) = no reading (treated as a weak trend).
+function trendStrength(spyBars, ts, d) {
+  const rth = spyBars.filter((b) => { const t = coreT(b); return (((t % 86400) + 86400) % 86400) / 60 - 570 >= 0; });
+  const i = rth.findIndex((b) => coreT(b) === ts);
+  if (i < 31) return { mv30: null, emaGap: null };
+  const c = rth.map((b) => +b.close);
+  let e13 = c[0], e34 = c[0];
+  for (let k = 0; k <= i; k++) { e13 += (c[k] - e13) * (2 / 14); e34 += (c[k] - e34) * (2 / 35); }
+  return { mv30: Math.round(d * (c[i] - c[i - 30]) * 1000) / 1000, emaGap: Math.round(d * (e13 - e34) * 1000) / 1000 };
+}
 // The 0DTE option charts the pane arrows are read from, for a SPY close
 function paneStrikes(close) {
   return { call: Math.floor(close) + 1, put: Math.ceil(close) - 1 };
@@ -110,6 +130,7 @@ function computeMarks(day, spyBars, optBars) {
       ts: s.t, t: L.hmLabel(s.t), k, src, side: s.side, s: Lg ? "C" : "P", grade: s.grade || null, px: s.px, tod,
       busy: atrPct(s.t) >= 0.048 ? 1 : 0, tw: d * (r0.col || 0) > 0 ? 1 : 0, ag: d * (r0.ag || 0), kill: kill || 0,
       contract: contractFor(day, s.side, s.px),
+      ...trendStrength(spyBars, s.t, d),
     });
   }
   out.sort((x, y) => x.ts - y.ts); // stable, same order as build_day.js
@@ -117,4 +138,4 @@ function computeMarks(day, spyBars, optBars) {
   return { marks: out, kills, rows: R };
 }
 
-module.exports = { computeMarks, closedOnly, contractFor, paneStrikes, osi, barStart, coreT };
+module.exports = { computeMarks, closedOnly, contractFor, shiftContract, trendStrength, paneStrikes, osi, barStart, coreT };
