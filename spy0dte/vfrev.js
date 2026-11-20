@@ -13,7 +13,8 @@
 // Exits: +20% sell half (1 contract: all) and stop to breakeven; rest out at minute 15; if +20% hasn't hit by minute 45, sell it all;
 //        120-min max; flat by 3:08.
 // Shadow log (not traded): marks 1:00-1:45 PM that pass every check are logged as "shadow_late" to judge a later cutoff.
-// Everything else (entry, size, -75% broker stop, shutoffs, $0.80 / 10% spread / stale checks) is the main engine's.
+// Entry: limit 3% under the option's mid (rounded down to the cent), cancelled after 5 minutes.
+// Everything else (size, -75% broker stop, shutoffs, $0.80 / 10% spread / stale checks) is the main engine's.
 // This file does NOT change engine.js or the Robinhood bot; it only extends the Engine class.
 const { Engine } = require("./engine");
 const { shiftContract, coreT } = require("./marks");
@@ -91,6 +92,7 @@ function vfCheck(spyBars, m, lastTod = VF.lastTod) {
 // The Engine with the vfrev entry filter, contract and exits
 const VF_CFG = {
   kinds: ["P"], lastEntryTod: VF.lastTod, firstEntryTod: VF.firstTod,
+  entryDisc: 0.03, // limit 3% under the mid (main bot: 5%); 5% missed the trades that take off right away
   trendSizing: false, pct: 1.0, tp: 0.20, runnerMin: 15, cutMin: 45, maxHold: 120, flattenAtTod: 338, stopPct: 0.75,
 };
 

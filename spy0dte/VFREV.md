@@ -15,19 +15,22 @@ Workflow **SPY 0DTE Public Vix Fix** (`.github/workflows/spy0dte_public_vf.yml`)
   5. shrinking: average |close−open| of bars i−2..i < 0.8 × the average of bars i−12..i−3
   6. before 1:00 PM
 - **Contract:** 0DTE, 1 strike in the money (2 strikes in from the first-out strike: calls K−2, puts K+2). Skip under $0.80, spread over 10%, quote over 30 s old.
-- **Entry / size / stop / shutoffs:** same as the main bot: limit 5% under mid, cancelled after 5 min, full port of the Public account (capped at the bot's own money), −75% stop at Public, day shutoffs and the 2-of-10 review hold.
+- **Entry:** limit **3% under the mid** (main bot: 5%), cancelled after 5 min.
+- **Size / stop / shutoffs:** same as the main bot: full port of the Public account (capped at the bot's own money), −75% stop at Public, day shutoffs and the 2-of-10 review hold.
 - **Exits:** +20% sell half (1 contract: all), stop to breakeven; rest out at minute 15; **if +20% hasn't hit by minute 45, sell it all**; 120-min max; flat by 3:08.
 - **Shadow log:** marks from 1:00 to 1:45 PM that pass every check are logged as `shadow_late` (and listed in the daily summary) but never traded, to judge a later cutoff.
 
 ## Changes after the Nov 20 replay sweep
 - Stall window 5 → **8 bars**: removes the Nov 19 11:59 call that sat at −53%; 7, 8, 10 and 12 bars all give the same result.
+- **Entry limit 5% → 3% under the mid**: better in Sep, Oct and Nov (2% about the same); 5% missed the trades that take off right away. Deeper limits (8–20%) and waiting for a confirmation bar were worse.
 - **45-minute cut** added after October showed a trade (Oct 22 12:36 call) that never hit +20% or the −75% stop and rode 120 minutes to −72%. 45–60 minutes is the best range; it changes nothing in Nov 3–19.
 
 | Replay ($1,000 start, whole contracts) | End | Trades | Worst heat |
 |---|---|---|---|
-| Nov 3–19 | $7,921 | 13/13 wins | −23% |
-| Oct 1–30 (history files) | $1,069 | 4/5 wins | −49% |
-| Oct 1 → Nov 19 in a row | $9,568 | 17/18 wins | −49% |
+| Nov 3–19 | $14,694 | 14/14 wins | −24% |
+| Oct 1–30 (history files) | $1,446 | 5/6 wins | −50% |
+| Sep 1–30 (history files) | $2,241 | 5/5 wins | −49% |
+| Sep 1 → Nov 19 in a row | $58,760 | 24/25 wins | −50% |
 
 ## Tests (no key needed)
 - `node spy0dte/replay_vfrev.js` — every `results/bars_*.json` through the vfrev engine from $1,000 (`why` lists every pane arrow and why it was taken or skipped). `node spy0dte/replay_vfrev.js 2026-10` replays a month from the history files (`results/spy_1m.csv.gz` + `results/opt_1m/`).
