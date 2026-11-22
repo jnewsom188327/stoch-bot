@@ -160,4 +160,5 @@ process.on("exit", () => {
   console.error(`\n[mock] ${mode}: ${calls.length} API calls, orders sent ${orders.size}, open fake positions ${JSON.stringify(Object.fromEntries(Object.entries(pos).filter(([, q]) => q)))}, balance ${st.balance}`);
   if (Object.values(pos).some((q) => q)) { console.error("[mock] FAIL: position left open"); process.exitCode = 1; }
 });
+if (process.env.MOCK_BRAKE) fs.writeFileSync(path.join(TMP, "state.json"), JSON.stringify({ balance: 1000, trades: [], last10: [], day: null, halt: null, reviewHold: null, brake: { need: +process.env.MOCK_BRAKE, half: false, target: null } }));
 require(path.join(TMP, "bot.js"));

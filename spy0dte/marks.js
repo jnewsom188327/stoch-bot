@@ -26,19 +26,19 @@ function closedOnly(bars, nowSec) {
   return bars.filter((b) => barStart(b) + 60 <= nowSec);
 }
 
-function contractFor(day, side, px) {
+function contractFor(day, side, px, root = "SPY") {
   // build_day.js strike: call = first strike above; put = first strike below (or 1 under if price sits on a strike)
   const Lg = side === "long";
   const K = Lg ? Math.floor(px) + 1 : Number.isInteger(px) ? px - 1 : Math.floor(px);
   const yymmdd = day.slice(2, 4) + day.slice(5, 7) + day.slice(8, 10);
-  return { K, cp: Lg ? "C" : "P", sym: "SPY" + yymmdd + (Lg ? "C" : "P") + String(K * 1000).padStart(8, "0") };
+  return { K, cp: Lg ? "C" : "P", sym: root + yymmdd + (Lg ? "C" : "P") + String(K * 1000).padStart(8, "0") };
 }
 // The same contract moved `steps` strikes toward the money (calls: lower strike, puts: higher strike).
 // steps 2 = "1 in the money" from the Edge Stress Test strike study, steps 4 = "3 in the money".
 function shiftContract(c, steps) {
   if (!steps) return c;
   const K = c.cp === "C" ? c.K - steps : c.K + steps;
-  return { K, cp: c.cp, sym: c.sym.slice(0, 10) + String(K * 1000).padStart(8, "0") };
+  return { K, cp: c.cp, sym: c.sym.slice(0, -8) + String(K * 1000).padStart(8, "0") };
 }
 // Trend strength at the mark, on SPY's regular-hours 1-minute closes (9:30 on):
 //   mv30   = how far SPY moved your way over the last 30 minutes ($)
@@ -57,9 +57,9 @@ function trendStrength(spyBars, ts, d) {
 function paneStrikes(close) {
   return { call: Math.floor(close) + 1, put: Math.ceil(close) - 1 };
 }
-function osi(day, cp, K, expiry) {
+function osi(day, cp, K, expiry, root = "SPY") {
   const d = expiry || day;
-  return "SPY" + d.slice(2, 4) + d.slice(5, 7) + d.slice(8, 10) + cp + String(Math.round(K * 1000)).padStart(8, "0");
+  return root + d.slice(2, 4) + d.slice(5, 7) + d.slice(8, 10) + cp + String(Math.round(K * 1000)).padStart(8, "0");
 }
 
 /**
@@ -67,7 +67,7 @@ function osi(day, cp, K, expiry) {
  *  spyBars: Public SPY 1m bars (closed only), optBars: { OSI: Public bars } for the 0DTE pane strikes.
  *  marks: [{ ts, t, k:"A"|"D"|"P", src, side, s:"C"|"P", grade, px, tod, busy, tw, ag, kill, contract }]
  */
-function computeMarks(day, spyBars, optBars) {
+function computeMarks(day, spyBars, optBars, root = "SPY") { // root: the underlying ("SPY", or "QQQ" for the Public QQQ bot)
   const L = loadCore();
   const S = L.S;
   const toRes = (bars) => JSON.stringify({ regularMarket: { bars } });
@@ -108,7 +108,7 @@ function computeMarks(day, spyBars, optBars) {
   for (const t of a.g) marks.push(["P", { t, side: "long" }, "SPY"]);
   for (const t of a.f) marks.push(["P", { t, side: "short" }, "SPY"]);
   for (const sym of Object.keys(OB)) {
-    const cp = sym[9], K = +sym.slice(10) / 1000;
+    const cp = sym[sym.length - 9], K = +sym.slice(-8) / 1000;
     const rows = L.compute(L.cleanPrints(OB[sym]));
     for (const t of L.vixArrows(rows).g) {
       const r = byT.get(t);
@@ -129,7 +129,7 @@ function computeMarks(day, spyBars, optBars) {
     out.push({
       ts: s.t, t: L.hmLabel(s.t), k, src, side: s.side, s: Lg ? "C" : "P", grade: s.grade || null, px: s.px, tod,
       busy: atrPct(s.t) >= 0.048 ? 1 : 0, tw: d * (r0.col || 0) > 0 ? 1 : 0, ag: d * (r0.ag || 0), kill: kill || 0,
-      contract: contractFor(day, s.side, s.px),
+      contract: contractFor(day, s.side, s.px, root),
       ...trendStrength(spyBars, s.t, d),
     });
   }

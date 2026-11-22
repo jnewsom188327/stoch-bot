@@ -6,6 +6,8 @@ const path = require("path");
 const { PublicAPI, sleep } = require("./public");
 const { computeMarks, closedOnly, paneStrikes, osi, coreT } = require("./marks");
 const { Engine } = require("./engine");
+const { withBrake } = require("./brake");
+const BrakeEngine = withBrake(Engine);
 const { freshState, newDay } = require("./ledger");
 const { writeSummary } = require("./summary");
 
@@ -49,6 +51,7 @@ async function main() {
 
   const st = loadState();
   if (process.env.CLEAR_REVIEW === "yes" && st.reviewHold) { log("review_cleared", { was: st.reviewHold }); st.reviewHold = null; st.last10 = []; }
+  if (process.env.CLEAR_REVIEW === "yes" && st.brake && (st.brake.need || st.brake.half)) { log("brake_cleared", { was: st.brake }); st.brake = { need: 0, half: false, target: null }; }
   if (process.env.RESET === "yes") { log("reset_by_you", { from: st.balance }); Object.assign(st, freshState(), { trades: st.trades }); }
   if (process.env.RESET === "yes" || process.env.CLEAR_REVIEW === "yes") saveState(st);
   const RESTART = MODE === "run" && process.env.RESTART === "yes"; // you started it again by hand after a stop
@@ -116,7 +119,8 @@ async function main() {
   if (process.env.SPY0DTE_TRENDSIZING === "off") cfg.trendSizing = false; // original rules: first-out strike, full port
   if (TAG) cfg.firstEntryTod = 15; // the twin starts at 9:45 like the Robinhood bot, so the two see the same marks
   if (BROKER === "robinhood") cfg.firstEntryTod = 15; // Robinhood refuses option stop orders before 9:45
-  const eng = new Engine({ state: st, market, broker: LIVE ? broker : null, log, cfg });
+  if (TAG) { cfg.tpPut = null; cfg.brake = false; } // the twin keeps the original rules: +10% on both sides, no brake
+  const eng = new BrakeEngine({ state: st, market, broker: LIVE ? broker : null, log, cfg });
   const endMin = half ? 13 * 60 : 15 * 60 + 10;
   const stats = { marks: 0, taken: 0, skipped: {} };
   let lastBarT = 0, sawToday = false, error = null;

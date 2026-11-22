@@ -20,6 +20,11 @@ function writeSummary({ day, live, st, events, stats, error, sawToday }) {
   if (st.halt) L.push(`**Stopped today:** ${st.halt}`);
   if (st.reviewHold) L.push(`**⚠ On hold until you review:** ${st.reviewHold}. Run the workflow with clear_review = yes to restart.`);
   if (error) L.push(`**⚠ Error:** \`${error.split("\n")[0].slice(0, 300)}\``);
+  const br = st.brake || {};
+  if (br.need > 0) L.push(`**Safety brake on:** paper only until ${br.need} more paper win${br.need === 1 ? "" : "s"} in a row (no orders sent meanwhile).`);
+  if (br.half) L.push(`**Safety brake:** half port until the account is back to ${usd(br.target || 0)}.`);
+  const paper = (st.paper || []).filter((p) => p.day === day);
+  if (paper.length) L.push("Paper trades today (brake): " + paper.map((p) => `${p.t} ${p.s === "C" ? "call" : "put"} ${p.ret > 0 ? "+" : ""}${p.ret}%`).join(" · "));
   L.push("");
   if (trades.length) {
     L.push("| Mark | Contract | Qty | Entry | Exits | Return | P&L |");
@@ -35,7 +40,7 @@ function writeSummary({ day, live, st, events, stats, error, sawToday }) {
   L.push(`Full log: ${path.relative(path.join(__dirname, ".."), path.join(dataDir(), "logs", day + ".jsonl"))}`);
   const md = L.join("\n");
   const file = path.join(dir, `${day}.md`);
-  const title = `${live ? "LIVE" : "DRY RUN"} · ${pnl >= 0 ? "+" : ""}${usd(pnl)} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · balance ${usd(st.balance)}${st.halt ? " · stopped" : ""}${st.reviewHold ? " · REVIEW NEEDED" : ""}${error ? " · ERROR" : ""}`;
+  const title = `${live ? "LIVE" : "DRY RUN"} · ${pnl >= 0 ? "+" : ""}${usd(pnl)} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · balance ${usd(st.balance)}${st.halt ? " · stopped" : ""}${st.reviewHold ? " · REVIEW NEEDED" : ""}${st.brake && st.brake.need > 0 ? " · BRAKE (paper)" : ""}${error ? " · ERROR" : ""}`;
   fs.writeFileSync(path.join(dir, `${day}.title`), title + "\n");
   fs.writeFileSync(file, md + "\n");
   if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + "\n");

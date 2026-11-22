@@ -17,7 +17,8 @@ const CFG = {
   cancelMin: 5,          // unfilled entry cancelled after 5 minutes
   tradeThrough: 0.01,    // a limit only counts as filled if the option trades 1 cent through it
   slip: 0.01,            // slippage, each way, per contract
-  tp: 0.10,              // +10%
+  tp: 0.10,              // +10% (calls)
+  tpPut: 0.15,           // puts: sell half at +15% (Nov 22, 2026: held up in Oct and Nov; calls stay at +10%). null = use tp
   runnerMin: 15,         // sell the rest at minute 15
   xMin: 10,              // after an x: out at minute 10 (or right away if red)
   maxHold: 120,          // minutes
@@ -255,12 +256,13 @@ class Engine {
     const pos = this.pos, c = this.cfg, E = pos.entry;
     // 1) stop (dry run; live it's the broker's stop order)
     if (!this.live && o.lo <= pos.stop + 1e-9) return this.closed(pos.left, pos.stop, pos.sold ? "breakeven stop" : `stop -${Math.round(pos.stopPct * 100)}%`, !pos.sold);
-    // 2) +10%: sell half (1 contract: all of it), stop to breakeven
-    if (!pos.sold && o.hi >= E * (1 + c.tp) - 1e-9) {
-      const px = this.live ? o.bid : r2(E * (1 + c.tp));
+    // 2) the target (+10% calls, +15% puts): sell half (1 contract: all of it), stop to breakeven
+    const tp = this.tpFor(pos), tpTxt = `+${Math.round(tp * 100)}%`;
+    if (!pos.sold && o.hi >= E * (1 + tp) - 1e-9) {
+      const px = this.live ? o.bid : r2(E * (1 + tp));
       const half = c.fractional ? pos.left / 2 : pos.qty === 1 ? 1 : Math.floor(pos.qty / 2);
       pos.sold = true;
-      await this.sell(half, px, half >= pos.left ? "+10% all out (1 contract)" : "+10% half");
+      await this.sell(half, px, half >= pos.left ? `${tpTxt} all out (1 contract)` : `${tpTxt} half`);
       if (!this.pos) return;
       await this.placeStop(r2(E), pos.left);
     }
@@ -274,6 +276,8 @@ class Engine {
     // 5) max hold
     if (i >= c.maxHold) return this.sellAll(o, "max hold 120 min");
   }
+
+  tpFor(pos) { const c = this.cfg; return pos.m.s === "P" && c.tpPut != null ? c.tpPut : c.tp; }
 
   async sellAll(o, why) {
     return this.sell(this.pos.left, this.live ? o.bid : o.close, why);
