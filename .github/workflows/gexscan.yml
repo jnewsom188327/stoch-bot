@@ -1,11 +1,7 @@
 name: GEX scan
 
 on:
-  schedule:
-    - cron: "25 13 * * 1-5"
-    - cron: "25 14 * * 1-5"
-    - cron: "25 17 * * 1-5"
-    - cron: "25 18 * * 1-5"
+  # schedule removed Nov 23, 2026 (Alpaca account deleted; kept off so it can't touch main while the Robinhood/Public bots run). Run by hand only.
   workflow_dispatch:
     inputs:
       mode:
