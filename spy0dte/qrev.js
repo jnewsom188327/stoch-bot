@@ -12,15 +12,19 @@
 // SHADOW version (paper only, logged beside it so you can compare): 1 strike in the money, a third sold at +30%,
 //   stop to breakeven, the rest out at minute 15.
 // Oct 1 - Nov 13, 2026 ($1,000): live version 8 trades, 8 won, $20,191, no drop; shadow version 8 of 8, $6,409.
-// Safety brake, day lock, size and order handling: the same as the Public Vix Fix bot (vfrev.js / engine.js).
+// Nov 23, 2026: HALF PORT, and an extra exit: if QQQ makes a new day low (calls) / high (puts) $1.00 beyond
+//   the extreme it had when the arrow printed, sell everything.
+// Safety brake, day lock and order handling: the same as the Public Vix Fix bot (vfrev.js / engine.js).
 const { VfEngine, vfCheck, VF } = require("./vfrev");
-const { shiftContract } = require("./marks");
+const { shiftContract, coreT } = require("./marks");
 
 const QR = { ...VF, ranMin: 3.0, stretchMin: 0, lastTod: 270, lastLabel: "2:00 PM", firstTod: 31, stallBars: 5, shrinkRatio: 0.8 };
 
 const QR_CFG = {
   kinds: ["P"], lastEntryTod: QR.lastTod, firstEntryTod: QR.firstTod,
-  entryDisc: 0.03, trendSizing: false, pct: 1.0,
+  entryDisc: 0.03, trendSizing: false, pct: 0.5,   // half port (Nov 23); 1.0 = full port
+  failBuf: 1.00,     // sell all if QQQ breaks the arrow-time day extreme by this many dollars (0 = off)
+  ranMin: null,      // null = QR.ranMin ($3.00); a number here overrides it (replays)
   steps: 0,          // 0 = first-out strike; 2 = 1 strike in the money
   tp: 0.50,          // target
   sellFrac: 1,       // share sold at the target: 1 = all out; 1/3 = a third, then breakeven stop and the rest out at runnerMin
@@ -35,8 +39,15 @@ class QEngine extends VfEngine {
   markSkip(m) {
     if (this.halted()) return "stopped: " + (this.st.reviewHold ? "waiting for your review" : this.st.halt);
     if (this.pos || (this.lastExitBarT != null && m.ts <= this.lastExitBarT)) return "in a trade (marks that print while in a trade are ignored)";
-    const r = vfCheck(this.spy, m, Math.min(QR.lastTod, this.cfg.lastEntryTod), QR); // this.spy holds QQQ bars here
-    if (r.ok) { m.vf = r.vf; return null; }
+    const P = this.cfg.ranMin != null ? { ...QR, ranMin: this.cfg.ranMin } : QR;
+    const r = vfCheck(this.spy, m, Math.min(QR.lastTod, this.cfg.lastEntryTod), P); // this.spy holds QQQ bars here
+    if (r.ok) {
+      m.vf = r.vf;
+      // the day's extreme up to the arrow: the level that must hold (calls: the low; puts: the high)
+      const upTo = this.spy.filter((b) => coreT(b) <= m.ts);
+      m.qext = m.s === "C" ? Math.min(...upTo.map((b) => +b.low)) : Math.max(...upTo.map((b) => +b.high));
+      return null;
+    }
     return r.why;
   }
 
@@ -60,6 +71,12 @@ class QEngine extends VfEngine {
       await this.placeStop(Math.round(E * 100) / 100, pos.left);
     }
     if (!this.pos) return;
+    // the move didn't stall: QQQ broke the arrow-time extreme by failBuf after the fill -> out
+    if (c.failBuf && pos.m.qext != null && this.spy && this.spy.length) {
+      const after = this.spy.filter((b) => coreT(b) >= pos.fillBarT && (o.barT == null || coreT(b) <= o.barT));
+      const broke = pos.m.s === "C" ? after.some((b) => +b.low < pos.m.qext - c.failBuf) : after.some((b) => +b.high > pos.m.qext + c.failBuf);
+      if (broke) return this.sellAll(o, `QQQ broke the ${pos.m.s === "C" ? "low" : "high"} by $${c.failBuf.toFixed(2)}: the move didn't stall`);
+    }
     if (pos.sold && i >= 1 && i >= c.runnerMin) return this.sellAll(o, `runner: minute ${c.runnerMin}`);
     if (!pos.sold && c.cutMin && i >= c.cutMin) return this.sellAll(o, `no ${tpTxt} by minute ${c.cutMin}`);
     if (i >= c.maxHold) return this.sellAll(o, "max hold 120 min");
