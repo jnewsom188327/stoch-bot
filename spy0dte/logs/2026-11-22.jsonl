@@ -7,3 +7,13 @@
 {"at":"19:58:21","event":"check_option_bars","sym":"SPY261120C00691000","count":0}
 {"at":"19:58:21","event":"check_marks_so_far","count":61,"last":["2:29 P C tw0 ag0","2:33 P C tw0 ag0","2:35 A C tw0 ag0"]}
 {"at":"19:58:21","event":"check_buying_power","optionsBuyingPower":1000}
+{"at":"20:15:24","event":"reset_by_you","from":327.74}
+{"at":"20:15:25","event":"robinhood","account":"…7145","type":"limited_margin","optionLevel":"option_level_3"}
+{"at":"20:15:25","event":"start","mode":"LIVE","orders":"robinhood","prices":"Public …4008","balance":1000}
+{"at":"20:15:26","event":"check_robinhood_buying_power","buyingPower":1000.49}
+{"at":"20:15:26","event":"check_robinhood_contract","sym":"SPY261123C00691000","option_id":"0d198155-52f8-433b-bdab-f14bee1598a5","positionQty":0}
+{"at":"20:15:26","event":"check_spy_bars","count":390,"last":{"timestamp":"2026-11-20T15:59:00-05:00","open":"687.86","close":"690.81","high":"690.93","low":"687.42","value":"687.86","volume":5693891,"gainAmount":"-28.01","gainPercentage":"-3.91"}}
+{"at":"20:15:26","event":"check_quote","sym":"SPY261120C00691000","q":{"instrument":{"symbol":"SPY261120C00691000","type":"OPTION"},"outcome":"UNKNOWN","last":null,"lastTimestamp":null,"bid":null,"bidSize":null,"bidTimestamp":null,"ask":null,"askSize":null,"askTimestamp":null,"volume":null,"openInterest":null,"previousClose":null,"oneDayChange":null,"optionDetails":null,"bondDetails":null}}
+{"at":"20:15:27","event":"check_option_bars","sym":"SPY261120C00691000","count":0}
+{"at":"20:15:27","event":"check_marks_so_far","count":61,"last":["2:29 P C tw0 ag0","2:33 P C tw0 ag0","2:35 A C tw0 ag0"]}
+{"at":"20:15:27","event":"check_buying_power","optionsBuyingPower":1000}

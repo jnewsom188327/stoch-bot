@@ -1,5 +1,5 @@
 {
- "balance": 327.74,
+ "balance": 1000,
  "trades": [
   {
    "day": "2026-11-19",
@@ -44,12 +44,9 @@
    "dry": false
   }
  ],
- "last10": [
-  0,
-  0
- ],
- "day": "2026-11-19",
- "halt": "down 30% on the day",
+ "last10": [],
+ "day": null,
+ "halt": null,
  "reviewHold": null,
  "dayStart": 690.74,
  "dayBest": 0,
