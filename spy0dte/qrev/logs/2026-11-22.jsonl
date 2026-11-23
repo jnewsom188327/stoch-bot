@@ -1,3 +1,6 @@
 {"at":"17:48:14","event":"start","strategy":"qrev (QQQ reversal)","mode":"DRY RUN","orders":"public","account":"…4008","balance":1000}
 {"at":"17:48:14","event":"check_buying_power","optionsBuyingPower":1000}
 {"at":"17:48:14","event":"check_qqq_bars","count":390,"last":{"timestamp":"2026-11-20T15:59:00-05:00","open":"607.78","close":"610.04","high":"610.47","low":"607.34","value":"607.78","volume":2710239.924535,"gainAmount":"-37.26","gainPercentage":"-5.78"}}
+{"at":"19:59:17","event":"start","strategy":"qrev (QQQ reversal)","mode":"LIVE","orders":"public","account":"…4008","balance":1000}
+{"at":"19:59:17","event":"check_buying_power","optionsBuyingPower":1000}
+{"at":"19:59:18","event":"check_qqq_bars","count":390,"last":{"timestamp":"2026-11-20T15:59:00-05:00","open":"607.78","close":"610.04","high":"610.47","low":"607.34","value":"607.78","volume":2710239.924535,"gainAmount":"-37.26","gainPercentage":"-5.78"}}
