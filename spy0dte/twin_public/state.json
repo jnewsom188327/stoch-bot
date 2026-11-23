@@ -1,0 +1,11 @@
+{
+ "balance": 1000,
+ "trades": [],
+ "last10": [],
+ "day": "2026-11-23",
+ "halt": null,
+ "reviewHold": null,
+ "dayStart": 1000,
+ "dayBest": 0,
+ "lastRunDay": "2026-11-23"
+}
