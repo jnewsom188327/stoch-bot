@@ -3,7 +3,10 @@ name: SPY 0DTE bot
 # Runs each market day 9:25 AM - 3:10 PM New York time, checking every minute.
 # DRY RUN unless the repo variable SPY0DTE_LIVE is set to exactly: yes
 on:
-  # schedule removed Nov 23, 2026 9:00 AM: bots cut off (IV too high). Restore the two cron lines to turn back on.
+  # PAPER ONLY from Nov 23, 2026 (IV too high): orders are forced off below, whatever the repo variable says.
+  schedule:
+    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
+    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
   workflow_dispatch:
     inputs:
       mode:
@@ -41,6 +44,8 @@ jobs:
       - name: Parity test (live marks = Edge Stress Test marks)
         if: github.event.inputs.mode == 'check'
         run: node spy0dte/test_parity.js
+      - name: Keep the live state aside (paper day)
+        run: mkdir -p /tmp/live && if [ -f spy0dte/state.json ]; then cp spy0dte/state.json /tmp/live/state.json; fi
       - name: Run the bot
         env:
           PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
@@ -48,7 +53,7 @@ jobs:
           SPY0DTE_BROKER: ${{ vars.SPY0DTE_BROKER }}
           RH_ACCOUNT: ${{ vars.RH_ACCOUNT }}
           RH_TOKEN_KEY: ${{ secrets.RH_TOKEN_KEY }}
-          SPY0DTE_LIVE: ${{ vars.SPY0DTE_LIVE }}
+          SPY0DTE_LIVE: "no"   # PAPER ONLY (Nov 23, 2026). To go live again: ${{ vars.SPY0DTE_LIVE }}
           MODE: ${{ github.event.inputs.mode || 'run' }}
           CLEAR_REVIEW: ${{ github.event.inputs.clear_review || 'no' }}
           RESET: ${{ github.event.inputs.reset || 'no' }}
@@ -61,6 +66,11 @@ jobs:
           git config user.name "spy0dte-bot"
           git config user.email "spy0dte-bot@users.noreply.github.com"
           git add spy0dte/state.json spy0dte/logs spy0dte/summaries spy0dte/trades.csv spy0dte/rh_tokens.enc 2>/dev/null || true
+          D=$(TZ=America/New_York date +%F); mkdir -p spy0dte/paper
+          if [ -f spy0dte/state.json ]; then cp spy0dte/state.json spy0dte/paper/spy_state_$D.json; fi
+          if [ -f /tmp/live/state.json ]; then cp /tmp/live/state.json spy0dte/state.json; else rm -f spy0dte/state.json; fi
+          git add -A spy0dte/paper 2>/dev/null || true
+          git add -A spy0dte/state.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "spy0dte $(TZ=America/New_York date +%F)"
             for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done

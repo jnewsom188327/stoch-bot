@@ -5,7 +5,9 @@ name: SPY 0DTE twin (Public, dry run, original rules)
 #   - the ORIGINAL rules: first strike out of the money, full port (trend sizing off)
 #   - its own state, logs, summaries and trades.csv in spy0dte/twin_public/
 on:
-  # schedule removed Nov 23, 2026 9:00 AM: bots cut off (IV too high). Restore the two cron lines to turn back on.
+  schedule:
+    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
+    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever isn't 9:20
   workflow_dispatch:
 
 permissions:
