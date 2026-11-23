@@ -3,9 +3,7 @@ name: SPY 0DTE bot
 # Runs each market day 9:25 AM - 3:10 PM New York time, checking every minute.
 # DRY RUN unless the repo variable SPY0DTE_LIVE is set to exactly: yes
 on:
-  schedule:
-    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
-    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
+  # schedule removed Nov 23, 2026 9:00 AM: bots cut off (IV too high). Restore the two cron lines to turn back on.
   workflow_dispatch:
     inputs:
       mode:

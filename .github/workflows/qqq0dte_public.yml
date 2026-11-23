@@ -5,9 +5,7 @@ name: QQQ 0DTE Public reversal
 # A paper-only shadow version (1 ITM, a third at +30%) runs beside it in spy0dte/qrev/shadow/.
 # Orders go ONLY to Public. DRY RUN unless the repo variable QQQ0DTE_PUBLIC_LIVE is set to exactly: yes
 on:
-  schedule:
-    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
-    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
+  # schedule removed Nov 23, 2026 9:00 AM: bots cut off (IV too high). Restore the two cron lines to turn back on.
   workflow_dispatch:
     inputs:
       mode:
