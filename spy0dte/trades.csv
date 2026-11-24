@@ -2,3 +2,4 @@ day,mark_time,mark,side,contract,qty,entry,return_pct,pnl,balance,exits,dry_run
 2026-11-19,10:54,P:put,P,SPY261119P00727000,3,3.09,-33.9,-315,685,"3@2.05 error: closing everything and stopping for the day",no
 2026-11-19,10:54,P:put,P,SPY261119P00727000,3,3.09,-33.9,-315,685,"3@2.05 error: closing everything and stopping for the day",no
 2026-11-19,11:31,P:SPY,P,SPY261119P00728000,2,2.48,-22.9,-363,327.74,"3@1.28 error: closing everything and stopping for the day",no
+2026-11-24,10:12,P:call,C,SPY261124C00717000,2,4.01,4.5,36,1036,"1@4.40 +10% half; 1@4.00 breakeven stop",yes

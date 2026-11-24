@@ -1,0 +1,84 @@
+{
+ "balance": 1036,
+ "trades": [
+  {
+   "day": "2026-11-19",
+   "mark": {
+    "t": "10:54",
+    "k": "P",
+    "src": "put",
+    "s": "P",
+    "tod": 84,
+    "tw": 1,
+    "ag": 0,
+    "px": 727.14
+   },
+   "sym": "SPY261119P00727000",
+   "qty": 3,
+   "entry": 3.09,
+   "ret": -33.9,
+   "pnl": -315,
+   "balance": 685,
+   "exits": "3@2.05 error: closing everything and stopping for the day",
+   "dry": false
+  },
+  {
+   "day": "2026-11-19",
+   "mark": {
+    "t": "11:31",
+    "k": "P",
+    "src": "SPY",
+    "s": "P",
+    "tod": 121,
+    "tw": 1,
+    "ag": 0,
+    "px": 728.41
+   },
+   "sym": "SPY261119P00728000",
+   "qty": 2,
+   "entry": 2.48,
+   "ret": -22.9,
+   "pnl": -363,
+   "balance": 327.74,
+   "exits": "3@1.28 error: closing everything and stopping for the day",
+   "dry": false
+  },
+  {
+   "day": "2026-11-24",
+   "mark": {
+    "t": "10:12",
+    "k": "P",
+    "src": "call",
+    "s": "C",
+    "tod": 42,
+    "tw": 1,
+    "ag": 0,
+    "px": 718.65,
+    "mv30": 2.11,
+    "emaGap": 0.488
+   },
+   "sym": "SPY261124C00717000",
+   "qty": 2,
+   "entry": 4.01,
+   "ret": 4.5,
+   "pnl": 36,
+   "balance": 1036,
+   "exits": "1@4.40 +10% half; 1@4.00 breakeven stop",
+   "dry": true
+  }
+ ],
+ "last10": [
+  0
+ ],
+ "day": "2026-11-24",
+ "halt": null,
+ "reviewHold": null,
+ "dayStart": 1000,
+ "dayBest": 36,
+ "lastRunDay": "2026-11-24",
+ "brake": {
+  "need": 0,
+  "half": false,
+  "target": null
+ }
+}
