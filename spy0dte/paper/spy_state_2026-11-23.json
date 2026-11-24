@@ -45,10 +45,10 @@
   }
  ],
  "last10": [],
- "day": "2026-11-23",
+ "day": null,
  "halt": null,
  "reviewHold": null,
- "dayStart": 1000,
+ "dayStart": 690.74,
  "dayBest": 0,
- "lastRunDay": "2026-11-23"
+ "lastRunDay": "2026-11-19"
 }
