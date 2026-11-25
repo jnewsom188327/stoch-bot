@@ -1,2 +1,3 @@
 day,mark_time,mark,side,contract,qty,entry,return_pct,pnl,balance,exits,dry_run
 2026-11-24,10:12,P:call,C,SPY261124C00719000,3,2.92,2.6,23,1023,"1@3.20 +10% half; 2@2.91 breakeven stop",yes
+2026-11-25,12:46,P:call,C,SPY261125C00711000,3,2.56,2.6,20,1043,"1@2.81 +10% half; 2@2.55 breakeven stop",yes
