@@ -38,6 +38,10 @@ const SW = {
   breakDrop: 10, oppLift: true,
   firstTod: 15,   // 9:45 AM
   agFilter: true, // skip if the agree shading is against the trade on the break bar
+  // patience (Nov 27): arm the setup, then wait up to 3 minutes for BOTH option panes to start breaking your way
+  // (calls: the call chart's fear easing AND the put chart's greed easing; puts mirrored). No cross needed.
+  // If price pushes through the setup low/high while waiting (pause-and-go), the setup is dropped.
+  patience: 3, waitFor: "both", crossW: 1,
 };
 
 const SWING = {
@@ -163,6 +167,7 @@ function swingSignal(rows, i, d, ctx = {}, P = SWING) {
 /** boosters(rows, i, d, ctx) -> [names] */
 function boosters(rows, i, d, ctx = {}, B = BOOST) {
   const out = [], K = keys(d), r = rows[i];
+  if (ctx.bothBoost && bothBreak(ctx, rows, i, d, 2)) out.push("both_break");
   // 1) cross: SPY's side crossing under the bought-side option pane's greed (calls: the call chart, puts: the put chart)
   const cp = d > 0 ? "C" : "P", K2 = d > 0 ? Math.floor(r.c) + 1 : Math.ceil(r.c) - 1;
   const O = ctx.optRows && ctx.optRows[optSym(ctx.day, cp, K2)];
@@ -198,16 +203,54 @@ function weakOpen(rows, prevClose, B = BOOST) {
 }
 
 /** marks for the newest closed bar: { k:"S", ts, t, s, side, tod, px, contract, x, read } */
+// The call and put pane charts breaking against each other: for calls, the call chart's greed crossing above the put
+// chart's greed (and the put's greed falling); mirrored for puts. Returns true if it crossed within the last `w` bars.
+function optCross(ctx, rows, i, d, w = 3) {
+  const r = rows[i], ks = { call: Math.floor(r.c) + 1, put: Math.ceil(r.c) - 1 };
+  const C = ctx.optRows && ctx.optRows[optSym(ctx.day, "C", ks.call)], Pt = ctx.optRows && ctx.optRows[optSym(ctx.day, "P", ks.put)];
+  if (!C || !Pt) return false;
+  const cm = new Map(C.map((x) => [x.t, x])), pm = new Map(Pt.map((x) => [x.t, x]));
+  const gap = (k) => { const a = cm.get(rows[k].t), b = pm.get(rows[k].t); return a && b ? d * (a.G - b.G) : null; };
+  const g0 = gap(i);
+  if (g0 == null || g0 <= 0) return false;
+  for (let k = i - 1; k >= Math.max(0, i - w); k--) { const g = gap(k); if (g != null && g <= 0) return true; }
+  return false;
+}
+
+function bothBreak(ctx, rows, i, d, w = 2) {
+  const r = rows[i], ks = { call: Math.floor(r.c) + 1, put: Math.ceil(r.c) - 1 };
+  const C = ctx.optRows && ctx.optRows[optSym(ctx.day, "C", ks.call)], Pt = ctx.optRows && ctx.optRows[optSym(ctx.day, "P", ks.put)];
+  if (!C || !Pt) return false;
+  const cm = new Map(C.map((x) => [x.t, x])), pm = new Map(Pt.map((x) => [x.t, x]));
+  const a1 = cm.get(r.t), b1 = pm.get(r.t), a0 = cm.get(rows[Math.max(0, i - w)].t), b0 = pm.get(rows[Math.max(0, i - w)].t);
+  if (!a1 || !b1 || !a0 || !b0) return false;
+  // calls: the call's fear easing and the put's greed easing; puts: the put's fear easing and the call's greed easing
+  return d > 0 ? a1.F < a0.F && b1.G < b0.G : b1.F < b0.F && a1.G < a0.G;
+}
+
 function swMarks(day, rows, P = SW, hmLabel, ctx = {}) {
   const i = rows.length - 1;
   if (i < 0) return [];
+  const armed = ctx.armed || null; // patience: { long: {...}, short: {...} } kept by the caller across minutes
   ctx = { ...ctx, day };
   const out = [];
   for (const d of [1, -1]) {
+    const side = d > 0 ? "long" : "short", r = rows[i];
     let setup = "maxed", g = swSignal(rows, i, d, P);
     if (!g && ctx.swing !== false) { setup = "swing"; g = swingSignal(rows, i, d, ctx); }
+    if (P.patience && armed) {
+      // don't take the first pause: arm the setup, then enter only when the call and put charts cross the trade's way
+      if (g) armed[side] = { setup, g, i0: i, ts: r.t };
+      const a = armed[side];
+      if (!a) continue;
+      const pauseAndGo = d > 0 ? r.l < a.g.x - 0.05 : r.h > a.g.x + 0.05; // price pushed through the setup extreme: the run kept going
+      if (i - a.i0 > P.patience || pauseAndGo) { delete armed[side]; continue; }
+      if (!(P.waitFor === "both" ? bothBreak(ctx, rows, i, d, P.crossW || 2) : optCross(ctx, rows, i, d, P.crossW || 3))) continue;
+      delete armed[side];
+      setup = a.setup; g = { ...a.g, read: { ...a.g.read, waited: i - a.i0 } };
+    }
     if (!g) continue;
-    const r = rows[i], side = d > 0 ? "long" : "short";
+    if (P.needBoth && !bothBreak(ctx, rows, i, d, P.bothW || 2)) continue;
     const tod = ((((r.t % 86400) + 86400) % 86400) / 60) - 570;
     const bs = boosters(rows, i, d, ctx);
     const cp = d > 0 ? "C" : "P", K2 = d > 0 ? Math.floor(r.c) + 1 : Math.ceil(r.c) - 1;
@@ -334,4 +377,4 @@ class SwEngine extends Engine {
   }
 }
 
-module.exports = { SwEngine, swSignal, swingSignal, boosters, weakOpen, swMarks, optRead, optSym, SW, SWING, BOOST, SW_CFG };
+module.exports = { bothBreak, optCross, SwEngine, swSignal, swingSignal, boosters, weakOpen, swMarks, optRead, optSym, SW, SWING, BOOST, SW_CFG };

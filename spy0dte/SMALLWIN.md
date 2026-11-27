@@ -7,6 +7,8 @@ No live switch: the engine is built with no broker, so it never sends an order. 
 - **A "maxed"** (your hand sequence): your side (fear for calls, greed for puts) hit **90+** in the last 12 bars and hovered (2+ bars at 80+), the other side **≤15** at the peak, SPY ran **$0.80+** the other way in 15 min. Then price **stalls** (no new low/high for 2 bars) and your side **breaks**: lower than the bar before and 10+ under the peak, other side lifting. First break bar only; skipped if the agree shading is against you. From 9:45.
 - **B "swing"** (post-morning swing fade, from **11:00**): SPY popped/dropped **$1.00+** in 20 min, stalled 2+ bars, SPY's side peaked 70+ in the last 8 bars and turned down 8+. The option panes must agree: the tired option's run side (calls on a drop: the put chart's greed or the call chart's fear) peaked 70+ and is turning down. Puts on pops, calls on drops.
 
+- **Patience (both panes):** a setup doesn't enter on the first pause. It's armed and waits up to 3 minutes for BOTH option panes to start breaking your way (calls: the call chart's fear easing and the put chart's greed easing; puts mirrored). If price pushes through the setup low/high while it waits (pause-and-go), the setup is dropped.
+
 ## Boosters (logged on every trade) and size
 - **cross**: SPY's side crossed under the bought-side pane option's greed in the last 3 bars.
 - **weak_open**: the first 15 minutes closed in the bottom 30% of their range, gap from yesterday's close under 0.30%.
@@ -25,7 +27,9 @@ No live switch: the engine is built with no broker, so it never sends an order. 
 |---|---|---|---|---|---|
 | Your spec as written: 1 ITM, −10% hard stop | $517 | 39 | 15 | −12.7% | −53% |
 | −10% cut on closed bars, −20% hard stop | $1,362 | 69 | 44 | −20.5% | −28% |
-| **Chosen: 2 ITM, −20% hard stop, let-off confirm in 3 min** | **$3,066** | **63** | **44** | **−21.2%** | **−19.8%** |
+| 2 ITM, −20% hard stop, let-off confirm in 3 min | $3,066 | 63 | 44 | −21.2% | −19.8% |
+| **Chosen: + wait for both option panes to break your way (up to 3 min)** | **$3,106** | **63** | **45** | **−21.2%** | **−17.1%** |
+| (tested, not used) wait for the call and put charts to cross | $950 | 37 | 25 | −20.5% | −44% |
 
 Inside the chosen version: swing 32/41 wins (+$2,264), maxed 12/22 (−$198); full port with a booster 18/23, half port 26/40. cross 8/9, weak_open 8/11, vix1d_div 4/5 (VIXY stood in for VIX1D, through Nov 17). Average winner +9.0%, average loser −11.0%; only 1 trade hit the −20% stop. 10 of 17 days green.
 The replay fills at the next bar's open with 1¢ slippage each way, so live spreads will cost a little more.

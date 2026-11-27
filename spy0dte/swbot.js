@@ -103,7 +103,7 @@ async function main() {
   const endMin = half ? 12 * 60 + 55 : 15 * 60 + 10;
   const stats = { setups: 0, skipped: {} };
   let lastBarT = 0, sawToday = false, error = null, wo, vixOk = null;
-  const optRows = {};
+  const optRows = {}, armed = {};
 
   while (et().min < 9 * 60 + 25) await sleep(5000);
   log("watching", { until: half ? "12:55 PM (half day, entries until 12:30)" : "3:10 PM (entries until 1:00)" });
@@ -144,7 +144,7 @@ async function main() {
           if (wo === undefined && rows.length >= 15) { wo = weakOpen(rows, pc); log("weak_open", { weakOpen: wo, prevClose: pc }); }
           eng.setCtx(rows, pane);
           await eng.tick();
-          const ms = swMarks(day, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix });
+          const ms = swMarks(day, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix, armed });
           stats.setups += ms.length;
           if (ms.length) log("setups", { bar: last.timestamp.slice(11, 16), setups: ms.map((m) => `${m.setup} ${m.s} [${m.boosters.join("+") || "no booster"}]`) });
           await eng.onMarks(ms, kills);

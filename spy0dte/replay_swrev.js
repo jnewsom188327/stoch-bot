@@ -95,13 +95,14 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
     const log = (e, d) => { if (!quiet && ["shutoff", "confirm"].includes(e)) lines.push(`${D.day} ${e} ${JSON.stringify(d)}`); };
     const eng = new SwEngine({ state, market, log, cfg: { minPrice: 0, maxSpread: 99, ...cfg } });
     let wo = null;
+    const armed = {};
     for (let i = 10; i < D.rows.length; i++) {
       const R = D.rows.slice(0, i + 1), t = R[i].t;
       nowC = t + 60;
       if (i === 14) wo = weakOpen(R, D.prevClose);
       eng.setCtx(R, D.pane.filter((a) => a.ts <= t));
       await eng.tick();
-      const ms = swMarks(D.day, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, swing: swp.swing !== false });
+      const ms = swMarks(D.day, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
       await eng.onMarks(ms, D.kills.filter((k) => k.ts <= t));
     }
     await eng.flatten("end of day");
