@@ -6,7 +6,15 @@ name: SPY 0DTE small-win Vix Fix (dry run)
 on:
   schedule:
     - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
-    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
+    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:00-11:00
+    # Backup starts (GitHub skipped the 9:20 start on Nov 27). A backup that lands after the bot already ran today
+    # exits at once ("Already ran today"); one that lands while it's running waits in the queue, then exits the same way.
+    - cron: "27 13 * * 1-5"
+    - cron: "27 14 * * 1-5"
+    - cron: "41 13 * * 1-5"
+    - cron: "41 14 * * 1-5"
+    - cron: "53 13 * * 1-5"
+    - cron: "53 14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:

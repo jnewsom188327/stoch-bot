@@ -8,7 +8,7 @@ const path = require("path");
 const { PublicAPI, sleep } = require("./public");
 const { computeMarks, closedOnly, paneStrikes, osi, coreT } = require("./marks");
 const { loadCore } = require("./core");
-const { SwEngine, swMarks, weakOpen, SW, SW_CFG } = require("./swrev");
+const { SwEngine, swMarks, weakOpen, leadSignal, nextTradingDay, SW, SW_CFG } = require("./swrev");
 const { freshState, newDay } = require("./ledger");
 
 const DIR = path.join(__dirname, "smallwin");
@@ -76,7 +76,10 @@ async function main() {
   newDay(st, day);
   st.lastRunDay = day;
   saveState(st);
-  const half = !!HALF_DAYS[day] || process.env.SW_HALF === "yes"; // SW_HALF: the mock test can rehearse a half day
+  const half = !!HALF_DAYS[day] || process.env.SW_HALF === "yes";
+  const dte = process.env.SW_DTE != null && process.env.SW_DTE !== "" ? +process.env.SW_DTE : SW_CFG.dte; // SW_DTE: the mock test can force 0DTE
+  const exp = dte === 1 ? nextTradingDay(day) : day; // the bot trades (and reads its option panes on) this expiry
+  log("expiry", { dte, exp });
   const pc = prevClose(st, day);
   log("prev_close", { prevClose: pc });
 
@@ -103,7 +106,7 @@ async function main() {
   const endMin = half ? 12 * 60 + 55 : 15 * 60 + 10;
   const stats = { setups: 0, skipped: {} };
   let lastBarT = 0, sawToday = false, error = null, wo, vixOk = null;
-  const optRows = {}, armed = {};
+  const optRows = {}, armed = {}, saved = {}, leadSeen = new Set();
 
   while (et().min < 9 * 60 + 25) await sleep(5000);
   log("watching", { until: half ? "12:55 PM (half day, entries until 12:30)" : "3:10 PM (entries until 1:00)" });
@@ -121,14 +124,17 @@ async function main() {
           const need = new Set();
           if (eng.pending) need.add(eng.pending.sym);
           if (eng.pos) need.add(eng.pos.sym);
-          for (const s of need) await refreshOpt(s);
+          for (const s of need) { await refreshOpt(s); try { saved[s] = closedOnly(await api.bars(s, "OPTION"), nowReal); } catch {} }
           // the call and put pane charts (first-out strikes), as the pages draw them
           const ks = paneStrikes(+last.close), opt = {};
           for (const [cp, K] of [["C", ks.call], ["P", ks.put]]) {
-            const s = osi(day, cp, K);
+            const s = osi(day, cp, K, exp);
             opt[s] = closedOnly(await api.bars(s, "OPTION"), nowReal);
             optRows[s] = rowsOf(opt[s].filter((b) => +b.volume > 0).map((b) => str(b, "1")));
+            saved[s] = opt[s];
+            if (exp !== day) { const z = osi(day, cp, K); try { saved[z] = closedOnly(await api.bars(z, "OPTION"), nowReal); } catch {} } // 0DTE twin, saved for comparing later
           }
+          saved.SPY = spy;
           const { marks, kills, rows } = computeMarks(day, spy, opt);
           const pane = marks.filter((m) => m.k === "P").map((m) => ({ ts: m.ts, side: m.side, src: m.src }));
           // VIX1D (booster only; skipped quietly if Public doesn't serve it)
@@ -144,7 +150,13 @@ async function main() {
           if (wo === undefined && rows.length >= 15) { wo = weakOpen(rows, pc); log("weak_open", { weakOpen: wo, prevClose: pc }); }
           eng.setCtx(rows, pane);
           await eng.tick();
-          const ms = swMarks(day, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix, armed });
+          const ms = swMarks(exp, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix, armed });
+          // shadow only (not traded): where "the option panes lead" would have entered, to retest it on 1DTE panes later
+          for (const d of [1, -1]) {
+            const lg = leadSignal(rows, rows.length - 1, d, { optRows, day: exp }, { ...SW, leadHold: 1, leadMin: 0, leadStall: 1, leadSpyDrop: 3 });
+            const key = `${d}:${rows[rows.length - 1].t}`;
+            if (lg && !leadSeen.has(key)) { leadSeen.add(key); log("lead_shadow", { bar: last.timestamp.slice(11, 16), side: d > 0 ? "C" : "P", setup: lg.setup, read: lg.read }); }
+          }
           stats.setups += ms.length;
           if (ms.length) log("setups", { bar: last.timestamp.slice(11, 16), setups: ms.map((m) => `${m.setup} ${m.s} [${m.boosters.join("+") || "no booster"}]`) });
           await eng.onMarks(ms, kills);
@@ -169,7 +181,22 @@ async function main() {
     stats.skipped[k] = (stats.skipped[k] || 0) + 1;
   }
   saveState(st);
+  saveBars(day, exp, saved);
   summary({ day, st, events, stats, error, sawToday, half });
+}
+
+// The day's bars (SPY + every option chart the bot looked at, 1DTE and the 0DTE twins) in the results/bars_<day>.json
+// format, so the day can be replayed on 1DTE later: spy [[ts,o,h,l,c,v]], opt {sym: [[minute since 9:30,o,h,l,c]]}.
+function saveBars(day, exp, saved) {
+  try {
+    if (!saved.SPY || !saved.SPY.length) return;
+    const dir = path.join(DIR, "bars");
+    fs.mkdirSync(dir, { recursive: true });
+    const base = Date.parse(saved.SPY[0].timestamp);
+    const out = { day, exp, spy: saved.SPY.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close, +b.volume]), opt: {} };
+    for (const [sym, bars] of Object.entries(saved)) if (sym !== "SPY") out.opt[sym] = bars.map((b) => [Math.round((Date.parse(b.timestamp) - base) / 60000), +b.open, +b.high, +b.low, +b.close]);
+    fs.writeFileSync(path.join(dir, `${day}.json`), JSON.stringify(out));
+  } catch (e) { console.log("saveBars failed: " + e.message); }
 }
 
 const CSV_HEAD = "day,mark_time,setup,side,boosters,port,contract,qty,entry,return_pct,pnl,balance,confirm,exits,peak,opp_at_peak,side_now,opp_now,ran15,swing,stall_bars,trend_line,shading,ttm,ttm_turning,opt_fear,opt_greed,panes\n";
