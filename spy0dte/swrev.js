@@ -25,8 +25,8 @@
 // SIZE: a setup + 1 or more boosters = full port; a setup alone = half port.
 // VETOES: an x (same-side kill) printing after the mark = out; fear/greed breaking the same way as price = out;
 //   2 losses on the day = done.
-// Day: one trade at a time, stop after 2 losses. PRACTICE MODE (Nov 27): entries until 3:30 PM, flat by 3:52,
-//   no day-target stop, so there are more trades to review. Half days: entries until 12:30, flat by 12:50.
+// Day: one trade at a time, stop after 2 losses (day-target stop off for the review dry run). No entries after 1:00.
+//   Half days: entries until 12:30, flat by 12:50.
 const { Engine } = require("./engine");
 const { contractFor, shiftContract } = require("./marks");
 const r2 = (x) => Math.round(x * 100) / 100;
@@ -55,7 +55,7 @@ const SWING = {
 const BOOST = { crossBars: 3, weakFrac: 0.30, gapMax: 0.003, divNow: 5, divBefore: 10 };
 
 const SW_CFG = {
-  kinds: ["S"], firstEntryTod: SW.firstTod, lastEntryTod: 360, // practice (Nov 27): entries until 3:30 PM (was 1:00)
+  kinds: ["S"], firstEntryTod: SW.firstTod, lastEntryTod: 210, // no entries from 1:00 PM
   entryDisc: 0.0, cancelMin: 2, minPrice: 0.8, maxSpread: 0.10,
   trendSizing: false, pct: 1.0, steps: 4,     // 2 strikes in the money (beat 1 ITM and first-out on the 17 days)
   tp: 0.08, sellFrac: 0.75,                    // +8% on most
@@ -68,7 +68,7 @@ const SW_CFG = {
   cutMin: 15,                                  // no +8% by minute 15 = out
   failBuf: 0.05,                               // price $0.05 past the setup extreme with your side rising = out
   maxLosses: 2, dayTarget: 0,                  // stop after 2 losers; day target off for practice (was +15%)
-  flattenAtTod: 382, maxHold: 60, reviewStops: 99, dayMaxLoss: 0.30, dayLockAt: 99,
+  flattenAtTod: 338, maxHold: 60, reviewStops: 99, dayMaxLoss: 0.30, dayLockAt: 99,
 };
 
 const keys = (d) => (d > 0 ? { S: "F", O: "G", sA: "fA", ext: "l" } : { S: "G", O: "F", sA: "gA", ext: "h" });
