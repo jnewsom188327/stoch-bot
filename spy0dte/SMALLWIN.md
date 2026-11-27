@@ -19,8 +19,8 @@ No live switch: the engine is built with no broker, so it never sends an order. 
 - **+8%** on 75% of the contracts (1 contract: all of it); the runner rides a **ratchet**: stop 5% under its peak, never under breakeven, out after 20 min.
 - **Confirm within 3 minutes**: your side must be letting off (under its reading at the mark). No confirm = out.
 - **Vetoes:** an **x** (same-side kill) after the mark = out; **fear/greed breaking the same way as price** (a new low/high past the setup extreme with your side rising) = out; **2 losses** on the day = done.
-- Hard stop **−20%**; no +8% by minute 15 = out; **day target +15%** = done for the day.
-- **No entries after 1:00 PM.** Half days (Fri Nov 27): entries until 12:30, flat by 12:50 (0DTE expires at 1:00).
+- Hard stop **−20%**; no +8% by minute 15 = out.
+- **Practice mode (from Nov 27):** entries until **3:30 PM**, flat by 3:52, no day-target stop (the 2-loss stop stays), to collect trades for review. Half days: entries until 12:30, flat by 12:50 (0DTE expires at 1:00).
 
 ## Tuning on the 17 tracked days (Nov 3–25), $1,000 start, compounding, full/half port
 | Version | End | Trades | Wins | Worst trade | Max drop |

@@ -97,16 +97,16 @@ async function main() {
     optCache[sym] = closedOnly(await api.bars(sym, "OPTION"), Math.floor(Date.now() / 1000)).map((b) => ({ t: coreT(b), o: +b.open, h: +b.high, l: +b.low, c: +b.close }));
   };
 
-  // Half day (closes 1:00): entries until 12:30, flat by 12:50 (0DTE expires at 1:00). Normal days: entries until 1:00.
+  // Half day (closes 1:00): entries until 12:30, flat by 12:50 (0DTE expires at 1:00). Normal days (practice): entries until 3:30.
   const cfg = half ? { lastEntryTod: 180, flattenAtTod: 200 } : {};
   const eng = new SwEngine({ state: st, market, broker: null, log, cfg }); // broker null = DRY RUN, always
-  const endMin = half ? 12 * 60 + 55 : 15 * 60 + 10;
+  const endMin = half ? 12 * 60 + 55 : 15 * 60 + 56;
   const stats = { setups: 0, skipped: {} };
   let lastBarT = 0, sawToday = false, error = null, wo, vixOk = null;
   const optRows = {}, armed = {};
 
   while (et().min < 9 * 60 + 25) await sleep(5000);
-  log("watching", { until: half ? "12:55 PM (half day, entries until 12:30)" : "3:10 PM (entries until 1:00)" });
+  log("watching", { until: half ? "12:55 PM (half day, entries until 12:30)" : "3:56 PM (practice: entries until 3:30)" });
 
   while (et().min < endMin) {
     try {
