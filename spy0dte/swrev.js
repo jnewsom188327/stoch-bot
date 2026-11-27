@@ -85,6 +85,10 @@ function nextTradingDay(day) {
   return d.toISOString().slice(0, 10);
 }
 
+// Boosters that are logged as confluence but never change the size (vix_pane: tested as a sizing booster on the
+// 18 days and it lowered the result, $2,893 -> $2,633, so it's shown on every trade for review only).
+const LOG_ONLY = new Set(["vix_pane"]);
+
 const keys = (d) => (d > 0 ? { S: "F", O: "G", sA: "fA", ext: "l" } : { S: "G", O: "F", sA: "gA", ext: "h" });
 
 /** swSignal(rows, i, d, P) -> null | { x (setup extreme), read } ; rows = core compute() rows (closed bars) */
@@ -191,6 +195,16 @@ function boosters(rows, i, d, ctx = {}, B = BOOST) {
     for (let k = Math.max(1, i - B.crossBars + 1); k <= i; k++) {
       const a = om.get(rows[k].t), b = om.get(rows[k - 1].t);
       if (a && b && rows[k - 1][K.S] > b.G && rows[k][K.S] <= a.G) { out.push("cross"); break; }
+    }
+  }
+  // 1b) VIX's own fear/greed pane (Nov 27 review): moves with the puts, against the calls.
+  //     puts: VIX greed lifting off a low (rose 15+ over 3 bars, now under 90, i.e. not already maxed);
+  //     calls: VIX fear rising while VIX greed falls. Extra confluence only: logged, never sizes or triggers (LOG_ONLY).
+  if (ctx.vixRows && i >= 3) {
+    const a = ctx.vixRows.get(r.t), b = ctx.vixRows.get(rows[i - 3].t);
+    if (a && b) {
+      if (d < 0 && a.G - b.G >= 15 && a.G < 90) out.push("vix_pane");
+      if (d > 0 && a.F > b.F && a.G < b.G && a.F < 90) out.push("vix_pane");
     }
   }
   // 2) weak-open day
@@ -330,6 +344,8 @@ function swMarks(day, rows, P = SW, hmLabel, ctx = {}) {
     const bs = boosters(rows, i, d, ctx);
     const cp = d > 0 ? "C" : "P", K2 = d > 0 ? Math.floor(r.c) + 1 : Math.ceil(r.c) - 1;
     const orow = optRead(ctx.optRows && ctx.optRows[optSym(day, cp, K2)], r.t, d);
+    const vx = ctx.vixRows && ctx.vixRows.get(r.t);
+    if (vx && g.read) g.read = { ...g.read, vixGreed: r1(vx.G), vixFear: r1(vx.F) };
     out.push({ k: "S", src: setup, setup, boosters: bs, ts: r.t, t: hmLabel ? hmLabel(r.t) : String(tod), side, s: cp, tod, px: r.c, tw: d * (r.col || 0) > 0 ? 1 : 0, ag: d * (r.ag || 0), contract: contractFor(day, side, r.c), x: g.x, read: g.read, optRead: orow });
   }
   return out;
@@ -358,14 +374,14 @@ class SwEngine extends Engine {
 
   // setup + 1 or more boosters = full port; setup alone = half port
   planFor(m) {
-    const full = (m.boosters || []).length > 0;
+    const full = (m.boosters || []).some((b) => !LOG_ONLY.has(b));
     return { sym: m.pickSym || shiftContract(m.contract, this.cfg.steps).sym, pct: this.cfg.pct * (full ? 1 : this.cfg.halfPct), trend: `${m.setup} ${full ? "full port (" + m.boosters.join("+") + ")" : "half port (no booster)"}` };
   }
 
   async tryEntry(m) {
     const c = this.cfg;
     if (c.minQty > 1 && !this.pos && !this.pending) {
-      const full = (m.boosters || []).length > 0, budget = this.st.balance * c.pct * (full ? 1 : c.halfPct);
+      const full = (m.boosters || []).some((b) => !LOG_ONLY.has(b)), budget = this.st.balance * c.pct * (full ? 1 : c.halfPct);
       const tried = [];
       for (let st = c.steps; st >= c.minSteps; st -= 1) {
         const sym = shiftContract(m.contract, st).sym, q = await this.mk.quote(sym, m);

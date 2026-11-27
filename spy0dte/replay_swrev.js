@@ -50,8 +50,10 @@ function loadDay(f) {
     oc[sym] = bars.map((b) => ({ t: coreT(b), o: +b.open, h: +b.high, l: +b.low, c: +b.close }));
   }
   const { marks, kills } = computeMarks(B.day, spy, opt);
+  let vixRows = null;
+  if (B.vix) { const p = L.parseBars(toRes(B.vix.map(([t, o, h, l, c]) => ({ timestamp: t, open: String(o), high: String(h), low: String(l), close: String(c), volume: "1" })))); if (p) vixRows = new Map(L.compute(L.cleanPrints(p.filter((x) => !x.live && !x.fill))).map((x) => [x.t, x])); }
   const pane = marks.filter((m) => m.k === "P").map((m) => ({ ts: m.ts, side: m.side, src: m.src }));
-  return { day: B.day, exp: B.exp || B.day, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
+  return { day: B.day, exp: B.exp || B.day, vixRows, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
 }
 
 let CACHE = null;
@@ -70,6 +72,21 @@ function days(from = "0000", to = "9999") {
     }
   }
   return CACHE.filter((D) => D.day >= from && D.day <= to && D.n >= 200); // full days and half days (1:00 close)
+}
+
+let VIXROWS = null;
+function vixRowsFor(D) {
+  if (D.vixRows) return D.vixRows;
+  if (!VIXROWS) {
+    VIXROWS = new Map();
+    const f = path.join(__dirname, "..", "results", "vixy_1m.csv.gz");
+    if (fs.existsSync(f)) {
+      const byDay = {};
+      for (const line of zlib.gunzipSync(fs.readFileSync(f)).toString().split("\n").slice(1)) { const a = line.split(","); if (a.length < 5) continue; const d = a[0].slice(0, 10); (byDay[d] = byDay[d] || []).push({ timestamp: a[0].replace(" ", "T"), open: a[1], high: a[2], low: a[3], close: a[4], volume: "1" }); }
+      for (const [d, bars] of Object.entries(byDay)) { const p = L.parseBars(toRes(bars)); if (p) VIXROWS.set(d, new Map(L.compute(L.cleanPrints(p.filter((x) => !x.live && !x.fill))).map((x) => [x.t, x]))); }
+    }
+  }
+  return VIXROWS.get(D.day) || null;
 }
 
 async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet = true } = {}) {
@@ -103,7 +120,7 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
       if (i === 14) wo = weakOpen(R, D.prevClose);
       eng.setCtx(R, D.pane.filter((a) => a.ts <= t));
       await eng.tick();
-      const ms = swMarks(D.exp, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
+      const ms = swMarks(D.exp, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, vixRows: cfg.noVixPane ? null : vixRowsFor(D), swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
       await eng.onMarks(ms, D.kills.filter((k) => k.ts <= t));
     }
     await eng.flatten("end of day");

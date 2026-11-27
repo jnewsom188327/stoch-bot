@@ -137,6 +137,10 @@ async function main() {
           saved.SPY = spy;
           const { marks, kills, rows } = computeMarks(day, spy, opt);
           const pane = marks.filter((m) => m.k === "P").map((m) => ({ ts: m.ts, side: m.side, src: m.src }));
+          // regular VIX (Public serves it): its own fear/greed pane is the vix_pane booster; its closes feed vix1d_div when VIX1D isn't served
+          let vixRows = null, vixC = null;
+          try { const vb = closedOnly(await api.bars("VIX", "INDEX"), nowReal); vixRows = new Map(rowsOf(vb.map((b) => str(b, "1"))).map((x) => [x.t, x])); vixC = new Map(vb.map((b) => [coreT(b), +b.close])); saved.VIX_INDEX = vb; }
+          catch (e) { if (!stats.vixErr) { stats.vixErr = 1; log("vix", { ok: false, err: String(e.message).slice(0, 160) }); } }
           // VIX1D (booster only; skipped quietly if Public doesn't serve it)
           let vix = null;
           if (vixOk !== false) {
@@ -150,7 +154,7 @@ async function main() {
           if (wo === undefined && rows.length >= 15) { wo = weakOpen(rows, pc); log("weak_open", { weakOpen: wo, prevClose: pc }); }
           eng.setCtx(rows, pane);
           await eng.tick();
-          const ms = swMarks(exp, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix, armed });
+          const ms = swMarks(exp, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix: vix || vixC, vixRows, armed });
           // shadow only (not traded): where "the option panes lead" would have entered, to retest it on 1DTE panes later
           for (const d of [1, -1]) {
             const lg = leadSignal(rows, rows.length - 1, d, { optRows, day: exp }, { ...SW, leadHold: 1, leadMin: 0, leadStall: 1, leadSpyDrop: 3 });
@@ -194,17 +198,18 @@ function saveBars(day, exp, saved) {
     fs.mkdirSync(dir, { recursive: true });
     const base = Date.parse(saved.SPY[0].timestamp);
     const out = { day, exp, spy: saved.SPY.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close, +b.volume]), opt: {} };
-    for (const [sym, bars] of Object.entries(saved)) if (sym !== "SPY") out.opt[sym] = bars.map((b) => [Math.round((Date.parse(b.timestamp) - base) / 60000), +b.open, +b.high, +b.low, +b.close]);
+    if (saved.VIX_INDEX) out.vix = saved.VIX_INDEX.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close]);
+    for (const [sym, bars] of Object.entries(saved)) if (sym !== "SPY" && sym !== "VIX_INDEX") out.opt[sym] = bars.map((b) => [Math.round((Date.parse(b.timestamp) - base) / 60000), +b.open, +b.high, +b.low, +b.close]);
     fs.writeFileSync(path.join(dir, `${day}.json`), JSON.stringify(out));
   } catch (e) { console.log("saveBars failed: " + e.message); }
 }
 
-const CSV_HEAD = "day,mark_time,setup,side,boosters,port,contract,qty,entry,return_pct,pnl,balance,confirm,exits,peak,opp_at_peak,side_now,opp_now,ran15,swing,stall_bars,trend_line,shading,ttm,ttm_turning,opt_fear,opt_greed,panes\n";
+const CSV_HEAD = "day,mark_time,setup,side,boosters,port,contract,qty,entry,return_pct,pnl,balance,confirm,exits,peak,opp_at_peak,side_now,opp_now,ran15,swing,stall_bars,trend_line,shading,ttm,ttm_turning,opt_fear,opt_greed,panes,vix_greed,vix_fear\n";
 function csvRow(t) {
   const r = t.read || {}, o = t.optRead || {};
   const q = (x) => (x == null ? "" : `"${String(x).replace(/"/g, "'")}"`);
-  return [t.day, t.mark.t, t.setup, t.mark.s, t.boosters, t.boosters === "none" ? "half" : "full", t.sym, t.qty, t.entry, t.ret, t.pnl, t.balance, q(t.confirm), q(t.exits),
-    r.peak, r.oppAtPeak, r.sideNow, r.oppNow, r.ran15, r.swing, r.stall, r.trendLine, r.shading, r.ttm, r.ttmTurning, o.optFear, o.optGreed, q(r.panes)].join(",") + "\n";
+  return [t.day, t.mark.t, t.setup, t.mark.s, t.boosters, t.boosters.split("+").some((x) => x && x !== "none" && x !== "vix_pane") ? "full" : "half", t.sym, t.qty, t.entry, t.ret, t.pnl, t.balance, q(t.confirm), q(t.exits),
+    r.peak, r.oppAtPeak, r.sideNow, r.oppNow, r.ran15, r.swing, r.stall, r.trendLine, r.shading, r.ttm, r.ttmTurning, o.optFear, o.optGreed, q(r.panes), r.vixGreed, r.vixFear].join(",") + "\n";
 }
 
 function summary({ day, st, events, stats, error, sawToday, half }) {
@@ -220,9 +225,9 @@ function summary({ day, st, events, stats, error, sawToday, half }) {
   L2.push("");
   if (trades.length) {
     L2.push("| Time | Setup | Side | Boosters | Port | Contract | Entry | Exits | Return | P&L |", "|---|---|---|---|---|---|---|---|---|---|");
-    for (const t of trades) L2.push(`| ${t.mark.t} | ${t.setup} | ${t.mark.s} | ${t.boosters} | ${t.boosters === "none" ? "half" : "full"} | ${t.sym} | ${t.entry.toFixed(2)} | ${t.exits} | ${t.ret}% | ${usd(t.pnl)} |`);
+    for (const t of trades) L2.push(`| ${t.mark.t} | ${t.setup} | ${t.mark.s} | ${t.boosters} | ${t.boosters.split("+").some((x) => x && x !== "none" && x !== "vix_pane") ? "full" : "half"} | ${t.sym} | ${t.entry.toFixed(2)} | ${t.exits} | ${t.ret}% | ${usd(t.pnl)} |`);
     L2.push("", "Readings at entry (compare with your own picks):");
-    for (const t of trades) { const r = t.read || {}, o = t.optRead || {}; L2.push(`- ${t.mark.t} ${t.setup} ${t.mark.s}: peak ${r.peak} (other side ${r.oppAtPeak ?? r.oppNow}), now ${r.sideNow}/${r.oppNow}, ${r.swing != null ? "swing $" + r.swing : "ran $" + r.ran15}, stalled ${r.stall} bars, trend line ${r.trendLine}, shading ${r.shading}, TTM ${r.ttm}${r.ttmTurning ? " turning" : ""}${o.optGreed != null ? `, option fear/greed ${o.optFear}/${o.optGreed}` : ""}${r.panes ? `, panes: ${r.panes}` : ""} · confirm: ${t.confirm}`); }
+    for (const t of trades) { const r = t.read || {}, o = t.optRead || {}; L2.push(`- ${t.mark.t} ${t.setup} ${t.mark.s}: peak ${r.peak} (other side ${r.oppAtPeak ?? r.oppNow}), now ${r.sideNow}/${r.oppNow}, ${r.swing != null ? "swing $" + r.swing : "ran $" + r.ran15}, stalled ${r.stall} bars, trend line ${r.trendLine}, shading ${r.shading}, TTM ${r.ttm}${r.ttmTurning ? " turning" : ""}${o.optGreed != null ? `, option fear/greed ${o.optFear}/${o.optGreed}` : ""}${r.panes ? `, panes: ${r.panes}` : ""}${r.vixGreed != null ? `, VIX pane greed/fear ${r.vixGreed}/${r.vixFear}` : ""} · confirm: ${t.confirm}`); }
     L2.push("");
   }
   L2.push(`Setups seen: ${stats.setups} · entries placed: ${events.filter((e) => /^order_buy/.test(e.event)).length} · unfilled: ${events.filter((e) => e.event === "entry_cancel").length}`);
