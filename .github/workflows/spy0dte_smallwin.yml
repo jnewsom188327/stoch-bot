@@ -1,0 +1,69 @@
+name: SPY 0DTE small-win Vix Fix (dry run)
+
+# The small-win Vix Fix reversal bot ("swrev"): spy0dte/swbot.js + spy0dte/swrev.js. DRY RUN ONLY.
+# There is no live switch: the bot is built with no broker, so it can never send an order. Public is used for prices only.
+# Separate from the Robinhood SPY dot bot and the Public bots: its own files in spy0dte/smallwin/, its own concurrency group.
+on:
+  schedule:
+    - cron: "20 13 * * 1-5"   # 9:20 AM New York in summer (EDT)
+    - cron: "20 14 * * 1-5"   # 9:20 AM New York in winter (EST); the bot ignores whichever one isn't 9:20
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run = today's session, check = test the key + data (no orders either way)"
+        default: "check"
+      reset:
+        description: "yes = reset this bot's paper balance to $1,000"
+        default: "no"
+      restart:
+        description: "yes = start again today after a stop (mode must be run)"
+        default: "no"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: spy0dte-smallwin
+  cancel-in-progress: false
+
+jobs:
+  smallwin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the latest repo
+        run: git pull --ff-only origin main || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run the small-win dry run
+        env:
+          PUBLIC_API_SECRET: ${{ secrets.PUBLIC_API_SECRET }}
+          PUBLIC_ACCOUNT_ID: ${{ vars.PUBLIC_ACCOUNT_ID }}
+          MODE: ${{ github.event.inputs.mode || 'run' }}
+          RESET: ${{ github.event.inputs.reset || 'no' }}
+          RESTART: ${{ github.event.inputs.restart || 'no' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'yes' || '' }}
+        run: node spy0dte/swbot.js
+      - name: Save this bot's files
+        if: always()
+        run: |
+          git config user.name "spy0dte-smallwin"
+          git config user.email "spy0dte-bot@users.noreply.github.com"
+          git add spy0dte/smallwin 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "spy0dte smallwin $(TZ=America/New_York date +%F)"
+            for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
+      - name: Send the summary (GitHub issue = phone notification)
+        if: always() && (github.event.inputs.mode || 'run') == 'run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          D=$(TZ=America/New_York date +%F)
+          F="spy0dte/smallwin/summaries/$D.md"
+          if [ -f "$F" ]; then
+            gh issue create --title "SPY SMALL-WIN · $D · $(cat "spy0dte/smallwin/summaries/$D.title")" --body-file "$F" || true
+          fi
