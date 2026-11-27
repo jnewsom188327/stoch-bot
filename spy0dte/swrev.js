@@ -43,6 +43,8 @@ const SW = {
   // (calls: the call chart's fear easing AND the put chart's greed easing; puts mirrored). No cross needed.
   // If price pushes through the setup low/high while waiting (pause-and-go), the setup is dropped.
   patience: 3, waitFor: "both", crossW: 1,
+  // lead mode (Nov 27 review): SPY arms it, the option panes trigger it, held leadHold bars (no one-bar dips)
+  lead: false, leadHold: 2, leadMin: 0, leadStall: 1,
 };
 
 const SWING = {
@@ -62,6 +64,10 @@ const SW_CFG = {
   trail: 0.05, runnerMax: 20,                  // runner: ratchet 5% under its peak, floor = breakeven
   stopPct: 0.20,                               // hard stop -20% (a -10% stop got tagged by 1-minute wicks: $517 vs $3,066 on the 17 days)
   halfPct: 0.5,
+  dte: 1,                                      // Nov 27 review: trade 1DTE (bars ~3-4x calmer than 0DTE); 0 = same-day expiry
+  minQty: 2,                                   // pick the deepest strike (from SW_CFG.steps toward OTM) where 2+ contracts fit, so there's a runner
+  minSteps: -4,
+  oneRunner: true, oneLock: 0.06,             // 1 contract: at +8% lock +6% and ride the ratchet instead of selling
   xVeto: true,                                 // an x (same-side kill) after the mark = out
   softCut: 0, softCutAlways: false,            // cut on a closed bar at -softCut (0 = off)
   confirmBars: 3, confirm: "letoff",           // your side must be letting off within 3 minutes, else out (best of arrow/shading/let-off)
@@ -70,6 +76,14 @@ const SW_CFG = {
   maxLosses: 2, dayTarget: 0,                  // stop after 2 losers; day target off for practice (was +15%)
   flattenAtTod: 338, maxHold: 60, reviewStops: 99, dayMaxLoss: 0.30, dayLockAt: 99,
 };
+
+// Market holidays (no trading) for picking the 1DTE expiry: the next trading day after `day`.
+const HOLIDAYS = new Set(["2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"]);
+function nextTradingDay(day) {
+  const d = new Date(day + "T12:00:00Z");
+  do { d.setUTCDate(d.getUTCDate() + 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6 || HOLIDAYS.has(d.toISOString().slice(0, 10)));
+  return d.toISOString().slice(0, 10);
+}
 
 const keys = (d) => (d > 0 ? { S: "F", O: "G", sA: "fA", ext: "l" } : { S: "G", O: "F", sA: "gA", ext: "h" });
 
@@ -226,7 +240,54 @@ function bothBreak(ctx, rows, i, d, w = 2) {
   const a1 = cm.get(r.t), b1 = pm.get(r.t), a0 = cm.get(rows[Math.max(0, i - w)].t), b0 = pm.get(rows[Math.max(0, i - w)].t);
   if (!a1 || !b1 || !a0 || !b0) return false;
   // calls: the call's fear easing and the put's greed easing; puts: the put's fear easing and the call's greed easing
-  return d > 0 ? a1.F < a0.F && b1.G < b0.G : b1.F < b0.F && a1.G < a0.G;
+  const m = ctx.bothMin || 0; // each pane must drop at least this much over the window
+  return d > 0 ? a1.F < a0.F - m && b1.G < b0.G - m : b1.F < b0.F - m && a1.G < a0.G - m;
+}
+
+// The option panes' turn, held: over the last `hold` bars each pane fell every bar, and by `min`+ in total.
+// calls: the call chart's fear AND the put chart's greed; puts: the put chart's fear AND the call chart's greed.
+function panesBreak(ctx, rows, i, d, hold = 2, min = 0) {
+  const r = rows[i], ks = { call: Math.floor(r.c) + 1, put: Math.ceil(r.c) - 1 };
+  const C = ctx.optRows && ctx.optRows[optSym(ctx.exp || ctx.day, "C", ks.call)], Pt = ctx.optRows && ctx.optRows[optSym(ctx.exp || ctx.day, "P", ks.put)];
+  if (!C || !Pt || i < hold) return null;
+  const cm = new Map(C.map((x) => [x.t, x])), pm = new Map(Pt.map((x) => [x.t, x]));
+  const line = (m, key) => { const v = []; for (let k = i - hold; k <= i; k++) { const b = m.get(rows[k].t); if (!b) return null; v.push(b[key]); } return v; };
+  const a = d > 0 ? line(cm, "F") : line(pm, "F"), b = d > 0 ? line(pm, "G") : line(cm, "G");
+  if (!a || !b) return null;
+  const falling = (v) => v.every((x, k) => k === 0 || x < v[k - 1]) && v[0] - v[v.length - 1] >= min;
+  return falling(a) && falling(b) ? { own: `${d > 0 ? "call" : "put"} fear ${r1(a[0])}->${r1(a[a.length - 1])}`, other: `${d > 0 ? "put" : "call"} greed ${r1(b[0])}->${r1(b[b.length - 1])}` } : null;
+}
+
+/** leadSignal: SPY arms it (hard run, stalling), the option panes pull the trigger. Returns { setup, x, read } or null. */
+function leadSignal(rows, i, d, ctx, P) {
+  if (i < 22) return null;
+  const K = keys(d), r = rows[i];
+  const tod = ((((r.t % 86400) + 86400) % 86400) / 60) - 570;
+  let peak = 0, pk = i, hover = 0;
+  for (let k = i - P.setBars + 1; k <= i; k++) { if (rows[k][K.S] >= peak) { peak = rows[k][K.S]; pk = k; } if (rows[k][K.S] >= P.hoverMin) hover++; }
+  let x = d > 0 ? Infinity : -Infinity, xi = i;
+  for (let k = Math.max(0, i - 20); k <= i; k++) { const v = rows[k][K.ext]; if (d > 0 ? v <= x : v >= x) { x = v; xi = k; } }
+  const stall = i - xi;
+  if (stall < P.leadStall) return null;
+  const ran = -d * (r.c - rows[i - P.ranBars].c);
+  const swing = d > 0 ? rows[i - 20].c - x : x - rows[i - 20].c;
+  let setup = null;
+  if (peak >= P.setMin && hover >= P.hoverN && rows[pk][K.O] <= P.oppMax && ran >= P.ranMin) setup = "maxed";
+  else if (ctx.swing !== false && tod >= SWING.firstTod && swing >= SWING.min && peak >= SWING.sideMin) setup = "swing";
+  if (!setup) return null;
+  const pb = panesBreak(ctx, rows, i, d, P.leadHold, P.leadMin);
+  if (!pb) return null;
+  if (P.leadSpyDrop != null && !(r[K.S] < rows[i - 1][K.S] && r[K.S] <= peak - P.leadSpyDrop)) return null; // SPY's line has to start rolling over too
+  if (r[K.S] > rows[i - 1][K.S] && rows[i - 1][K.S] > rows[i - 2][K.S] && r[K.ext] === x) return null; // still pushing: price at the extreme with SPY's side climbing
+  const agYour = d * (r.ag || 0);
+  return {
+    setup, x,
+    read: {
+      peak: r1(peak), peakAgo: i - pk, hover, oppAtPeak: r1(rows[pk][K.O]), sideNow: r1(r[K.S]), oppNow: r1(r[K.O]), ran15: r2(ran), swing: r2(swing), stall,
+      panes: `${pb.own}, ${pb.other}`, trendLine: d * (r.col || 0) > 0 ? "your way" : d * (r.col || 0) < 0 ? "against" : "chop", col: r.col,
+      shading: agYour === 1 ? "your way" : agYour === -1 ? "against" : "none", ttm: r1(r.m), spy: r.c, ext: x, entry: "option panes led",
+    },
+  };
 }
 
 function swMarks(day, rows, P = SW, hmLabel, ctx = {}) {
@@ -237,20 +298,33 @@ function swMarks(day, rows, P = SW, hmLabel, ctx = {}) {
   const out = [];
   for (const d of [1, -1]) {
     const side = d > 0 ? "long" : "short", r = rows[i];
-    let setup = "maxed", g = swSignal(rows, i, d, P);
-    if (!g && ctx.swing !== false) { setup = "swing"; g = swingSignal(rows, i, d, ctx); }
-    if (P.patience && armed) {
+    let setup = "maxed", g = null;
+    if (P.lead) {
+      const lg = leadSignal(rows, i, d, ctx, P);
+      if (lg) { setup = lg.setup; g = { x: lg.x, read: lg.read }; }
+    } else {
+      g = swSignal(rows, i, d, P);
+      if (!g && ctx.swing !== false) { setup = "swing"; g = swingSignal(rows, i, d, ctx); }
+    }
+    if (!P.lead && P.patience && armed) {
       // don't take the first pause: arm the setup, then enter only when the call and put charts cross the trade's way
       if (g) armed[side] = { setup, g, i0: i, ts: r.t };
       const a = armed[side];
       if (!a) continue;
       const pauseAndGo = d > 0 ? r.l < a.g.x - 0.05 : r.h > a.g.x + 0.05; // price pushed through the setup extreme: the run kept going
       if (i - a.i0 > P.patience || pauseAndGo) { delete armed[side]; continue; }
-      if (!(P.waitFor === "both" ? bothBreak(ctx, rows, i, d, P.crossW || 2) : optCross(ctx, rows, i, d, P.crossW || 3))) continue;
+      if (!(P.waitFor === "both" ? bothBreak({ ...ctx, bothMin: P.bothMin || 0 }, rows, i, d, P.crossW || 2) : optCross(ctx, rows, i, d, P.crossW || 3))) continue;
       delete armed[side];
       setup = a.setup; g = { ...a.g, read: { ...a.g.read, waited: i - a.i0 } };
     }
     if (!g) continue;
+    // don't chase (Nov 27 review, 12:03 put): the pop/drop peaked too long ago, or the option to buy already ran
+    if (P.maxStall && g.read.stall > P.maxStall) continue;
+    if (P.optRanMax) {
+      const cpB = d > 0 ? "C" : "P", KB = d > 0 ? Math.floor(r.c) + 1 : Math.ceil(r.c) - 1;
+      const ob = optRead(ctx.optRows && ctx.optRows[optSym(day, cpB, KB)], r.t, d);
+      if (ob && ob.optGreed >= P.optRanMax) continue;
+    }
     if (P.needBoth && !bothBreak(ctx, rows, i, d, P.bothW || 2)) continue;
     const tod = ((((r.t % 86400) + 86400) % 86400) / 60) - 570;
     const bs = boosters(rows, i, d, ctx);
@@ -285,10 +359,22 @@ class SwEngine extends Engine {
   // setup + 1 or more boosters = full port; setup alone = half port
   planFor(m) {
     const full = (m.boosters || []).length > 0;
-    return { sym: shiftContract(m.contract, this.cfg.steps).sym, pct: this.cfg.pct * (full ? 1 : this.cfg.halfPct), trend: `${m.setup} ${full ? "full port (" + m.boosters.join("+") + ")" : "half port (no booster)"}` };
+    return { sym: m.pickSym || shiftContract(m.contract, this.cfg.steps).sym, pct: this.cfg.pct * (full ? 1 : this.cfg.halfPct), trend: `${m.setup} ${full ? "full port (" + m.boosters.join("+") + ")" : "half port (no booster)"}` };
   }
 
   async tryEntry(m) {
+    const c = this.cfg;
+    if (c.minQty > 1 && !this.pos && !this.pending) {
+      const full = (m.boosters || []).length > 0, budget = this.st.balance * c.pct * (full ? 1 : c.halfPct);
+      const tried = [];
+      for (let st = c.steps; st >= c.minSteps; st -= 1) {
+        const sym = shiftContract(m.contract, st).sym, q = await this.mk.quote(sym, m);
+        if (!q || !(q.ref > 0)) continue;
+        tried.push(`${sym.slice(-9)} $${q.ref.toFixed(2)}`);
+        if (q.ref * 100 * c.minQty <= budget) { m.pickSym = sym; m.pickSteps = st; break; }
+      }
+      this.log("strike_pick", { mark: { t: m.t, s: m.s }, budget: Math.round(budget), picked: m.pickSym || null, tried });
+    }
     this.log("setup_read", { mark: { t: m.t, s: m.s }, setup: m.setup, boosters: m.boosters, read: m.read, optRead: m.optRead });
     return super.tryEntry(m);
   }
@@ -335,6 +421,13 @@ class SwEngine extends Engine {
     // 2) +8% on most
     if (!pos.sold && o.hi >= E * (1 + c.tp) - 1e-9) {
       const px = this.live ? o.bid : r2(E * (1 + c.tp));
+      if (pos.qty < 2 && c.oneRunner) { // 1 contract: don't sell at +8%, lock it in and let it ride the ratchet
+        pos.sold = true; pos.peak = o.hi; pos.soldAt = i;
+        this.log("one_contract_runner", { sym: pos.sym, lock: r2(E * (1 + c.oneLock)) });
+        await this.placeStop(r2(E * (1 + c.oneLock)), pos.left);
+        pos.floor = r2(E * (1 + c.oneLock));
+        return;
+      }
       const n = c.fractional ? pos.left * c.sellFrac : pos.qty < 2 ? pos.qty : Math.max(1, Math.min(pos.qty - 1, Math.round(pos.qty * c.sellFrac)));
       pos.sold = true; pos.peak = o.hi;
       await this.sell(n, px, n >= pos.left ? `+${Math.round(c.tp * 100)}% all out` : `+${Math.round(c.tp * 100)}% most`);
@@ -346,7 +439,7 @@ class SwEngine extends Engine {
     if (c.xVeto && this.kills.some((k) => k.side === pos.m.side && k.ts > pos.m.ts && k.ts - pos.m.ts <= 600 && k.ts <= barT)) return this.sellAll(o, "veto: x printed after the mark");
     if (pos.sold) {
       pos.peak = Math.max(pos.peak || 0, o.hi);
-      const lock = r2(Math.max(E, pos.peak * (1 - c.trail)));
+      const lock = r2(Math.max(pos.floor || E, pos.peak * (1 - c.trail)));
       if (lock > pos.stop + 0.005) await this.placeStop(lock, pos.left);
       if (i - pos.soldAt >= c.runnerMax) return this.sellAll(o, `runner: ${c.runnerMax} min`);
       return;
@@ -378,4 +471,4 @@ class SwEngine extends Engine {
   }
 }
 
-module.exports = { bothBreak, optCross, SwEngine, swSignal, swingSignal, boosters, weakOpen, swMarks, optRead, optSym, SW, SWING, BOOST, SW_CFG };
+module.exports = { nextTradingDay, panesBreak, leadSignal, bothBreak, optCross, SwEngine, swSignal, swingSignal, boosters, weakOpen, swMarks, optRead, optSym, SW, SWING, BOOST, SW_CFG };

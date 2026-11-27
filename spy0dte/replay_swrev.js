@@ -11,7 +11,7 @@ const { computeMarks, coreT } = require("./marks");
 const { SwEngine, swMarks, weakOpen, SW, SWING, BOOST, SW_CFG } = require("./swrev");
 const { newDay } = require("./ledger");
 
-const RES = path.join(__dirname, "..", "results");
+const RES = process.env.BARS_DIR ? path.resolve(process.env.BARS_DIR) : path.join(__dirname, "..", "results");
 const L = loadCore();
 const toRes = (bars) => JSON.stringify({ regularMarket: { bars } });
 const isoCore = (iso) => { const m = iso.match(/([+-])(\d\d):(\d\d)$/); const off = (m[1] === "-" ? -1 : 1) * (+m[2] * 3600 + +m[3] * 60); return Math.floor(Date.parse(iso) / 60000) * 60 + off; };
@@ -51,14 +51,14 @@ function loadDay(f) {
   }
   const { marks, kills } = computeMarks(B.day, spy, opt);
   const pane = marks.filter((m) => m.k === "P").map((m) => ({ ts: m.ts, side: m.side, src: m.src }));
-  return { day: B.day, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
+  return { day: B.day, exp: B.exp || B.day, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
 }
 
 let CACHE = null;
 function days(from = "0000", to = "9999") {
   if (!CACHE) {
     const pc = prevCloses();
-    const files = fs.readdirSync(RES).filter((f) => /^bars_\d{4}-\d\d-\d\d\.json$/.test(f)).sort();
+    const files = fs.readdirSync(RES).filter((f) => (/^bars_\d{4}-\d\d-\d\d\.json$/.test(f) || /^\d{4}-\d\d-\d\d\.json$/.test(f))).sort();
     CACHE = [];
     let prev = null;
     for (const f of files) {
@@ -69,7 +69,7 @@ function days(from = "0000", to = "9999") {
       CACHE.push(D);
     }
   }
-  return CACHE.filter((D) => D.day >= from && D.day <= to && D.n >= 380);
+  return CACHE.filter((D) => D.day >= from && D.day <= to && D.n >= 200); // full days and half days (1:00 close)
 }
 
 async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet = true } = {}) {
@@ -93,7 +93,8 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
       },
     };
     const log = (e, d) => { if (!quiet && ["shutoff", "confirm"].includes(e)) lines.push(`${D.day} ${e} ${JSON.stringify(d)}`); };
-    const eng = new SwEngine({ state, market, log, cfg: { minPrice: 0, maxSpread: 99, ...cfg } });
+    const halfCfg = D.n < 300 ? { lastEntryTod: 180, flattenAtTod: 200 } : {}; // half day: entries until 12:30, flat by 12:50
+    const eng = new SwEngine({ state, market, log, cfg: { minPrice: 0, maxSpread: 99, ...halfCfg, ...cfg } });
     let wo = null;
     const armed = {};
     for (let i = 10; i < D.rows.length; i++) {
@@ -102,7 +103,7 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
       if (i === 14) wo = weakOpen(R, D.prevClose);
       eng.setCtx(R, D.pane.filter((a) => a.ts <= t));
       await eng.tick();
-      const ms = swMarks(D.day, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
+      const ms = swMarks(D.exp, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
       await eng.onMarks(ms, D.kills.filter((k) => k.ts <= t));
     }
     await eng.flatten("end of day");
