@@ -1,0 +1,95 @@
+{"at":"09:18:16","event":"start","mode":"DRY RUN","orders":"public","prices":"Public …4008","balance":1043}
+{"at":"09:25:01","event":"watching","until":"1:00 PM (half day)"}
+{"at":"09:50:08","event":"marks","bar":"09:49","marks":["D C tw0 ag0"]}
+{"at":"09:50:08","event":"mark_skip","mark":{"t":"9:49","k":"D","src":"","s":"C","tod":19,"tw":0,"ag":0,"px":721.08,"mv30":null,"emaGap":null},"why":"trend line not your way"}
+{"at":"09:56:08","event":"marks","bar":"09:55","marks":["A C tw0 ag1"]}
+{"at":"09:56:08","event":"mark_skip","mark":{"t":"9:55","k":"A","src":"","s":"C","tod":25,"tw":0,"ag":1,"px":721.78,"mv30":null,"emaGap":null},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"10:01:08","event":"marks","bar":"10:00","marks":["D C tw0 ag0"]}
+{"at":"10:01:08","event":"mark_skip","mark":{"t":"10:00","k":"D","src":"","s":"C","tod":30,"tw":0,"ag":0,"px":720.72,"mv30":null,"emaGap":null},"why":"trend line not your way"}
+{"at":"10:07:08","event":"marks","bar":"10:06","marks":["A C tw0 ag1"]}
+{"at":"10:07:08","event":"mark_skip","mark":{"t":"10:06","k":"A","src":"","s":"C","tod":36,"tw":0,"ag":1,"px":720.97,"mv30":-2.62,"emaGap":-0.922},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"10:14:03","event":"marks","bar":"10:13","marks":["P:SPY P tw0 ag-1"]}
+{"at":"10:14:03","event":"mark_skip","mark":{"t":"10:13","k":"P","src":"SPY","s":"P","tod":43,"tw":0,"ag":-1,"px":722.53,"mv30":-0.18,"emaGap":0.235},"why":"trend line not your way"}
+{"at":"10:16:15","event":"marks","bar":"10:15","marks":["D P tw0 ag-1","P:SPY P tw0 ag-1","P:put P tw0 ag-1"]}
+{"at":"10:16:15","event":"mark_skip","mark":{"t":"10:15","k":"D","src":"","s":"P","tod":45,"tw":0,"ag":-1,"px":722.37,"mv30":0.01,"emaGap":0.096},"why":"trend line not your way"}
+{"at":"10:16:15","event":"mark_skip","mark":{"t":"10:15","k":"P","src":"SPY","s":"P","tod":45,"tw":0,"ag":-1,"px":722.37,"mv30":0.01,"emaGap":0.096},"why":"trend line not your way"}
+{"at":"10:16:15","event":"mark_skip","mark":{"t":"10:15","k":"P","src":"put","s":"P","tod":45,"tw":0,"ag":-1,"px":722.37,"mv30":0.01,"emaGap":0.096},"why":"trend line not your way"}
+{"at":"10:20:04","event":"marks","bar":"10:19","marks":["P:SPY P tw0 ag-1"]}
+{"at":"10:20:04","event":"mark_skip","mark":{"t":"10:19","k":"P","src":"SPY","s":"P","tod":49,"tw":0,"ag":-1,"px":722.6,"mv30":-1.48,"emaGap":-0.19},"why":"trend line not your way"}
+{"at":"10:21:05","event":"marks","bar":"10:20","marks":["D P tw0 ag0"]}
+{"at":"10:21:05","event":"mark_skip","mark":{"t":"10:20","k":"D","src":"","s":"P","tod":50,"tw":0,"ag":0,"px":722.41,"mv30":-0.41,"emaGap":-0.204},"why":"trend line not your way"}
+{"at":"10:26:04","event":"marks","bar":"10:25","marks":["P:SPY P tw0 ag-1"]}
+{"at":"10:26:04","event":"mark_skip","mark":{"t":"10:25","k":"P","src":"SPY","s":"P","tod":55,"tw":0,"ag":-1,"px":723.13,"mv30":-1.35,"emaGap":-0.419},"why":"trend line not your way"}
+{"at":"10:27:05","event":"marks","bar":"10:26","marks":["D P tw0 ag1"]}
+{"at":"10:27:05","event":"mark_skip","mark":{"t":"10:26","k":"D","src":"","s":"P","tod":56,"tw":0,"ag":1,"px":723.03,"mv30":-1.95,"emaGap":-0.429},"why":"trend line not your way"}
+{"at":"10:29:07","event":"marks","bar":"10:28","marks":["A P tw0 ag1"]}
+{"at":"10:29:07","event":"mark_skip","mark":{"t":"10:28","k":"A","src":"","s":"P","tod":58,"tw":0,"ag":1,"px":722.82,"mv30":-2.49,"emaGap":-0.423},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"10:38:04","event":"marks","bar":"10:37","marks":["P:SPY P tw0 ag-1"]}
+{"at":"10:38:04","event":"mark_skip","mark":{"t":"10:37","k":"P","src":"SPY","s":"P","tod":67,"tw":0,"ag":-1,"px":724.81,"mv30":-3.61,"emaGap":-0.644},"why":"trend line not your way"}
+{"at":"10:41:06","event":"marks","bar":"10:40","marks":["P:SPY P tw0 ag0"]}
+{"at":"10:41:06","event":"mark_skip","mark":{"t":"10:40","k":"P","src":"SPY","s":"P","tod":70,"tw":0,"ag":0,"px":725.55,"mv30":-4.31,"emaGap":-0.934},"why":"trend line not your way"}
+{"at":"10:42:07","event":"marks","bar":"10:41","marks":["D P tw0 ag-1"]}
+{"at":"10:42:07","event":"mark_skip","mark":{"t":"10:41","k":"D","src":"","s":"P","tod":71,"tw":0,"ag":-1,"px":725.19,"mv30":-3.27,"emaGap":-0.966},"why":"trend line not your way"}
+{"at":"10:43:08","event":"marks","bar":"10:42","marks":["D P tw0 ag0"]}
+{"at":"10:43:08","event":"mark_skip","mark":{"t":"10:42","k":"D","src":"","s":"P","tod":72,"tw":0,"ag":0,"px":725,"mv30":-3.03,"emaGap":-0.954},"why":"trend line not your way"}
+{"at":"10:48:08","event":"marks","bar":"10:47","marks":["P:SPY P tw0 ag0"]}
+{"at":"10:48:08","event":"mark_skip","mark":{"t":"10:47","k":"P","src":"SPY","s":"P","tod":77,"tw":0,"ag":0,"px":725.58,"mv30":-2.7,"emaGap":-1.158},"why":"trend line not your way"}
+{"at":"11:03:04","event":"marks","bar":"11:02","marks":["P:SPY C tw1 ag-1"]}
+{"at":"11:03:04","event":"mark_skip","mark":{"t":"11:02","k":"P","src":"SPY","s":"C","tod":92,"tw":1,"ag":-1,"px":725.23,"mv30":2.27,"emaGap":0.476},"why":"after 1:00 PM"}
+{"at":"11:10:06","event":"marks","bar":"11:09","marks":["P:SPY C tw1 ag0"]}
+{"at":"11:10:06","event":"mark_skip","mark":{"t":"11:09","k":"P","src":"SPY","s":"C","tod":99,"tw":1,"ag":0,"px":725.14,"mv30":-0.12,"emaGap":0.304},"why":"after 1:00 PM"}
+{"at":"11:13:04","event":"marks","bar":"11:12","marks":["P:SPY C tw1 ag0"]}
+{"at":"11:13:04","event":"mark_skip","mark":{"t":"11:12","k":"P","src":"SPY","s":"C","tod":102,"tw":1,"ag":0,"px":724.62,"mv30":-0.85,"emaGap":0.118},"why":"after 1:00 PM"}
+{"at":"11:14:04","event":"marks","bar":"11:13","marks":["D C tw1 ag-1"]}
+{"at":"11:14:04","event":"mark_skip","mark":{"t":"11:13","k":"D","src":"","s":"C","tod":103,"tw":1,"ag":-1,"px":724.67,"mv30":-1.16,"emaGap":0.083},"why":"after 1:00 PM"}
+{"at":"11:16:06","event":"marks","bar":"11:15","marks":["P:SPY C tw0 ag-1","P:call C tw0 ag-1"]}
+{"at":"11:16:06","event":"mark_skip","mark":{"t":"11:15","k":"P","src":"SPY","s":"C","tod":105,"tw":0,"ag":-1,"px":724.22,"mv30":-2,"emaGap":-0.025},"why":"after 1:00 PM"}
+{"at":"11:16:06","event":"mark_skip","mark":{"t":"11:15","k":"P","src":"call","s":"C","tod":105,"tw":0,"ag":-1,"px":724.22,"mv30":-2,"emaGap":-0.025},"why":"after 1:00 PM"}
+{"at":"11:21:06","event":"marks","bar":"11:20","marks":["D C tw0 ag1"]}
+{"at":"11:21:06","event":"mark_skip","mark":{"t":"11:20","k":"D","src":"","s":"C","tod":110,"tw":0,"ag":1,"px":725.09,"mv30":0.03,"emaGap":-0.008},"why":"after 1:00 PM"}
+{"at":"11:28:07","event":"marks","bar":"11:27","marks":["D P tw0 ag-1"]}
+{"at":"11:28:07","event":"mark_skip","mark":{"t":"11:27","k":"D","src":"","s":"P","tod":117,"tw":0,"ag":-1,"px":724.93,"mv30":0.65,"emaGap":-0.092},"why":"after 1:00 PM"}
+{"at":"11:33:04","event":"marks","bar":"11:32","marks":["P:SPY P tw0 ag-1"]}
+{"at":"11:33:04","event":"mark_skip","mark":{"t":"11:32","k":"P","src":"SPY","s":"P","tod":122,"tw":0,"ag":-1,"px":725.57,"mv30":-0.34,"emaGap":-0.195},"why":"after 1:00 PM"}
+{"at":"11:38:06","event":"marks","bar":"11:37","marks":["D P tw0 ag0"]}
+{"at":"11:38:06","event":"mark_skip","mark":{"t":"11:37","k":"D","src":"","s":"P","tod":127,"tw":0,"ag":0,"px":726.21,"mv30":-0.91,"emaGap":-0.474},"why":"after 1:00 PM"}
+{"at":"11:39:07","event":"marks","bar":"11:38","marks":["A P tw0 ag0"]}
+{"at":"11:39:07","event":"mark_skip","mark":{"t":"11:38","k":"A","src":"","s":"P","tod":128,"tw":0,"ag":0,"px":725.87,"mv30":-0.73,"emaGap":-0.449},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"11:48:05","event":"marks","bar":"11:47","marks":["D P tw0 ag-1","P:SPY P tw0 ag-1"]}
+{"at":"11:48:05","event":"mark_skip","mark":{"t":"11:47","k":"D","src":"","s":"P","tod":137,"tw":0,"ag":-1,"px":726.5,"mv30":-1.92,"emaGap":-0.424},"why":"after 1:00 PM"}
+{"at":"11:48:05","event":"mark_skip","mark":{"t":"11:47","k":"P","src":"SPY","s":"P","tod":137,"tw":0,"ag":-1,"px":726.5,"mv30":-1.92,"emaGap":-0.424},"why":"after 1:00 PM"}
+{"at":"11:51:08","event":"marks","bar":"11:50","marks":["P:SPY P tw0 ag-1"]}
+{"at":"11:51:08","event":"mark_skip","mark":{"t":"11:50","k":"P","src":"SPY","s":"P","tod":140,"tw":0,"ag":-1,"px":727.36,"mv30":-2.27,"emaGap":-0.57},"why":"after 1:00 PM"}
+{"at":"11:54:05","event":"marks","bar":"11:53","marks":["P:SPY P tw0 ag0"]}
+{"at":"11:54:05","event":"mark_skip","mark":{"t":"11:53","k":"P","src":"SPY","s":"P","tod":143,"tw":0,"ag":0,"px":727.77,"mv30":-2.79,"emaGap":-0.704},"why":"after 1:00 PM"}
+{"at":"12:07:07","event":"marks","bar":"12:06","marks":["P:SPY C tw1 ag-1"]}
+{"at":"12:07:07","event":"mark_skip","mark":{"t":"12:06","k":"P","src":"SPY","s":"C","tod":156,"tw":1,"ag":-1,"px":726.1,"mv30":-0.33,"emaGap":0.078},"why":"after 1:00 PM"}
+{"at":"12:09:04","event":"marks","bar":"12:08","marks":["D C tw1 ag0"]}
+{"at":"12:09:04","event":"mark_skip","mark":{"t":"12:08","k":"D","src":"","s":"C","tod":158,"tw":1,"ag":0,"px":726.26,"mv30":0.4,"emaGap":0.04},"why":"after 1:00 PM"}
+{"at":"12:11:08","event":"marks","bar":"12:10","marks":["P:SPY C tw1 ag0"]}
+{"at":"12:11:08","event":"mark_skip","mark":{"t":"12:10","k":"P","src":"SPY","s":"C","tod":160,"tw":1,"ag":0,"px":726.26,"mv30":0.58,"emaGap":0.019},"why":"after 1:00 PM"}
+{"at":"12:14:05","event":"marks","bar":"12:13","marks":["P:SPY C tw0 ag0"]}
+{"at":"12:14:05","event":"mark_skip","mark":{"t":"12:13","k":"P","src":"SPY","s":"C","tod":163,"tw":0,"ag":0,"px":726.22,"mv30":0.39,"emaGap":-0.039},"why":"after 1:00 PM"}
+{"at":"12:16:07","event":"marks","bar":"12:15","marks":["D C tw0 ag1","P:SPY C tw0 ag1"]}
+{"at":"12:16:07","event":"mark_skip","mark":{"t":"12:15","k":"D","src":"","s":"C","tod":165,"tw":0,"ag":1,"px":726.57,"mv30":-0.11,"emaGap":-0.029},"why":"after 1:00 PM"}
+{"at":"12:16:07","event":"mark_skip","mark":{"t":"12:15","k":"P","src":"SPY","s":"C","tod":165,"tw":0,"ag":1,"px":726.57,"mv30":-0.11,"emaGap":-0.029},"why":"after 1:00 PM"}
+{"at":"12:20:05","event":"marks","bar":"12:19","marks":["P:SPY C tw0 ag1","P:call C tw0 ag1"]}
+{"at":"12:20:05","event":"mark_skip","mark":{"t":"12:19","k":"P","src":"SPY","s":"C","tod":169,"tw":0,"ag":1,"px":726.52,"mv30":-0.48,"emaGap":-0.019},"why":"after 1:00 PM"}
+{"at":"12:20:05","event":"mark_skip","mark":{"t":"12:19","k":"P","src":"call","s":"C","tod":169,"tw":0,"ag":1,"px":726.52,"mv30":-0.48,"emaGap":-0.019},"why":"after 1:00 PM"}
+{"at":"12:23:08","event":"marks","bar":"12:22","marks":["P:SPY P tw0 ag-1"]}
+{"at":"12:23:08","event":"mark_skip","mark":{"t":"12:22","k":"P","src":"SPY","s":"P","tod":172,"tw":0,"ag":-1,"px":726.96,"mv30":0.38,"emaGap":-0.137},"why":"after 1:00 PM"}
+{"at":"12:24:04","event":"marks","bar":"12:23","marks":["D P tw0 ag-1"]}
+{"at":"12:24:04","event":"mark_skip","mark":{"t":"12:23","k":"D","src":"","s":"P","tod":173,"tw":0,"ag":-1,"px":727.01,"mv30":0.76,"emaGap":-0.169},"why":"after 1:00 PM"}
+{"at":"12:30:05","event":"marks","bar":"12:29","marks":["P:SPY P tw0 ag-1","P:put P tw0 ag-1"]}
+{"at":"12:30:05","event":"mark_skip","mark":{"t":"12:29","k":"P","src":"SPY","s":"P","tod":179,"tw":0,"ag":-1,"px":726.92,"mv30":-0.5,"emaGap":-0.205},"why":"after 1:00 PM"}
+{"at":"12:30:05","event":"mark_skip","mark":{"t":"12:29","k":"P","src":"put","s":"P","tod":179,"tw":0,"ag":-1,"px":726.92,"mv30":-0.5,"emaGap":-0.205},"why":"after 1:00 PM"}
+{"at":"12:37:06","event":"marks","bar":"12:36","marks":["P:SPY P tw0 ag1"]}
+{"at":"12:37:06","event":"mark_skip","mark":{"t":"12:36","k":"P","src":"SPY","s":"P","tod":186,"tw":0,"ag":1,"px":726.81,"mv30":-0.71,"emaGap":-0.181},"why":"after 1:00 PM"}
+{"at":"12:43:10","event":"marks","bar":"12:42","marks":["P:SPY C tw0 ag-1"]}
+{"at":"12:43:10","event":"mark_skip","mark":{"t":"12:42","k":"P","src":"SPY","s":"C","tod":192,"tw":0,"ag":-1,"px":726.39,"mv30":0.33,"emaGap":-0.054},"why":"after 1:00 PM"}
+{"at":"12:51:08","event":"marks","bar":"12:50","marks":["D C tw0 ag-1"]}
+{"at":"12:51:08","event":"mark_skip","mark":{"t":"12:50","k":"D","src":"","s":"C","tod":200,"tw":0,"ag":-1,"px":725.56,"mv30":-1.48,"emaGap":-0.28},"why":"after 1:00 PM"}
+{"at":"12:54:05","event":"marks","bar":"12:53","marks":["A C tw0 ag1"]}
+{"at":"12:54:05","event":"mark_skip","mark":{"t":"12:53","k":"A","src":"","s":"C","tod":203,"tw":0,"ag":1,"px":726.19,"mv30":-1.01,"emaGap":-0.257},"why":"arrows not traded (dots + pane arrows only)"}
+{"at":"12:57:08","event":"marks","bar":"12:56","marks":["D P tw0 ag-1"]}
+{"at":"12:57:08","event":"mark_skip","mark":{"t":"12:56","k":"D","src":"","s":"P","tod":206,"tw":0,"ag":-1,"px":726.91,"mv30":-0.31,"emaGap":0.068},"why":"after 1:00 PM"}
