@@ -1,6 +1,19 @@
 name: Option price history 0DTE + 1DTE (data only)
 on:
   workflow_dispatch:
+    inputs:
+      start:
+        description: "first day to pull (YYYY-MM-DD)"
+        default: "2026-11-03"
+      end:
+        description: "last day to pull (YYYY-MM-DD)"
+        default: "9999-12-31"
+      widen:
+        description: "strikes past the day's low/high (6 = the shadow log's in-the-money strikes)"
+        default: "6"
+      redo:
+        description: "yes = pull days already saved again (wider strikes)"
+        default: "yes"
 permissions:
   contents: write
 jobs:
@@ -18,13 +31,24 @@ jobs:
         env:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          START: ${{ github.event.inputs.start }}
+          END: ${{ github.event.inputs.end }}
+          WIDEN: ${{ github.event.inputs.widen }}
+          REDO: ${{ github.event.inputs.redo }}
         run: python pull_opts.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Rebuild the shadow log's 1DTE history (log only, no orders)
+        run: |
+          node spy0dte/build_1dte_history.js /tmp/bars_1dte
+          BARS_DIR=/tmp/bars_1dte SHADOW=1 SHADOW_TAG=baseline_1dte node spy0dte/replay_swrev.js | head -30
       - name: Save
         if: always()
         run: |
           git config user.name "stoch-bot"
           git config user.email "stoch-bot@users.noreply.github.com"
-          git add results/opt_1m || true
+          git add results/opt_1m spy0dte/smallwin || true
           if ! git diff --cached --quiet; then
             git commit -m "option price history"
             for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break; sleep 10; done
