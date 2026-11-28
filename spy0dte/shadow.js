@@ -67,6 +67,17 @@ const EXITS = {
   smart: { ...base, sl: 0.75, tp: 0.2, style: "ratchet", be: false },
 };
 
+// 1DTE CANDIDATES (Nov 28 study, frozen; picked on Nov 3-25's real 1DTE bars, so only the dry-run days after that count as a test):
+// 1DTE premium moves about a third as much a minute as 0DTE, so smaller bids and tighter targets. Scored on 1DTE only, log only.
+const CAND_1DTE = {
+  trend: { ...base, entry: 0.03, sl: 0.5, tp: 0.1, style: "half" },
+  lined: { ...base, entry: 0, sl: 0.5, tp: 0.1, style: "ratchet", be: false },
+  swing: { ...base, entry: 0.03, sl: 0.3, tp: 0.1, style: "ratchet", be: false },
+  fade: { ...base, entry: 0, sl: 0.5, tp: 0.1, style: "half" },
+  smart: { ...base, entry: 0.03, sl: 0.5, tp: 0.1, style: "ratchet", be: false },
+};
+// the small-win bot itself on 1DTE (best of 576 versions on the 17 days: $789 -> $2,230): +12%, first out-of-the-money strike, 6-min confirm
+const CAND_BOT_1DTE = { tp: 0.12, stopPct: 0.2, cutMin: 15, confirmBars: 6, steps: 0, minSteps: -4, runnerMax: 20, maxHold: 60 };
 const r1 = (x) => (x == null || !isFinite(x) ? null : Math.round(x * 10) / 10);
 const hm = (tod) => { const m = 570 + tod; const h = Math.floor(m / 60); return `${(h % 12) || 12}:${String(m % 60).padStart(2, "0")}`; };
 const yymmdd = (d) => d.slice(2, 4) + d.slice(5, 7) + d.slice(8, 10);
@@ -254,12 +265,21 @@ function analyze(B0, o = {}) {
       if (!p) return { sym, why: "no bars" };
       const mm = { ...m, e: p.e, h: p.h, l: p.l, c: p.c, tl: p.tl };
       const f = E.entryOf(mm, Pp);
-      if (!f) return { sym, why: "no fill at the 5% bid" };
+      if (!f) {
+        // the 1DTE candidate can still fill at its smaller bid
+        if (expiry && expiry !== day && CAND_1DTE[s.av]) { const Pc = CAND_1DTE[s.av], fc = E.entryOf(mm, Pc); if (fc) { const tc = E.tradeReturn(fc, Pc); return { sym, why: "no fill at the 5% bid", cand: { ret: Math.max(0, fc.e * (1 + tc.r) - Pc.slip) / (fc.e + Pc.slip) - 1, n: tc.n, s: fc.tod, fill: fc.e } }; } }
+        return { sym, why: "no fill at the 5% bid" };
+      }
       const t = E.tradeReturn(f, Pp);
       const a = Math.max(0, f.e * (1 + t.r) - Pp.slip) / (f.e + Pp.slip) - 1;
       const fi = f.tod - m.tod - 1; // the bar the bid filled on (entryOf re-bases the path after it)
       const b = smallWin(f, p.ts.slice(fi + 1), m, killsFor(m), R, Pp.slip);
-      return { sym, fill: f.e, a, b: b.ret, why_b: b.why, min_b: b.n, best: Math.max(0, ...f.h.slice(0, t.n + 1)) / 1000, heat: Math.min(0, ...f.l.slice(0, t.n + 1)) / 1000, min: t.n, startTod: f.tod };
+      let cand = null;
+      if (expiry && expiry !== day && CAND_1DTE[s.av]) { // the 1DTE candidate exits, on the same path
+        const Pc = CAND_1DTE[s.av], fc = E.entryOf(mm, Pc);
+        if (fc) { const tc = E.tradeReturn(fc, Pc); cand = { ret: Math.max(0, fc.e * (1 + tc.r) - Pc.slip) / (fc.e + Pc.slip) - 1, n: tc.n, s: fc.tod, fill: fc.e }; }
+      }
+      return { sym, fill: f.e, a, b: b.ret, cand, why_b: b.why, min_b: b.n, best: Math.max(0, ...f.h.slice(0, t.n + 1)) / 1000, heat: Math.min(0, ...f.l.slice(0, t.n + 1)) / 1000, min: t.n, startTod: f.tod };
     };
     for (const row of out) {
       const one = B.exp !== day ? score(row, B.exp) : null, zero0 = score(row, null);
@@ -281,6 +301,8 @@ function analyze(B0, o = {}) {
       row.start_tod_0dte = zero0.fill != null ? zero0.startTod : null;
       row.note = main.fill != null ? "" : (one ? `1DTE: ${one.why}; ` : "") + `0DTE: ${zero0.why}`;
       row.start_tod = main.fill != null ? main.startTod : null;
+      const c = one && one.cand;
+      row.cand_1dte = c ? r1(c.ret * 100) : null; row.cand_1dte_min = c ? c.n : null; row.cand_1dte_start = c ? c.s : null; row.cand_1dte_fill = c ? c.fill.toFixed(2) : "";
       // contracts it will want at night (1DTE + 0DTE)
       if (!B.opt[symFor(row._m.px, row._m.s === "C", row._s.steps, null)]) needs.add(symFor(row._m.px, row._m.s === "C", row._s.steps, null));
       if (B.exp !== day && !B.opt[symFor(row._m.px, row._m.s === "C", row._s.steps, B.exp)]) needs.add(symFor(row._m.px, row._m.s === "C", row._s.steps, B.exp));
@@ -317,7 +339,7 @@ function smallWin(f, ts, m, kills, R, slip) {
 
 // ---------- files ----------
 const COLS = ["date", "time", "known_at", "avenue", "side", "strike", "dte", "port", "entry", "result_a", "result_b", "best", "heat", "minutes", "minutes_b", "exit_b", "result_a_0dte", "result_b_0dte", "flag", "both_charts",
-  "spy_fear", "spy_greed", "call_fear", "call_greed", "put_fear", "put_greed", "vix_fear", "vix_greed", "real_in_trade", "real_same_move", "start_tod", "note", "minutes_0dte", "minutes_b_0dte", "start_tod_0dte"];
+  "spy_fear", "spy_greed", "call_fear", "call_greed", "put_fear", "put_greed", "vix_fear", "vix_greed", "real_in_trade", "real_same_move", "start_tod", "note", "minutes_0dte", "minutes_b_0dte", "start_tod_0dte", "cand_1dte", "cand_1dte_min", "cand_1dte_start", "cand_1dte_fill"];
 const q = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 const csvLine = (r) => COLS.map((k) => q(r[k])).join(",") + "\n";
 function parseCsv(file) {
@@ -341,6 +363,21 @@ function realIntervals(day, busy, trades) {
   for (const t of mins) { const s = busy.get(t), last = iv[iv.length - 1]; if (last && last.side === s && t <= last.end_tod + 1) last.end_tod = t; else iv.push({ date: day, side: s, start_tod: t, end_tod: t }); }
   const T = trades.filter((t) => t.day === day);
   return iv.map((x, k) => { const t = T[k]; const before = t ? t.balance - t.pnl : 0; return { ...x, mark_tod: t && t.mark ? t.mark.tod : x.start_tod, acct_pct: t && before > 0 ? r1((t.pnl / before) * 100) : "", ret_pct: t ? t.ret : "" }; });
+}
+
+// The small-win bot's 1DTE candidate, replayed on today's bars with the 1DTE expiry (a fresh $1,000 paper engine, never a broker).
+function botCand1dte(day, B, dir) {
+  if (!B || !B.exp || B.exp === day) return;
+  const os = require("os"), { execFileSync } = require("child_process");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "c1dte-"));
+  fs.writeFileSync(path.join(tmp, `bars_${day}.json`), JSON.stringify(B));
+  const out = execFileSync(process.execPath, [path.join(__dirname, "replay_swrev.js"), day, day], { env: { ...process.env, BARS_DIR: tmp, CFG: JSON.stringify(CAND_BOT_1DTE), SHADOW: "" }, encoding: "utf8", timeout: 120000 });
+  const rows = [];
+  for (const l of out.split("\n")) { const m = l.match(/^(\d{4}-\d\d-\d\d) (\S+) (\S+)\s+([CP]) \[([^\]]*)\] (\S+) x(\S+) @(\S+) ([+-]?[\d.]+)% \$(-?\d+)/); if (m) rows.push({ date: m[1], time: m[2], setup: m[3], side: m[4], sym: m[6], qty: m[7], entry: m[8], ret: m[9], pnl: m[10] }); }
+  const f = path.join(dir, "bot_1dte_cand.csv"), C = ["date", "time", "setup", "side", "sym", "qty", "entry", "ret", "pnl"];
+  const keep = parseCsv(f).filter((r) => r.date !== day);
+  fs.writeFileSync(f, C.join(",") + "\n" + [...keep, ...rows].map((r) => C.map((k) => q(r[k])).join(",")).join("\n") + "\n");
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 // ---------- records ----------
@@ -453,6 +490,14 @@ function section({ day, rows, all, real }) {
     L.push(`Promotion check (${days.length} dry-run days, 85%+ wins, no loss over -50%, adds money with the reversal). Your call, nothing changes on its own:`);
     L.push(...(hits.length ? hits : ["- none yet"]));
   }
+  // the 1DTE study (forward test of the frozen candidates)
+  const c1 = all.filter((r) => r.cand_1dte !== "" && r.cand_1dte != null), cT = today.filter((r) => r.cand_1dte != null && r.cand_1dte !== "");
+  if (c1.length || cT.length) {
+    L.push("", "**1DTE study (frozen 1DTE candidates, forward days only):**");
+    for (const a of AVENUES) { const A = record(c1.filter((r) => r.avenue === a.id), "cand_1dte"), T = record(cT.filter((r) => r.avenue === a.id), "cand_1dte"); if (A.filled) L.push(`- ${a.name}: today ${T.filled ? `${T.won}/${T.filled}, ${T.sum >= 0 ? "+" : ""}${T.sum}%` : "—"} · running ${fmtRec(A)}`); }
+  }
+  const bc = parseCsv(path.join(path.dirname(path.join(DIR_HINT.dir || ".", "x")), "bot_1dte_cand.csv"));
+  if (bc.length) { const T = bc.filter((r) => r.date === day), A = bc; const sum = (R) => r1(R.reduce((p, r) => p + num(r.ret), 0)); L.push(`- Small-win bot, 1DTE candidate (+12%, first OTM strike, 6-min confirm): today ${T.length} trades ${T.length ? `(${T.filter((r) => num(r.ret) > 0).length} won, ${sum(T)}%)` : ""} · running ${A.length} trades, ${A.filter((r) => num(r.ret) > 0).length} won, sum ${sum(A)}%`); }
   L.push("", `All shadow signals: spy0dte/smallwin/shadow.csv`);
   return L.join("\n");
 }
@@ -491,6 +536,7 @@ class ShadowLive {
         if (!want.length) break;
         for (const s of want) { tried.add(s); try { saved[s] = await this.fetchOpt(s); } catch {} }
       }
+      try { botCand1dte(this.day, fromSaved(this.day, this.exp, saved), dir); } catch (e) { this.log("shadow_error", { err: "1dte bot: " + String(e.message).slice(0, 200) }); }
       const md = finish(this.day, fromSaved(this.day, this.exp, saved), this.busy, st.trades, dir, this.seen);
       try { writeGrid(dir); } catch (e) { this.log("shadow_error", { err: "grid: " + String(e.message).slice(0, 200) }); }
       return md;
@@ -498,7 +544,9 @@ class ShadowLive {
   }
 }
 
+const DIR_HINT = { dir: null };
 function finish(day, B, busy, trades, dir, seenLive) {
+  DIR_HINT.dir = dir;
   const real = realIntervals(day, busy, trades);
   const realTod = trades.filter((t) => t.day === day && t.mark).map((t) => ({ tod: t.mark.tod, s: t.mark.s }));
   const r = analyze(B, { score: true, busy, real: realTod });
@@ -509,4 +557,4 @@ function finish(day, B, busy, trades, dir, seenLive) {
   return section({ day, rows, all: parseCsv(file), real: parseCsv(rf) });
 }
 
-module.exports = { writeGrid, gridTable, GRID_HEAD, analyze, smallWin, fromSaved, normDay, finish, section, record, combine, parseCsv, realIntervals, writeRows, writeReal, ShadowLive, AVENUES, NAME, EXITS, COLS, EST_SHA256 };
+module.exports = { CAND_1DTE, CAND_BOT_1DTE, botCand1dte, writeGrid, gridTable, GRID_HEAD, analyze, smallWin, fromSaved, normDay, finish, section, record, combine, parseCsv, realIntervals, writeRows, writeReal, ShadowLive, AVENUES, NAME, EXITS, COLS, EST_SHA256 };

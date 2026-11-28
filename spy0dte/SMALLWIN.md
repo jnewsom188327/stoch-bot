@@ -12,6 +12,7 @@ No live switch: the engine is built with no broker, so it never sends an order. 
 ## Nov 28: back to 0DTE
 - **Trades 0DTE again** (`SW_CFG.dte = 0`). On the 17 days with real 1DTE bars (Alpaca, Nov 3–25) the same bot made $789 on 1DTE vs $3,075 on 0DTE, and 192 of 349 shadow signals never filled at the 5% bid on 1DTE.
 - **Still saves 1DTE every day** (the pane strikes' 1DTE twins and every shadow contract) and the shadow log scores 1DTE, for the 1DTE study. `bars/<day>.json` has `exp1`.
+- **1DTE study (log only, frozen Nov 28):** picked on Nov 3–25's real 1DTE bars, so only the days after count as a test. Each night the shadow log scores every signal on 1DTE with its candidate (`shadow.js` CAND_1DTE: smaller bid 0–3%, +10% target, −30/−50% stop; on the 17 days each avenue gained over its 5%-bid exits, e.g. Fade MAIN at market 16/17 won, worst −12%) → `cand_1dte` in shadow.csv; and replays the bot itself on today's 1DTE bars with CAND_BOT_1DTE (+12%, first out-of-the-money strike, 6-min confirm; $789 → $2,230 on the 17 days, best of 576) → `bot_1dte_cand.csv`. The daily issue shows both, today and running.
 
 ## Changes for Mon Nov 30 (from the Nov 27 review) (its 1DTE parts were replaced on Nov 28, see above)
 - **1DTE:** trades the next trading day's expiry and reads its option panes on 1DTE (1DTE bars swung 4–5% a minute on Nov 27 vs 11–23% on 0DTE).
