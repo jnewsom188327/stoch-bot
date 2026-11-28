@@ -64,7 +64,7 @@ const SW_CFG = {
   trail: 0.05, runnerMax: 20,                  // runner: ratchet 5% under its peak, floor = breakeven
   stopPct: 0.20,                               // hard stop -20% (a -10% stop got tagged by 1-minute wicks: $517 vs $3,066 on the 17 days)
   halfPct: 0.5,
-  dte: 1,                                      // Nov 27 review: trade 1DTE (bars ~3-4x calmer than 0DTE); 0 = same-day expiry
+  dte: 0,                                      // Nov 28: back to 0DTE (on the 17 days with real 1DTE bars, 1DTE: $789 vs 0DTE $3,075). 1 = next-day expiry
   minQty: 2,                                   // pick the deepest strike (from SW_CFG.steps toward OTM) where 2+ contracts fit, so there's a runner
   minSteps: -4,
   oneRunner: true, oneLock: 0.06,             // 1 contract: at +8% lock +6% and ride the ratchet instead of selling

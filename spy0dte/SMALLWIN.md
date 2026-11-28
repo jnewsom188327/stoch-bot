@@ -9,7 +9,11 @@ No live switch: the engine is built with no broker, so it never sends an order. 
 
 - **Patience (both panes):** a setup doesn't enter on the first pause. It's armed and waits up to 3 minutes for BOTH option panes to start breaking your way (calls: the call chart's fear easing and the put chart's greed easing; puts mirrored). If price pushes through the setup low/high while it waits (pause-and-go), the setup is dropped.
 
-## Changes for Mon Nov 30 (from the Nov 27 review)
+## Nov 28: back to 0DTE
+- **Trades 0DTE again** (`SW_CFG.dte = 0`). On the 17 days with real 1DTE bars (Alpaca, Nov 3–25) the same bot made $789 on 1DTE vs $3,075 on 0DTE, and 192 of 349 shadow signals never filled at the 5% bid on 1DTE.
+- **Still saves 1DTE every day** (the pane strikes' 1DTE twins and every shadow contract) and the shadow log scores 1DTE, for the 1DTE study. `bars/<day>.json` has `exp1`.
+
+## Changes for Mon Nov 30 (from the Nov 27 review) (its 1DTE parts were replaced on Nov 28, see above)
 - **1DTE:** trades the next trading day's expiry and reads its option panes on 1DTE (1DTE bars swung 4–5% a minute on Nov 27 vs 11–23% on 0DTE).
 - **Always a runner:** picks the deepest strike (from 4 strikes in toward OTM) where 2+ contracts fit, so +8% sells one and the other rides the ratchet. If only 1 fits, that 1 locks +6% at +8% and rides the ratchet instead of selling.
 - **Saves the day's bars** (SPY + every option chart it read, 1DTE and the 0DTE twins) to `spy0dte/smallwin/bars/<day>.json`, so 1DTE can be replayed: `BARS_DIR=spy0dte/smallwin/bars node spy0dte/replay_swrev.js`.
