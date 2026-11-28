@@ -152,6 +152,7 @@ async function shadowBaseline(r0opts) {
   hook.day = async (D, state) => { const B = JSON.parse(fs.readFileSync(path.join(RES, D.file), "utf8")); S.finish(D.day, B, busy.get(D.day) || new Map(), state.trades, tmp, null); };
   const r = await run({ ...r0opts, hook });
   fs.renameSync(path.join(tmp, "shadow.csv"), csv); fs.renameSync(path.join(tmp, "shadow_real.csv"), rcsv); fs.rmSync(tmp, { recursive: true, force: true });
+  S.writeGrid(out); // the account grid (0DTE from the saved days; 1DTE fills in from the dry run)
   const rows = S.parseCsv(csv), real = S.parseCsv(rcsv), days = [...new Set(rows.map((x) => x.date))];
   const L = [`# Shadow baseline · ${days.length} saved days (${days[0]} to ${days[days.length - 1]}) · 0DTE bars (1DTE bars are saved from Nov 30 on)`, "",
     "Every signal scored on its own (one row per signal, overlapping signals all counted). 5% bid, skipped if it doesn't fill.", "",

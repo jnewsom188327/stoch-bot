@@ -1,0 +1,94 @@
+Account,Exits,Size %,End $,Worst drop %,Win %,Trades,Won,Worst trade %,Worst hit to account %,Worst day %,Green days,Days traded
+All 5 (trend safe),own,25,1000,0,0,0,0,0,0,0,0,0
+All 5 (trend safe),own,50,1000,0,0,0,0,0,0,0,0,0
+All 5 (trend safe),own,100,1000,0,0,0,0,0,0,0,0,0
+All 5 (trend safe),small-win,25,1000,0,0,0,0,0,0,0,0,0
+All 5 (trend safe),small-win,50,1000,0,0,0,0,0,0,0,0,0
+All 5 (trend safe),small-win,100,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,own,25,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,own,50,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,own,100,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Fade MAIN,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Lined up,own,25,1000,0,0,0,0,0,0,0,0,0
+Lined up,own,50,1000,0,0,0,0,0,0,0,0,0
+Lined up,own,100,1000,0,0,0,0,0,0,0,0,0
+Lined up,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Lined up,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Lined up,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,own,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,own,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,own,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Fade,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,own,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,own,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,own,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,own,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,own,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,own,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Swing + Fade,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,own,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,own,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,own,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot + Trend (safety check) + Swing + Fade,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Small-win bot alone,own,25,1000,0,0,0,0,0,0,0,0,0
+Small-win bot alone,own,50,1000,0,0,0,0,0,0,0,0,0
+Small-win bot alone,own,100,1000,0,0,0,0,0,0,0,0,0
+Smart dots,own,25,1000,0,0,0,0,0,0,0,0,0
+Smart dots,own,50,1000,0,0,0,0,0,0,0,0,0
+Smart dots,own,100,1000,0,0,0,0,0,0,0,0,0
+Smart dots,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Smart dots,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Smart dots,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,own,25,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,own,50,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,own,100,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Swing + Fade,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Swing Break,own,25,1000,0,0,0,0,0,0,0,0,0
+Swing Break,own,50,1000,0,0,0,0,0,0,0,0,0
+Swing Break,own,100,1000,0,0,0,0,0,0,0,0,0
+Swing Break,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Swing Break,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Swing Break,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Trend (all),own,25,1000,0,0,0,0,0,0,0,0,0
+Trend (all),own,50,1000,0,0,0,0,0,0,0,0,0
+Trend (all),own,100,1000,0,0,0,0,0,0,0,0,0
+Trend (all),small-win,25,1000,0,0,0,0,0,0,0,0,0
+Trend (all),small-win,50,1000,0,0,0,0,0,0,0,0,0
+Trend (all),small-win,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),own,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),own,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),own,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),small-win,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),small-win,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check),small-win,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,own,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,own,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,own,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,own,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,own,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,own,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Lined + Swing,small-win,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,own,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,own,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,own,100,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,small-win,25,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,small-win,50,1000,0,0,0,0,0,0,0,0,0
+Trend (safety check) + Swing + Fade,small-win,100,1000,0,0,0,0,0,0,0,0,0
