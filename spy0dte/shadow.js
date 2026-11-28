@@ -403,8 +403,11 @@ function writeGrid(dir) {
     s: num(z ? r.start_tod_0dte : r.start_tod), ma: num(z ? r.minutes_0dte : r.minutes), mb: num(z ? r.minutes_b_0dte : r.minutes_b) });
   const liveDays = new Set(live.map((r) => r.date));
   const zero = [...base.filter((r) => !liveDays.has(r.date)).map((r) => sigOf(r, false)), ...live.map((r) => sigOf(r, r.dte === "1"))];
-  const one = live.filter((r) => r.dte === "1").map((r) => sigOf(r, false));
-  const zeroReal = realOf([...realBase.filter((r) => !liveDays.has(r.date)), ...realLive]), oneReal = realOf(realLive.filter((r) => one.some((x) => x.date === r.date)));
+  // 1DTE: the 1DTE history (Alpaca bars, Nov 3-13, build_1dte_history.js) + dry-run days
+  const hist1 = parseCsv(path.join(dir, "shadow_baseline_1dte.csv")).filter((r) => r.dte === "1" && !liveDays.has(r.date)), hist1Days = new Set(hist1.map((r) => r.date));
+  const one = [...hist1.map((r) => sigOf(r, false)), ...live.filter((r) => r.dte === "1").map((r) => sigOf(r, false))];
+  const zeroReal = realOf([...realBase.filter((r) => !liveDays.has(r.date)), ...realLive]);
+  const oneReal = realOf([...parseCsv(path.join(dir, "shadow_baseline_1dte_real.csv")).filter((r) => hist1Days.has(r.date)), ...realLive.filter((r) => one.some((x) => x.date === r.date))]);
   const dates = (S) => { const d = [...new Set(S.map((x) => x.date))].sort(); return d.length ? `${d[0]} to ${d[d.length - 1]} (${d.length} days)` : "no days yet"; };
   const csvOut = (T) => GRID_HEAD.join(",") + "\n" + T.map((r) => r.map(q).join(",")).join("\n") + "\n";
   fs.writeFileSync(path.join(dir, "shadow_grid_0dte.csv"), csvOut(gridTable(zero, zeroReal)));

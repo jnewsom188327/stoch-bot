@@ -141,7 +141,8 @@ async function shadowBaseline(r0opts) {
   const busy = new Map();
   const out = path.join(__dirname, "smallwin");
   fs.mkdirSync(out, { recursive: true });
-  const csv = path.join(out, "shadow_baseline.csv"), rcsv = path.join(out, "shadow_baseline_real.csv");
+  const TAG = process.env.SHADOW_TAG || "baseline"; // baseline = 0DTE saved days; baseline_1dte = the 1DTE history (build_1dte_history.js)
+  const csv = path.join(out, `shadow_${TAG}.csv`), rcsv = path.join(out, `shadow_${TAG}_real.csv`);
   for (const f of [csv, rcsv]) if (fs.existsSync(f)) fs.unlinkSync(f);
   const hook = {
     minute(D, t, eng) { const p = eng.pos || eng.pending; if (!busy.has(D.day)) busy.set(D.day, new Map()); if (p && p.m) busy.get(D.day).set(Math.round((((t % 86400) + 86400) % 86400) / 60 - 570), p.m.s); },
@@ -154,7 +155,8 @@ async function shadowBaseline(r0opts) {
   fs.renameSync(path.join(tmp, "shadow.csv"), csv); fs.renameSync(path.join(tmp, "shadow_real.csv"), rcsv); fs.rmSync(tmp, { recursive: true, force: true });
   S.writeGrid(out); // the account grid (0DTE from the saved days; 1DTE fills in from the dry run)
   const rows = S.parseCsv(csv), real = S.parseCsv(rcsv), days = [...new Set(rows.map((x) => x.date))];
-  const L = [`# Shadow baseline · ${days.length} saved days (${days[0]} to ${days[days.length - 1]}) · 0DTE bars (1DTE bars are saved from Nov 30 on)`, "",
+  const dteNote = TAG === "baseline_1dte" ? "1DTE bars (Alpaca 1-minute history, the bot and the shadow avenues both trade the next-day expiry)" : "0DTE bars (1DTE bars are saved from Nov 30 on)";
+  const L = [`# Shadow ${TAG.replace("_", " ")} · ${days.length} saved days (${days[0]} to ${days[days.length - 1]}) · ${dteNote}`, "",
     "Every signal scored on its own (one row per signal, overlapping signals all counted). 5% bid, skipped if it doesn't fill.", "",
     "| Avenue | Signals | Filled | Own exits: won · avg · total · worst | Small-win exits: won · avg · total · worst |", "|---|---|---|---|---|"];
   for (const a of S.AVENUES) { const T = rows.filter((x) => x.avenue === a.id), A = S.record(T, "result_a"), Bb = S.record(T, "result_b");
@@ -173,7 +175,7 @@ async function shadowBaseline(r0opts) {
   acct("All three (+ Swing Break)", safe, ["trend", "lined", "swing"], false);
   for (const a of S.AVENUES) acct(`Small-win bot + ${a.name}`, a.id === "trend" ? safe : rows, [a.id], true);
   L.push("", "Rules are copied from the Edge Stress Test (build/track.js, swing.js, itm.js) and the 1 ITM Confluence trackers (lu_track.js, bs_build.js). Replay fills at the next bar's open with the 1¢ slip the trackers use; live fills will cost a little more.");
-  fs.writeFileSync(path.join(out, "SHADOW_BASELINE.md"), L.join("\n") + "\n");
+  fs.writeFileSync(path.join(out, `SHADOW_${TAG.toUpperCase()}.md`), L.join("\n") + "\n");
   console.log(L.join("\n"));
   return r;
 }
