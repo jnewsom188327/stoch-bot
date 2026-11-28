@@ -9,6 +9,7 @@ const day = process.argv[2] || "2026-11-25";
 const SRC = __dirname;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "swrev-"));
 for (const f of fs.readdirSync(SRC)) if (f.endsWith(".js")) fs.copyFileSync(path.join(SRC, f), path.join(TMP, f));
+fs.cpSync(path.join(SRC, "shadow_src"), path.join(TMP, "shadow_src"), { recursive: true }); // the shadow log's copied tracker code
 
 const B = JSON.parse(fs.readFileSync(path.join(SRC, "..", "results", `bars_${day}.json`), "utf8"));
 const off = B.spy[0][0].slice(-6);
@@ -58,6 +59,7 @@ if (process.argv[3] === "half") process.env.SW_HALF = "yes";
 process.on("exit", () => {
   const st = JSON.parse(fs.readFileSync(path.join(TMP, "smallwin", "state.json"), "utf8"));
   const csv = fs.readFileSync(path.join(TMP, "smallwin", "trades.csv"), "utf8").trim().split("\n");
+  console.error(`[mock] files: ${TMP}`);
   console.error(`\n[mock] ${calls} API calls · order attempts ${orderAttempts} · trades ${csv.length - 1} · balance ${st.balance}`);
   if (orderAttempts) { console.error("[mock] FAIL: the dry run tried to send an order"); process.exitCode = 1; }
 });

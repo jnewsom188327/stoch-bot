@@ -47,3 +47,20 @@ The replay fills at the next bar's open with 1¢ slippage each way, so live spre
 ## Tests (no key needed)
 - `node spy0dte/replay_swrev.js [first day] [last day]` — every tracked day through the engine, every trade with its setup, boosters, confirm and exits. `CFG`, `SWP`, `SWG` (JSON) override settings.
 - `node spy0dte/test_swrev_mock.js 2026-11-25 [half]` — the full swbot.js against a fake Public on a fast clock; fails if it ever tries to send an order.
+
+## Shadow logs (Nov 28) — log only, never traded
+`shadow.js` watches five other avenues all day (9:30–3:00), including while the real bot is in a trade and after it stops for the day. **It cannot place an order, block a trade or change a size**: it only gets copies of the bars and reads which side the bot holds. `SW_SHADOW=off` turns it off; the real trades are identical either way (checked on 5 days in the mock test, including a 2-loss day and a half day).
+
+| Avenue | Rules (copied from) | Strike | Own exits |
+|---|---|---|---|
+| Trend your way (Option 2) | white dots + pane arrows, trend line your way, shading not against, before 1:00 (track.js `opt2`) + logs the **both-charts safety check** | strong trend 1 ITM, weak 3 ITM half port | half +10%, breakeven, runner 15 min, −75% |
+| Lined up + ran hard | dot + same-side pane arrow within 2 min, last 3 bodies < 0.8× the 10 before, SPY ran $1.50+ against (bs_build.js `lu_run`); flags "stalled" | 1 ITM | Fade ratchet |
+| Swing Break | fear/greed 95+ with the other ≤25, first minute both break, ran $1–3.50 against, 12:00–3:00 (swing.js) | 1 ITM | ratchet from +10%, −50% |
+| Fade MAIN | Vix Fix reversal + SPY 90+/≤20 + contract 90+/≤20 + day your way 0.3%+, before 1:45 (track.js `fadeA`) | 1 ITM | whole ratchet from +20% |
+| Smart dots | white dots with 3+ of 4 (range, VWAP, not expanding, wick) (lu_track.js) | 1 ITM | Fade ratchet |
+
+Each signal is scored two ways at a 5% bid (skipped if it doesn't fill): **(a)** the avenue's own exits (the Edge Stress Test page's `tradeReturn`, unchanged in `shadow_src/est_page.js`) and **(b)** the small-win exits (+8% sells 1 of 2, ratchet runner, −10% cut with no confirm, 3-min confirm, x veto, −20% stop, out at 15 min). Results use the 1DTE bars the bot saves; the 0DTE twins are scored too. Signals are read off the 0DTE charts, as the trackers did.
+- Live: each new signal is logged as `shadow_fire`. At night it fetches the shadow contracts' full-day bars (kept in `bars/<day>.json`), scores them, writes `smallwin/shadow.csv` (one row per signal) and `shadow_real.csv` (the real bot's trade times), and adds **"What it passed on"** to the daily issue: winners while the real bot sat out first, then each avenue's day and running record, the trend safety check, and two combined accounts (Trend with the safety check + reversal dots; All three with Swing Break).
+- **Promotion is never automatic.** After 10 dry-run days the issue lists any avenue with 85%+ wins, no loss worse than −50%, that also adds money when combined first-come with the reversal bot. You decide.
+- Baseline: `SHADOW=1 node spy0dte/replay_swrev.js` → `smallwin/SHADOW_BASELINE.md` (17 saved days, 0DTE bars). Swing Break matches the tracker's swing.json exactly on all 66 shared signals.
+- Known differences from the trackers: "lined up" can be confirmed by a pane arrow up to 2 min after the dot; it's scored from the dot like the tracker, and `known_at` shows when it was knowable. Overlapping signals are all counted (the trackers' $1,000 accounts skip them). The Fade contract fear/greed is read without waiting for its bars after the mark.

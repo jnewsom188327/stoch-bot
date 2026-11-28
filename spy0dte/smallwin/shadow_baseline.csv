@@ -1,0 +1,350 @@
+date,time,known_at,avenue,side,strike,dte,port,entry,result_a,result_b,best,heat,minutes,minutes_b,exit_b,result_a_0dte,result_b_0dte,flag,both_charts,spy_fear,spy_greed,call_fear,call_greed,put_fear,put_greed,vix_fear,vix_greed,real_in_trade,real_same_move,start_tod,note
+2026-11-03,10:34,10:34,smart,C,SPY261103C00753000,0,full,2.46,24.1,5.8,36.1,0,7,2,runner ratchet,24.1,5.8,smart 4/4 (range+vwap+not expanding+wick),,46,27,50.3,27.1,32.1,47.7,,,no,no,65,
+2026-11-03,10:37,10:37,trend,C,SPY261103C00751000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,30.6,38.5,41.6,36.6,45.5,26.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-03,10:37,10:37,smart,C,SPY261103C00753000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,30.6,38.5,41.6,36.6,45.5,26.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-03,11:20,11:20,smart,C,SPY261103C00754000,0,full,2.48,-16.4,-10.9,8.1,-18.5,10,0,x after the mark,-16.4,-10.9,smart 3/4 (range+vwap+wick),,83.2,8.5,82.4,8.8,14.2,100,,,no,no,111,
+2026-11-03,11:24,11:24,trend,C,SPY261103C00752000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,75.9,24.7,79.7,24,36.1,71.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-03,11:35,11:35,smart,C,SPY261103C00753000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,100,7.1,100,5.4,11.5,100,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-03,12:36,12:36,smart,C,SPY261103C00753000,0,full,2.38,14.1,3.1,20.3,-2.3,9,0,x after the mark,14.1,3.1,smart 3/4 (range+vwap+not expanding),,58.6,17.3,65.8,14.2,21.4,80.9,,,no,no,187,
+2026-11-03,12:39,12:39,smart,C,SPY261103C00753000,0,full,2.36,14.1,11,21.8,0,4,4,runner ratchet,14.1,11,smart 4/4 (range+vwap+not expanding+wick),,77.3,15.1,89.1,12.4,18.5,82.1,,,no,no,192,
+2026-11-03,1:15,1:15,swing,P,SPY261103P00758000,0,full,,,,,,,,,,,"ran $1.06, SPY 96.5/15.9",,15.9,96.5,24.3,91.7,98.7,14,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-03,1:23,1:23,smart,C,SPY261103C00755000,0,full,1.69,33.6,7.6,41.9,0,7,2,runner ratchet,33.6,7.6,smart 3/4 (range+vwap+wick),,63.5,32.4,82.6,20.2,52.5,64.4,,,no,no,237,
+2026-11-03,2:56,2:56,swing,C,SPY261103C00752000,0,full,2.05,4,6.7,13.1,-0.1,1,1,runner ratchet,4,6.7,"ran $1.15, SPY 93.3/40.1",,93.3,40.1,98.6,36.9,59.1,88.9,,,no,no,328,
+2026-11-04,10:00,10:00,trend,C,SPY261104C00765000,0,half,3.69,6.4,5.3,14.2,-14.5,15,2,runner ratchet,6.4,5.3,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,51.5,51.8,67.5,24.1,70.1,58.4,,,no,no,32,
+2026-11-04,10:08,10:08,trend,C,SPY261104C00766000,0,full,2.80,4.3,-11.1,22.7,-12.5,10,1,cut -10% (no confirm),4.3,-11.1,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,30.2,38.1,45.7,19.1,64.1,29.2,,,no,no,39,
+2026-11-04,10:33,10:33,fade,C,SPY261104C00765000,0,full,2.63,24.1,16.4,33.1,-9.2,4,4,runner ratchet,24.1,16.4,"SPY side 100/8.4, contract 100/9.1, day 0.457%",,86.5,15.6,93.1,7.1,33.6,78.5,,,same side,yes,64,
+2026-11-04,10:40,10:40,smart,P,SPY261104P00769000,0,full,2.61,29.1,19.1,45.1,-8.1,3,3,runner ratchet,29.1,19.1,smart 3/4 (range+not expanding+wick),,34.6,36.6,47.6,22.2,60.6,24.8,,,no,no,71,
+2026-11-04,11:02,11:02,smart,P,SPY261104P00768000,0,full,,,,,,,,,,,smart 3/4 (range+not expanding+wick),,45.6,80.9,55.3,100,79,37.9,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-04,11:05,11:05,trend,P,SPY261104P00766000,0,full,2.58,10.7,-14,16.5,-42,18,0,cut -10% (no confirm),10.7,-14,"strong trend, 1 ITM, white dot, both charts yes",yes,76.8,31.5,81.7,30.9,35,64.6,,,same side,yes,97,
+2026-11-04,11:20,11:20,trend,P,SPY261104P00769000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, put pane arrow, both charts no",no,42.7,74.5,65.1,51.8,83.9,25.4,,,same side,yes,,0DTE: no fill at the 5% bid
+2026-11-04,11:50,11:50,smart,P,SPY261104P00769000,0,full,2.09,9.5,-9,15.8,-29.2,10,0,x after the mark,9.5,-9,smart 3/4 (range+not expanding+wick),,9.9,84.2,15.1,70.9,93.8,8.7,,,same side,yes,141,
+2026-11-04,12:06,12:06,smart,C,SPY261104C00766000,0,full,2.32,19.1,8.6,28.5,-7.7,12,8,runner ratchet,19.1,8.6,smart 3/4 (vwap+not expanding+wick),,55,9.3,62.8,3.9,19.9,78.9,,,opposite side,no,162,
+2026-11-04,12:11,12:11,trend,C,SPY261104C00766000,0,full,2.50,13.3,-12.6,22.8,-14.3,15,0,cut -10% (no confirm),13.3,-12.6,"strong trend, 1 ITM, call pane arrow, both charts no",no,37.4,16.4,50.9,6.9,37.9,41.6,,,no,no,162,
+2026-11-04,12:19,12:19,trend,C,SPY261104C00764000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, SPY pane arrow, both charts no",no,61.8,12.8,72.4,5,37.9,52,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-04,12:22,12:22,trend,C,SPY261104C00765000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, call pane arrow, both charts yes",yes,15.3,22.6,40.6,10.1,50.3,14.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-04,12:26,12:26,trend,C,SPY261104C00765000,0,half,3.63,8.4,-2.1,10.2,-8,18,2,no confirm in 3 min,8.4,-2.1,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,17.7,29,21.5,12.8,57.1,16.8,,,no,no,180,
+2026-11-04,12:32,12:32,trend,C,SPY261104C00767000,0,full,1.97,4,5.6,10.8,-10.5,9,9,runner ratchet,4,5.6,"strong trend, 1 ITM, call pane arrow, both charts no",no,30.6,26.1,35.2,10.5,53.9,29.5,,,no,no,183,
+2026-11-04,12:37,12:37,trend,C,SPY261104C00767000,0,full,1.88,3.9,-2.7,15.9,-6.4,7,2,no confirm in 3 min,3.9,-2.7,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,22.4,20.8,33.2,8.6,47.6,16,,,no,no,188,
+2026-11-04,12:41,12:41,smart,C,SPY261104C00767000,0,full,1.78,23.7,14.8,30.6,0,2,2,runner ratchet,23.7,14.8,smart 3/4 (vwap+not expanding+wick),,33,9.6,52.7,2.3,31.8,22.2,,,no,no,197,
+2026-11-04,12:42,12:42,trend,C,SPY261104C00767000,0,full,2.00,4,4.4,15.8,-12.7,6,2,runner ratchet,4,4.4,"strong trend, 1 ITM, SPY pane arrow, both charts no",no,25.9,18,43,7,47.1,30.2,,,no,no,193,
+2026-11-04,12:45,12:45,trend,C,SPY261104C00767000,0,full,1.84,16.8,12.6,32.9,-0.7,15,2,runner ratchet,16.8,12.6,"strong trend, 1 ITM, SPY pane arrow, both charts no",no,21.2,16,39.1,7.6,37.6,19.2,,,no,no,197,
+2026-11-04,2:13,2:13,swing,P,SPY261104P00770000,0,full,,,,,,,,,,,"ran $1.19, SPY 93.9/19",,19,93.9,25.4,88,97.6,19.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-04,2:25,2:25,smart,C,SPY261104C00767000,0,full,1.34,-6.6,7.4,15.7,-29.8,10,1,runner ratchet,-6.6,7.4,smart 3/4 (vwap+not expanding+wick),,64.6,12.1,83.9,2.7,33,65.8,,,no,no,296,
+2026-11-04,2:59,2:59,smart,C,SPY261104C00766000,0,full,,,,,,,,,,,smart 3/4 (vwap+not expanding+wick),,64.4,6.1,89.1,5.7,16,66.6,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:06,10:06,trend,P,SPY261105P00754000,0,full,3.35,54.7,6.1,103.1,-2.2,15,1,runner ratchet,54.7,6.1,"strong trend, 1 ITM, put pane arrow, both charts no",no,58.4,42.3,87.5,45.7,33.9,7,,,no,no,37,
+2026-11-05,10:09,10:09,trend,P,SPY261105P00753000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,47.6,40.8,79.3,38.2,31.2,5.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:15,10:15,lined,C,SPY261105C00749000,0,full,3.43,-37.8,-16.5,1.2,-50.1,10,1,cut -10% (no confirm),-37.8,-16.5,not stalled,,50.4,37.4,77.6,37,23.2,6.3,,,no,no,47,
+2026-11-05,10:17,10:17,trend,P,SPY261105P00751000,0,full,3.42,29.9,10.1,115.2,-3.5,15,1,runner ratchet,29.9,10.1,"strong trend, 1 ITM, put pane arrow, both charts no",no,49.3,80.8,86.7,94.7,52.2,8.5,,,no,no,48,
+2026-11-05,10:24,10:24,trend,P,SPY261105P00749000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts no",no,54.9,31.5,90,30.5,28.5,6.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:35,10:35,trend,P,SPY261105P00749000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,40.9,76.2,57.7,73.7,69.6,4.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:39,10:39,trend,P,SPY261105P00748000,0,full,4.10,44.2,16,177.8,-2,15,2,runner ratchet,44.2,16,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,41.9,48.6,63.1,40.9,50.7,6.4,,,no,no,70,
+2026-11-05,10:41,10:41,trend,P,SPY261105P00747000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,38.7,28.9,55.3,21.7,37.9,3.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:44,10:45,lined,C,SPY261105C00743000,0,full,4.38,-12.5,-20.4,0,-49.3,10,0,stop -20%,-12.5,-20.4,"not stalled, arrow 1 min after the dot",,46.5,3.8,69.4,4.4,4.5,5.4,,,no,no,75,
+2026-11-05,10:44,10:44,trend,P,SPY261105P00746000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,46.5,3.8,69.4,4.4,4.5,5.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,10:45,10:45,trend,P,SPY261105P00745000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts no",no,59.9,60.8,85.2,53.8,59.4,8.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,11:15,11:15,trend,P,SPY261105P00744000,0,full,4.05,4.5,6.5,11.7,-21.7,1,1,runner ratchet,4.5,6.5,"strong trend, 1 ITM, SPY pane arrow, both charts yes",yes,13.8,86.1,25,87.5,95.6,3.6,,,no,no,106,
+2026-11-05,11:25,11:25,lined,P,SPY261105P00747000,0,full,3.75,14.4,5.5,35.4,-2.2,5,1,runner ratchet,14.4,5.5,stalled,,6.7,97.1,20.8,78.6,100,3.8,,,no,no,116,
+2026-11-05,11:25,11:25,smart,P,SPY261105P00747000,0,full,3.75,14.4,5.5,35.4,-2.2,5,1,runner ratchet,14.4,5.5,smart 4/4 (range+vwap+not expanding+wick),,6.7,97.1,20.8,78.6,100,3.8,,,no,no,116,
+2026-11-05,11:25,11:25,fade,P,SPY261105P00747000,0,full,3.75,14.4,5.5,35.4,-2.2,5,1,runner ratchet,14.4,5.5,"SPY side 97.1/6.7, contract 100/3.3, day 2.597%",,6.7,97.1,20.8,78.6,100,3.8,,,no,no,116,
+2026-11-05,11:37,11:37,smart,P,SPY261105P00747000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+wick),,10.6,44.1,28.1,39.3,68.3,6.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,11:55,11:55,lined,C,SPY261105C00741000,0,full,3.32,-22,6.5,14.3,-27.5,10,1,runner ratchet,-22,6.5,stalled,,93.5,9.4,94.1,13,16.7,91.9,,,no,no,146,
+2026-11-05,12:21,12:21,smart,P,SPY261105P00742000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+wick),,24.4,25,37.3,23,33,20.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,12:41,12:41,swing,C,SPY261105C00736000,0,full,,,,,,,,,,,"ran $2.04, SPY 82.4/50.5",,82.4,50.5,83.8,57.8,46.5,71.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,1:13,1:13,smart,P,SPY261105P00739000,0,full,3.37,34.3,20.9,42.3,0,4,4,runner ratchet,34.3,20.9,smart 4/4 (range+vwap+not expanding+wick),,19.5,85.1,25.3,82.2,86.9,14.8,,,no,no,224,
+2026-11-05,1:15,1:15,swing,P,SPY261105P00739000,0,full,,,,,,,,,,,"ran $2.01, SPY 88.8/15.6",,15.6,88.8,21.2,86.8,90.8,13.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,1:17,1:17,smart,P,SPY261105P00738000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,45,73,51.4,70.1,75.4,32.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,2:18,2:18,swing,P,SPY261105P00739000,0,full,,,,,,,,,,,"ran $2.54, SPY 87.2/39.4",,39.4,87.2,45.1,82.3,90.6,37.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,2:31,2:31,swing,C,SPY261105C00735000,0,full,3.03,4.3,5.5,10.8,-3.4,4,2,runner ratchet,4.3,5.5,"ran $2.53, SPY 93.5/21.5",,93.5,21.5,96.1,13.6,33.4,87.8,,,no,no,302,
+2026-11-05,2:43,2:43,smart,P,SPY261105P00740000,0,full,3.03,-17.8,-7.9,5.6,-34,10,0,x after the mark,-17.8,-7.9,smart 3/4 (range+vwap+wick),,18.6,82.5,27.9,62.8,99,14.8,,,no,no,315,
+2026-11-05,2:54,2:54,lined,P,SPY261105P00742000,0,full,,,,,,,,,,,stalled,,20,90.8,29.6,81.2,91.9,20.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,2:54,2:54,smart,P,SPY261105P00742000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,20,90.8,29.6,81.2,91.9,20.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-05,2:54,2:54,swing,P,SPY261105P00742000,0,full,,,,,,,,,,,"ran $2.78, SPY 90.8/20",,20,90.8,29.6,81.2,91.9,20.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-06,10:08,10:08,smart,C,SPY261106C00738000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,97.1,8.6,96.4,5.2,15.6,95.6,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-06,10:09,10:09,trend,C,SPY261106C00738000,0,full,3.68,9.2,16,41.5,0,15,2,runner ratchet,9.2,16,"strong trend, 1 ITM, SPY pane arrow, both charts yes",yes,85.6,11.3,90.3,6.6,21.4,77.2,,,same side,yes,41,
+2026-11-06,10:10,10:10,trend,C,SPY261106C00739000,0,full,3.48,4.4,10.6,30.5,-6.2,15,2,runner ratchet,4.4,10.6,"strong trend, 1 ITM, white dot, both charts yes",yes,74.6,27.1,82.4,15.9,45,65.2,,,same side,yes,41,
+2026-11-06,10:12,10:12,trend,C,SPY261106C00739000,0,full,3.83,4.5,5,10,-22.2,10,4,runner ratchet,4.5,5,"strong trend, 1 ITM, call pane arrow, both charts no",no,77.6,30,83.5,18.1,46,69,,,same side,yes,47,
+2026-11-06,10:33,10:33,fade,C,SPY261106C00736000,0,full,4.04,24.4,-6.4,30,-8.3,12,0,x after the mark,24.4,-6.4,"SPY side 100/10.5, contract 100/6.7, day 0.419%",,93,10.5,94.8,6.9,18.3,90.7,,,no,no,64,
+2026-11-06,10:34,10:34,lined,C,SPY261106C00736000,0,full,3.81,14.4,4.9,22.3,-2.8,5,0,x after the mark,14.4,4.9,stalled,,100,12.8,100,8.5,23.1,100,,,no,no,65,
+2026-11-06,10:36,10:36,fade,C,SPY261106C00736000,0,full,3.71,19.4,7.3,25.5,0,3,1,runner ratchet,19.4,7.3,"SPY side 100/10.8, contract 100/7, day 0.351%",,96.8,10.8,97.9,6.5,20.2,96.4,,,no,yes,67,
+2026-11-06,10:37,10:37,lined,C,SPY261106C00736000,0,full,,,,,,,,,,,stalled,,93.2,6.6,97.4,2.5,15.9,95.2,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-06,10:38,10:38,fade,C,SPY261106C00736000,0,full,3.96,24.4,9.4,32.5,0,7,1,runner ratchet,24.4,9.4,"SPY side 100/14.4, contract 100/8, day 0.415%",,80.8,14.4,87,7.6,27.9,78,,,no,yes,69,
+2026-11-06,11:37,11:37,lined,P,SPY261106P00742000,0,full,3.17,14.3,6.8,23.3,-14.6,24,5,runner ratchet,14.3,6.8,stalled,,31.5,59.8,39.9,68.7,76.3,35.1,,,same side,yes,128,
+2026-11-06,11:47,11:47,smart,C,SPY261106C00738000,0,full,3.13,14.3,4.7,24.1,0,7,2,runner ratchet,14.3,4.7,smart 4/4 (range+vwap+not expanding+wick),,39.1,29.3,49.4,21.4,48,42,,,no,no,138,
+2026-11-06,11:52,11:52,trend,C,SPY261106C00737000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,36.2,31.5,56.2,25.2,46.9,32,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-06,1:09,1:09,swing,P,SPY261106P00739000,0,full,2.87,4.3,7.2,13.6,0,1,1,runner ratchet,4.3,7.2,"ran $1.28, SPY 90.5/5.6",,5.6,90.5,15.4,74,88.2,2.6,,,no,no,220,
+2026-11-06,1:10,1:10,smart,P,SPY261106P00739000,0,full,2.85,14.2,10.6,23.2,-7.7,3,3,runner ratchet,14.2,10.6,smart 4/4 (range+vwap+not expanding+wick),,2.9,96.3,17.5,70,96.8,1.4,,,no,no,223,
+2026-11-06,1:36,1:36,swing,P,SPY261106P00740000,0,full,,,,,,,,,,,"ran $1.99, SPY 84.9/14.1",,14.1,84.9,30,74.1,89.2,10.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,10:09,10:09,trend,C,SPY261109C00747000,0,full,,,,,,,,,,,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,47.2,28.2,66.7,11,59.5,33.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,10:15,10:15,trend,C,SPY261109C00747000,0,full,,,,,,,,,,,"strong trend, 1 ITM, call pane arrow, both charts no",no,27.4,26,45.5,11.4,60.5,4.6,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,10:17,10:17,trend,C,SPY261109C00748000,0,full,2.26,4.1,6.9,13.3,-1.4,1,1,runner ratchet,4.1,6.9,"strong trend, 1 ITM, call pane arrow, both charts no",no,24.1,25.1,44.3,11.6,57.5,37.1,,,no,no,49,
+2026-11-09,10:20,10:20,trend,C,SPY261109C00748000,0,full,2.32,4.1,-0.4,10.4,-4.6,6,2,no confirm in 3 min,4.1,-0.4,"strong trend, 1 ITM, call pane arrow, both charts no",no,14.4,30.4,27.1,13.6,67.5,28.4,,,no,no,51,
+2026-11-09,10:22,10:22,trend,C,SPY261109C00748000,0,full,2.31,4.1,5,10.8,-4.3,4,3,runner ratchet,4.1,5,"strong trend, 1 ITM, call pane arrow, both charts no",no,17,24,34.5,11.8,60,21.3,,,no,no,53,
+2026-11-09,10:26,10:26,trend,C,SPY261109C00748000,0,full,2.32,12.3,7.8,27.3,-7.3,15,2,runner ratchet,12.3,7.8,"strong trend, 1 ITM, call pane arrow, both charts no",no,41,25.2,64,11.1,65.6,58.7,,,no,no,58,
+2026-11-09,10:30,10:30,trend,C,SPY261109C00748000,0,full,,,,,,,,,,,"strong trend, 1 ITM, call pane arrow, both charts no",no,23,24.6,54.2,10.6,66.7,22.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,10:34,10:34,trend,C,SPY261109C00748000,0,full,2.41,4.2,5.3,11.9,-2.6,3,1,runner ratchet,4.2,5.3,"strong trend, 1 ITM, SPY pane arrow, both charts no",no,24,14.5,24.8,7.4,50.1,30.6,,,no,no,65,
+2026-11-09,10:40,10:40,trend,C,SPY261109C00748000,0,full,2.43,34.2,10.4,67.4,-2.1,15,2,runner ratchet,34.2,10.4,"strong trend, 1 ITM, SPY pane arrow, both charts no",no,28.9,13.4,37.2,7.4,46.3,35.4,,,no,no,71,
+2026-11-09,10:42,10:42,trend,C,SPY261109C00748000,0,full,2.58,28.4,27.9,63.3,-4,15,13,runner ratchet,28.4,27.9,"strong trend, 1 ITM, SPY pane arrow, both charts no",no,59.9,18.5,59.4,12.3,53.1,86.2,,,no,no,74,
+2026-11-09,11:12,11:12,smart,C,SPY261109C00749000,0,full,2.21,-10.6,-6.5,7.1,-13.3,10,0,x after the mark,-10.6,-6.5,smart 4/4 (range+vwap+not expanding+wick),,95.8,13.8,98.9,7.6,19.8,92.5,,,opposite side,no,103,
+2026-11-09,11:15,11:15,smart,C,SPY261109C00748000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,97.9,10.3,100,7.2,15.1,94.4,,,opposite side,no,,0DTE: no fill at the 5% bid
+2026-11-09,11:17,11:17,trend,C,SPY261109C00747000,0,half,3.64,13.4,-20.5,19.1,-22.2,27,15,stop -20%,13.4,-20.5,"weak trend, 3 ITM half port, white dot, both charts yes",yes,79.7,26.3,90.7,15.1,40,63,,,opposite side,no,110,
+2026-11-09,11:17,11:17,smart,C,SPY261109C00749000,0,full,2.18,15.3,-20.8,19.5,-34.3,30,9,stop -20%,15.3,-20.8,smart 4/4 (range+vwap+not expanding+wick),,79.7,26.3,90.7,15.1,40,63,,,opposite side,no,108,
+2026-11-09,11:31,11:31,smart,C,SPY261109C00748000,0,full,2.31,19.1,4.6,32.9,-10.3,11,1,runner ratchet,19.1,4.6,smart 3/4 (range+vwap+wick),,47,10.7,78.7,7.4,23.5,28.8,,,no,no,122,
+2026-11-09,12:32,12:32,trend,C,SPY261109C00751000,0,full,1.96,12.5,-6.5,17.6,-33.6,68,2,no confirm in 3 min,12.5,-6.5,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,13.3,38.1,25.9,21.7,66.2,15.9,,,no,no,187,
+2026-11-09,12:44,12:44,smart,C,SPY261109C00751000,0,full,1.66,18.7,13.6,28.1,-6.2,5,4,runner ratchet,18.7,13.6,smart 3/4 (range+vwap+wick),,87.6,16.9,93.2,10.9,34.7,80.6,,,no,no,196,
+2026-11-09,12:48,12:48,trend,C,SPY261109C00749000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,83.5,30.5,87.8,21.7,43.8,74.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,12:56,12:56,trend,C,SPY261109C00749000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,43.3,34.4,61.6,18.4,58.4,47.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,2:10,2:10,smart,C,SPY261109C00751000,0,full,1.83,-20.3,-2.9,2,-22,10,0,x after the mark,-20.3,-2.9,smart 4/4 (range+vwap+not expanding+wick),,47.7,10.4,79.3,7.1,19.4,16.5,,,no,no,286,
+2026-11-09,2:21,2:21,smart,C,SPY261109C00751000,0,full,1.57,-3.1,-1.1,5.9,-21.6,10,0,x after the mark,-3.1,-1.1,smart 4/4 (range+vwap+not expanding+wick),,97.9,5.2,94.6,4,9.6,94.4,,,no,no,292,
+2026-11-09,2:31,2:31,smart,C,SPY261109C00750000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,87.5,8.6,93,6.7,16.4,74.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,2:43,2:43,swing,P,SPY261109P00756000,0,full,,,,,,,,,,,"ran $2.21, SPY 84.7/43.1",,43.1,84.7,49.8,74.1,90.4,20.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-09,2:56,2:56,smart,C,SPY261109C00752000,0,full,1.64,23.6,14.8,32.6,0,1,1,runner ratchet,23.6,14.8,smart 3/4 (range+vwap+wick),,91.5,36.5,84.8,19.4,58.2,54.3,,,no,no,327,
+2026-11-10,9:55,9:55,trend,C,SPY261110C00746000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,65.9,60.1,84.5,74.2,89.4,64.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-10,9:55,9:55,smart,C,SPY261110C00748000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,65.9,60.1,84.5,74.2,89.4,64.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-10,10:18,10:18,smart,C,SPY261110C00749000,0,full,2.86,-22.9,-20.6,4.9,-33.9,10,2,stop -20%,-22.9,-20.6,smart 4/4 (range+vwap+not expanding+wick),,94.2,24.2,90.2,9.2,44.7,86.6,,,no,no,50,
+2026-11-10,10:26,10:26,trend,C,SPY261110C00746000,0,half,4.35,4.5,-3.2,14.2,-9.7,7,0,x after the mark,4.5,-3.2,"weak trend, 3 ITM half port, white dot, both charts yes",yes,83.6,17.4,90.5,12.7,30.4,70.4,,,no,no,58,
+2026-11-10,10:30,10:30,smart,C,SPY261110C00748000,0,full,,,,,,,,,,,smart 3/4 (vwap+not expanding+wick),,76.6,14.2,88.7,10,26.9,56.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-10,10:32,10:32,smart,C,SPY261110C00749000,0,full,2.54,-48.9,-20.7,2.9,-70,30,3,stop -20%,-48.9,-20.7,smart 3/4 (range+vwap+not expanding),,54,29,74.2,21.2,45.1,42.4,,,no,no,63,
+2026-11-10,10:49,10:49,lined,C,SPY261110C00746000,0,full,2.47,19.1,-16.1,26.3,-18.2,11,0,x after the mark,19.1,-16.1,stalled,,98.2,8.7,100,9.2,15.8,93.7,,,no,yes,80,
+2026-11-10,11:06,11:06,smart,P,SPY261110P00749000,0,full,2.41,-2.2,-11.7,16.4,-19.2,10,0,x after the mark,-2.2,-11.7,smart 4/4 (range+vwap+not expanding+wick),,20.5,74,32.7,63.6,80.7,12.3,,,opposite side,no,97,
+2026-11-10,11:10,11:10,smart,P,SPY261110P00749000,0,full,2.18,14,10.4,28.6,-0.2,2,2,runner ratchet,14,10.4,smart 3/4 (range+vwap+not expanding),,10.2,86.5,17.1,79.1,91.3,5.5,,,no,yes,105,
+2026-11-10,11:14,11:14,trend,P,SPY261110P00751000,0,half,3.49,4.4,8.7,26.2,-0.4,9,2,runner ratchet,4.4,8.7,"weak trend, 3 ITM half port, SPY pane arrow, both charts yes",yes,17.6,60.1,34.3,45.8,74.4,8.6,,,same side,yes,105,
+2026-11-10,11:17,11:17,trend,P,SPY261110P00751000,0,half,3.96,4.5,6.3,11.1,-7.9,3,3,runner ratchet,4.5,6.3,"weak trend, 3 ITM half port, white dot, both charts yes",yes,20.5,37.1,38.9,18,54.3,10.4,,,same side,yes,108,
+2026-11-10,11:21,11:21,trend,P,SPY261110P00750000,0,half,3.40,6.4,-20.5,10.8,-29.7,17,9,stop -20%,6.4,-20.5,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,31,23,52.7,22.5,31.6,16,,,no,no,112,
+2026-11-10,11:26,11:26,trend,P,SPY261110P00751000,0,half,4.13,4.5,-12,11.6,-25.7,13,1,cut -10% (no confirm),4.5,-12,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,27.7,26.7,51.9,23.8,37.4,12.8,,,no,no,117,
+2026-11-10,11:36,11:36,trend,P,SPY261110P00751000,0,half,4.04,4.5,7.7,14.2,-8.1,6,3,runner ratchet,4.5,7.7,"weak trend, 3 ITM half port, white dot, both charts yes",yes,30.4,31.5,51.3,23.2,51.7,22.1,,,no,no,127,
+2026-11-10,12:13,12:13,swing,P,SPY261110P00749000,0,full,2.31,4.1,4.6,14.8,-8.2,2,1,runner ratchet,4.1,4.6,"ran $1.21, SPY 89.9/15.3",,15.3,89.9,24.8,85.7,95.8,13.1,,,no,no,164,
+2026-11-10,12:14,12:14,smart,P,SPY261110P00749000,0,full,2.29,19,-6.1,28,-10,6,2,no confirm in 3 min,19,-6.1,smart 4/4 (range+vwap+not expanding+wick),,14.5,87,21.9,76.8,91.6,12.3,,,no,no,167,
+2026-11-10,12:18,12:18,swing,P,SPY261110P00749000,0,full,,,,,,,,,,,"ran $1.52, SPY 95.1/12.1",,12.1,95.1,16,88.6,99.3,8.7,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-10,12:21,12:21,smart,P,SPY261110P00749000,0,full,2.22,19,14.4,31.8,0,1,1,runner ratchet,19,14.4,smart 3/4 (range+vwap+not expanding),,25.6,73.4,37.9,59.1,84.6,20.9,,,no,yes,172,
+2026-11-10,12:42,12:42,swing,C,SPY261110C00744000,0,full,2.45,14.1,4.5,20,-11.9,5,3,runner ratchet,14.1,4.5,"ran $1.05, SPY 86.4/40.5",,86.4,40.5,87.9,34.9,44.6,83.6,,,no,yes,195,
+2026-11-10,12:58,12:58,smart,P,SPY261110P00748000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,10.5,94.4,22.5,88.1,96.4,6.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-10,1:00,1:00,swing,P,SPY261110P00748000,0,full,2.12,14,10.4,20.8,-6.5,3,3,runner ratchet,14,10.4,"ran $1.26, SPY 84.7/25.5",,25.5,84.7,40.9,71.2,88.4,17,,,no,no,215,
+2026-11-10,1:01,1:01,smart,P,SPY261110P00748000,0,full,2.39,-31.3,-11.9,12.3,-42.7,30,0,cut -10% (no confirm),-31.3,-11.9,smart 4/4 (range+vwap+not expanding+wick),,34.7,80.2,52.1,64.4,85.4,20.5,,,no,no,214,
+2026-11-10,1:34,1:34,swing,P,SPY261110P00749000,0,full,2.21,4.1,5.7,12.5,-15.5,3,3,runner ratchet,4.1,5.7,"ran $1.27, SPY 84.7/15.6",,15.6,84.7,30.9,78.8,90.5,14.3,,,no,no,246,
+2026-11-10,1:59,1:59,smart,P,SPY261110P00749000,0,full,1.54,-3.8,-21.2,7.3,-38.3,10,5,stop -20%,-3.8,-21.2,smart 3/4 (range+not expanding+wick),,18.7,55.2,22.3,30.9,89.1,18.2,,,no,no,271,
+2026-11-11,10:06,10:06,trend,P,SPY261111P00759000,0,half,3.13,4.3,8.8,26,-5.3,10,3,runner ratchet,4.3,8.8,"weak trend, 3 ITM half port, white dot, both charts yes",yes,30.3,62,44.3,26.6,74.7,27.4,,,no,no,37,
+2026-11-11,10:06,10:06,smart,P,SPY261111P00757000,0,full,1.86,18.8,8.2,27.3,-11.4,7,3,runner ratchet,18.8,8.2,smart 3/4 (range+vwap+not expanding),,30.3,62,44.3,26.6,74.7,27.4,,,no,no,37,
+2026-11-11,10:09,10:09,trend,P,SPY261111P00759000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,33.7,70,49.1,37.8,84.1,26.6,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-11,1:04,1:04,smart,C,SPY261111C00759000,0,full,2.00,23.9,7.6,33.7,-0.2,5,0,x after the mark,23.9,7.6,smart 4/4 (range+vwap+not expanding+wick),,88.5,11.4,86.6,5.4,20.7,85,,,no,no,216,
+2026-11-11,2:12,2:12,swing,C,SPY261111C00759000,0,full,1.80,3.9,-21,10.8,-25.9,25,2,stop -20%,3.9,-21,"ran $1.73, SPY 91.2/31.6",,91.2,31.6,96.9,18.2,50.5,83.3,,,no,no,285,
+2026-11-12,9:59,9:59,smart,C,SPY261112C00756000,0,full,2.78,-10.5,-16,0,-30.6,10,0,x after the mark,-10.5,-16,smart 4/4 (range+vwap+not expanding+wick),,62.2,27.9,69,9.9,54,55.7,,,no,no,30,
+2026-11-12,10:05,10:05,trend,C,SPY261112C00755000,0,full,2.79,4.3,-9.8,23.5,-10.1,10,2,no confirm in 3 min,4.3,-9.8,"strong trend, 1 ITM, white dot, both charts yes",yes,72.7,21.4,77.2,17.4,29.7,67.4,,,same side,yes,36,
+2026-11-12,10:05,10:05,smart,C,SPY261112C00755000,0,full,2.79,14.2,-9.8,23.5,-10.1,10,2,no confirm in 3 min,14.2,-9.8,smart 3/4 (range+not expanding+wick),,72.7,21.4,77.2,17.4,29.7,67.4,,,same side,yes,36,
+2026-11-12,10:11,10:11,smart,C,SPY261112C00755000,0,full,3.00,19.3,7.9,28.2,-14.1,27,4,runner ratchet,19.3,7.9,smart 3/4 (range+vwap+not expanding),,96.4,27.8,98.6,22.4,38.5,91.5,,,no,no,42,
+2026-11-12,10:25,10:25,trend,C,SPY261112C00753000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, call pane arrow, both charts yes",yes,15.5,34.4,28.4,24.5,54.3,9.2,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-12,10:34,10:34,trend,C,SPY261112C00756000,0,full,,,,,,,,,,,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,23.4,28.5,31.7,15.9,51.7,21.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-12,11:35,11:35,trend,C,SPY261112C00757000,0,half,4.01,10.5,-12.7,12.2,-13.5,10,0,x after the mark,10.5,-12.7,"weak trend, 3 ITM half port, white dot, both charts yes",yes,83.1,10.4,89.6,3.5,24.7,72.6,,,no,no,130,
+2026-11-12,11:35,11:35,lined,C,SPY261112C00759000,0,full,2.51,10,-20.2,11.7,-21.5,10,0,x after the mark,10,-20.2,stalled,,83.1,10.4,89.6,3.5,24.7,72.6,,,no,no,130,
+2026-11-12,11:35,11:35,smart,C,SPY261112C00759000,0,full,2.51,10,-20.2,11.7,-21.5,10,0,x after the mark,10,-20.2,smart 4/4 (range+vwap+not expanding+wick),,83.1,10.4,89.6,3.5,24.7,72.6,,,no,no,130,
+2026-11-12,12:00,12:00,trend,C,SPY261112C00758000,0,half,3.35,10.1,2.9,11.8,-22.4,37,2,no confirm in 3 min,10.1,2.9,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,9.8,29.6,16.5,9.4,61.4,7.3,,,no,no,152,
+2026-11-12,12:09,12:09,smart,C,SPY261112C00760000,0,full,1.69,13.7,10.4,21.3,-2.4,1,1,runner ratchet,13.7,10.4,smart 4/4 (range+vwap+not expanding+wick),,17.8,16.9,34.6,7.7,37.8,12,,,no,no,163,
+2026-11-12,12:14,12:14,trend,C,SPY261112C00758000,0,half,3.46,9.6,-11.1,11.4,-24.8,33,0,cut -10% (no confirm),9.6,-11.1,"weak trend, 3 ITM half port, SPY pane arrow, both charts yes",yes,14.6,28.5,28.6,22.8,49.7,10.9,,,no,no,165,
+2026-11-12,12:23,12:23,smart,C,SPY261112C00759000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,40.5,15.6,64,15.5,17.8,40.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-12,1:08,1:08,swing,C,SPY261112C00759000,0,full,1.83,3.9,-2.4,11.8,-14.4,2,0,x after the mark,3.9,-2.4,"ran $1.22, SPY 95.2/7.9",,95.2,7.9,97.5,10.5,12.7,94.8,,,no,no,220,
+2026-11-12,1:09,1:09,smart,C,SPY261112C00759000,0,full,1.84,1.4,-2.9,12.3,-14.8,10,0,x after the mark,1.4,-2.9,smart 4/4 (range+vwap+not expanding+wick),,87.9,12.2,93.8,12.6,19.1,81,,,no,no,220,
+2026-11-12,1:42,1:42,smart,C,SPY261112C00759000,0,full,1.66,-41.4,-13.8,0,-51.9,10,0,x after the mark,-41.4,-13.8,smart 4/4 (range+vwap+not expanding+wick),,40.5,13.7,60.1,15,29.9,38.7,,,no,no,253,
+2026-11-12,1:53,1:53,swing,C,SPY261112C00757000,0,full,,,,,,,,,,,"ran $1.65, SPY 91.7/45.8",,91.7,45.8,96.6,44.9,48.7,84.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-13,10:38,10:38,trend,P,SPY261113P00751000,0,full,2.75,4.3,-11.4,10,-15.5,5,0,cut -10% (no confirm),4.3,-11.4,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,28,56.4,46.8,43.9,66.3,12.1,,,no,no,69,
+2026-11-13,10:44,10:44,trend,P,SPY261113P00754000,0,half,4.43,12.1,-5,15.9,-25.5,18,2,no confirm in 3 min,12.1,-5,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,27,50,49.8,36,63.2,10.8,,,no,no,75,
+2026-11-13,11:04,11:04,trend,P,SPY261113P00751000,0,full,2.81,4.3,-20.6,12,-34.5,13,0,stop -20%,4.3,-20.6,"strong trend, 1 ITM, put pane arrow, both charts no",no,33.8,15,65.3,16.6,22.1,13.3,,,no,no,96,
+2026-11-13,11:12,11:12,smart,P,SPY261113P00752000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+wick),,22.9,49.9,48.2,61.3,64.6,10.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-13,11:14,11:14,trend,P,SPY261113P00753000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,32.6,43.6,57.6,43.6,57.8,22.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-13,11:14,11:14,smart,P,SPY261113P00751000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,32.6,43.6,57.6,43.6,57.8,22.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-13,11:30,11:30,smart,P,SPY261113P00752000,0,full,2.42,14.1,-5.4,23.8,-13.7,6,0,x after the mark,14.1,-5.4,smart 3/4 (range+vwap+wick),,34.6,88.9,48.6,85.6,92.1,29.7,,,no,no,121,
+2026-11-13,11:33,11:33,fade,P,SPY261113P00752000,0,full,2.22,24,17.1,34.9,0,2,2,runner ratchet,24,17.1,"SPY side 100/10.4, contract 100/13, day 1.199%",,10.4,87.5,13.8,83.3,91.9,9.9,,,no,yes,125,
+2026-11-13,11:34,11:34,smart,P,SPY261113P00752000,0,full,2.29,24,15.3,31.1,-2.2,2,2,runner ratchet,24,15.3,smart 3/4 (range+vwap+not expanding),,15,84.5,22.6,76.9,89.3,12.2,,,no,yes,125,
+2026-11-13,11:37,11:37,smart,P,SPY261113P00752000,0,full,2.71,14.2,6.7,22.6,-5.1,5,1,runner ratchet,14.2,6.7,smart 3/4 (range+vwap+wick),,42.1,68.6,52.1,56.5,77.2,42.9,,,same side,yes,128,
+2026-11-13,11:47,11:47,lined,C,SPY261113C00748000,0,full,2.53,14.2,-2.7,20.7,-4.6,3,0,x after the mark,14.2,-2.7,stalled,,63.2,7.9,78.2,5.5,13.9,58.2,,,no,no,141,
+2026-11-13,11:59,11:59,smart,P,SPY261113P00752000,0,full,2.69,-16.3,-20.7,0,-40.8,10,0,stop -20%,-16.3,-20.7,smart 4/4 (range+vwap+not expanding+wick),,17.9,35.2,39.8,29.9,51.3,11.2,,,opposite side,no,155,
+2026-11-13,12:09,12:09,lined,P,SPY261113P00754000,0,full,,,,,,,,,,,stalled,,7.1,100,12.5,100,100,7.2,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-13,12:09,12:09,smart,P,SPY261113P00754000,0,full,,,,,,,,,,,smart 3/4 (range+not expanding+wick),,7.1,100,12.5,100,100,7.2,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-13,12:10,12:10,fade,P,SPY261113P00754000,0,full,,,,,,,,,,,"SPY side 100/8, contract 100/11.1, day 1.056%",,8,100,13.9,100,100,10,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-13,12:11,12:11,swing,P,SPY261113P00753000,0,full,,,,,,,,,,,"ran $1.27, SPY 95/17.6",,17.6,95,26.9,92.8,98.2,19.8,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-13,12:30,12:30,smart,P,SPY261113P00753000,0,full,2.27,-7.4,4.7,13.2,-18.9,10,2,runner ratchet,-7.4,4.7,smart 3/4 (range+vwap+not expanding),,37.6,37.8,53.8,23.8,57.8,26.9,,,same side,no,181,
+2026-11-13,12:47,12:47,trend,C,SPY261113C00751000,0,full,1.96,4,6.1,11.9,-8.5,3,3,runner ratchet,4,6.1,"strong trend, 1 ITM, call pane arrow, both charts no",no,30.1,38.8,43.4,25.4,62,26.1,,,no,no,198,
+2026-11-13,1:29,1:29,smart,P,SPY261113P00754000,0,full,2.14,-15.7,5.7,11.4,-15.4,10,2,runner ratchet,-15.7,5.7,smart 3/4 (range+not expanding+wick),,8.9,91.8,10.6,84.4,96.2,9.1,,,no,no,241,
+2026-11-13,1:29,1:29,swing,P,SPY261113P00754000,0,full,2.14,4,5.7,10.8,0,2,2,runner ratchet,4,5.7,"ran $1.07, SPY 91.8/8.9",,8.9,91.8,10.6,84.4,96.2,9.1,,,no,no,241,
+2026-11-13,1:33,1:33,smart,P,SPY261113P00754000,0,full,2.23,-20.2,-11.2,6.6,-24.7,10,1,x after the mark,-20.2,-11.2,smart 3/4 (range+not expanding+wick),,21.1,79.3,27.5,64.4,84.9,29.4,,,no,no,244,
+2026-11-13,1:43,1:43,smart,P,SPY261113P00754000,0,full,1.73,-13.7,2.9,15.7,-19.6,10,0,x after the mark,-13.7,2.9,smart 3/4 (range+not expanding+wick),,7,93.2,9.1,85.6,99.2,10.2,,,no,no,254,
+2026-11-13,2:53,2:53,smart,C,SPY261113C00751000,0,full,1.86,48.7,6.4,55.8,-2.8,4,2,runner ratchet,48.7,6.4,smart 3/4 (vwap+not expanding+wick),,81.1,15.7,88.9,11.7,38.9,60.4,,,no,no,324,
+2026-11-16,10:02,10:02,lined,C,SPY261116C00744000,0,full,3.13,-14.5,-6.5,4,-17.7,10,0,x after the mark,-14.5,-6.5,not stalled,,90.9,24.5,98.6,29.9,29.6,78.2,,,no,no,34,
+2026-11-16,10:23,10:23,trend,P,SPY261116P00746000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts no",no,29.7,24.2,62.7,37.4,34.4,15.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-16,10:33,10:33,smart,P,SPY261116P00746000,0,full,2.62,14.2,6.3,20.5,-3.2,7,1,runner ratchet,14.2,6.3,smart 4/4 (range+vwap+not expanding+wick),,13.2,49.2,33.7,68.7,60.5,12.6,,,no,no,64,
+2026-11-16,10:44,10:44,trend,P,SPY261116P00748000,0,half,3.66,10,-14.1,13.2,-40.4,90,1,cut -10% (no confirm),10,-14.1,"weak trend, 3 ITM half port, SPY pane arrow, both charts no",no,14.9,71.1,35.6,47,65.7,9,,,no,no,75,
+2026-11-16,10:45,10:45,trend,P,SPY261116P00749000,0,half,3.80,10.4,-14.7,14,-27.6,21,0,x after the mark,10.4,-14.7,"weak trend, 3 ITM half port, put pane arrow, both charts no",no,23.5,100,41.2,100,95.4,23.7,,,no,no,80,
+2026-11-16,10:54,10:54,lined,P,SPY261116P00749000,0,full,2.88,19.2,13.5,26.8,-4.4,5,5,runner ratchet,19.2,13.5,stalled,,10,97,17,92.3,97.3,10.2,,,no,yes,85,
+2026-11-16,10:54,10:54,fade,P,SPY261116P00749000,0,full,2.88,19.2,13.5,26.8,-4.4,5,5,runner ratchet,19.2,13.5,"SPY side 100/10, contract 100/11.6, day 0.353%",,10,97,17,92.3,97.3,10.2,,,no,yes,85,
+2026-11-16,10:57,10:57,fade,P,SPY261116P00749000,0,full,,,,,,,,,,,"SPY side 100/8.8, contract 100/8.1, day 0.312%",,8.8,100,13.4,96.7,100,8.9,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-16,11:29,11:29,lined,P,SPY261116P00748000,0,full,,,,,,,,,,,stalled,,17.3,55.4,26.6,47.5,74.2,10.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-16,12:43,12:43,smart,P,SPY261116P00745000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+wick),,28.9,54.2,53.4,58.3,62.7,23,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-16,12:46,12:46,trend,P,SPY261116P00744000,0,full,1.93,14.3,-13.8,30.1,-25.4,15,0,cut -10% (no confirm),14.3,-13.8,"strong trend, 1 ITM, white dot, both charts yes",yes,54.7,26.6,71.1,26.3,32.2,51.8,,,no,no,197,
+2026-11-16,12:46,12:46,smart,P,SPY261116P00744000,0,full,1.93,23.8,-13.8,30.1,-25.4,14,0,cut -10% (no confirm),23.8,-13.8,smart 4/4 (range+vwap+not expanding+wick),,54.7,26.6,71.1,26.3,32.2,51.8,,,no,no,197,
+2026-11-16,1:32,1:32,swing,C,SPY261116C00739000,0,full,2.12,58.8,-11.2,68,-27.3,18,0,cut -10% (no confirm),58.8,-11.2,"ran $1.75, SPY 99.3/55",,99.3,55,100,42,49.8,100,,,no,no,243,
+2026-11-16,1:53,1:53,lined,P,SPY261116P00743000,0,full,2.11,14,11.1,22.3,-9.9,4,4,runner ratchet,14,11.1,stalled,,14.8,90.7,34.1,80.8,97,5.1,,,no,no,266,
+2026-11-16,1:53,1:53,smart,P,SPY261116P00743000,0,full,2.11,14,11.1,22.3,-9.9,4,4,runner ratchet,14,11.1,smart 4/4 (range+vwap+not expanding+wick),,14.8,90.7,34.1,80.8,97,5.1,,,no,no,266,
+2026-11-16,1:53,1:53,swing,P,SPY261116P00743000,0,full,2.11,14,11.1,22.3,-9.9,4,4,runner ratchet,14,11.1,"ran $1.98, SPY 90.7/14.8",,14.8,90.7,34.1,80.8,97,5.1,,,no,no,266,
+2026-11-16,1:58,1:58,swing,P,SPY261116P00743000,0,full,2.00,18.9,14.1,28.7,0,1,1,runner ratchet,18.9,14.1,"ran $1.83, SPY 82.1/12.8",,12.8,82.1,37.1,70.7,92.7,4.2,,,no,no,269,
+2026-11-16,2:44,2:44,lined,C,SPY261116C00737000,0,full,2.08,33.9,-4.8,50.4,-10.1,6,0,x after the mark,33.9,-4.8,not stalled,,96.7,3.7,98.9,4.1,7.9,91.9,,,no,no,315,
+2026-11-16,2:44,2:44,swing,C,SPY261116C00737000,0,full,2.08,9,-4.8,40.8,-10.1,5,0,x after the mark,9,-4.8,"ran $1.61, SPY 96.7/3.7",,96.7,3.7,98.9,4.1,7.9,91.9,,,no,no,315,
+2026-11-16,2:57,2:57,lined,P,SPY261116P00742000,0,full,2.01,13.9,10.9,22.1,-5.7,2,2,runner ratchet,13.9,10.9,stalled,,14.9,100,26.2,92.9,100,6.8,,,no,no,329,
+2026-11-16,2:57,2:57,smart,P,SPY261116P00742000,0,full,2.01,13.9,10.9,22.1,-5.7,2,2,runner ratchet,13.9,10.9,smart 4/4 (range+vwap+not expanding+wick),,14.9,100,26.2,92.9,100,6.8,,,no,no,329,
+2026-11-16,2:58,2:58,swing,P,SPY261116P00742000,0,full,1.97,18.9,12.3,25.1,-3.4,2,2,runner ratchet,18.9,12.3,"ran $1.94, SPY 88.7/21",,21,88.7,34.9,78.8,94.7,10.2,,,no,no,329,
+2026-11-17,10:28,10:28,trend,P,SPY261117P00738000,0,full,2.95,94.7,16,182.9,-0.1,15,2,runner ratchet,94.7,16,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,38.3,26.7,59.8,24.1,32.3,21.7,,,no,no,59,
+2026-11-17,11:06,11:06,lined,P,SPY261117P00734000,0,full,3.48,14.4,9.4,21.4,-9.4,13,1,runner ratchet,14.4,9.4,stalled,,6,91.7,14,91.8,98.8,1.7,,,no,yes,97,
+2026-11-17,11:06,11:06,smart,P,SPY261117P00734000,0,full,3.48,14.4,9.4,21.4,-9.4,13,1,runner ratchet,14.4,9.4,smart 3/4 (range+vwap+wick),,6,91.7,14,91.8,98.8,1.7,,,no,yes,97,
+2026-11-17,11:08,11:08,trend,P,SPY261117P00734000,0,full,3.43,4.4,6.3,11.4,-5.5,1,1,runner ratchet,4.4,6.3,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,8.9,89.6,17.4,86.9,97.3,2.6,,,same side,yes,99,
+2026-11-17,11:16,11:16,smart,P,SPY261117P00733000,0,full,3.27,14.3,5,25.5,-8.8,14,1,runner ratchet,14.3,5,smart 3/4 (range+vwap+not expanding),,16,68.2,30.7,59.8,80.6,4.3,,,no,no,107,
+2026-11-17,11:22,11:22,trend,P,SPY261117P00735000,0,half,4.75,14.6,8.4,23.8,-9.7,15,8,runner ratchet,14.6,8.4,"weak trend, 3 ITM half port, put pane arrow, both charts no",no,22.2,13.7,43.8,9.6,21.3,5.3,,,no,no,114,
+2026-11-17,11:26,11:26,trend,P,SPY261117P00734000,0,half,4.19,15.6,4,25.3,-13.2,15,2,no confirm in 3 min,15.6,4,"weak trend, 3 ITM half port, put pane arrow, both charts no",no,24.7,6.4,47.3,4.7,12.1,5.4,,,no,no,117,
+2026-11-17,11:30,11:30,trend,P,SPY261117P00732000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,26.6,8.9,51.2,6.3,18.1,5.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,11:35,11:35,trend,P,SPY261117P00731000,0,full,3.13,4.3,-11.3,20,-15.3,9,0,cut -10% (no confirm),4.3,-11.3,"strong trend, 1 ITM, put pane arrow, both charts no",no,34.8,14.9,60.5,10.7,26,7.6,,,no,no,126,
+2026-11-17,11:39,11:39,trend,P,SPY261117P00732000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,22.6,13,48.3,6.7,25.1,4.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,11:41,11:41,trend,P,SPY261117P00731000,0,full,2.97,4.3,5.6,10,-5.5,1,1,runner ratchet,4.3,5.6,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,27.4,3.3,53,3.1,14,6.6,,,no,no,132,
+2026-11-17,11:43,11:43,lined,C,SPY261117C00728000,0,full,3.39,-6,8.1,16.2,-19.2,10,0,x after the mark,-6,8.1,stalled,,25.4,4.3,52.6,2.9,16.5,6.9,,,no,no,135,
+2026-11-17,11:43,11:43,trend,P,SPY261117P00731000,0,full,3.01,4.3,11.6,24.5,-7.7,1,1,runner ratchet,4.3,11.6,"strong trend, 1 ITM, put pane arrow, both charts no",no,25.4,4.3,52.6,2.9,16.5,6.9,,,no,no,134,
+2026-11-17,11:53,11:54,lined,C,SPY261117C00727000,0,full,,,,,,,,,,,"stalled, arrow 1 min after the dot",,79.8,8.4,92.5,7.7,13.7,76.6,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,12:01,12:01,smart,P,SPY261117P00732000,0,full,3.03,-30.3,-20.6,0,-31.4,10,0,stop -20%,-30.3,-20.6,smart 3/4 (range+vwap+not expanding),,36.8,41.5,44.9,40.4,59.8,41.4,,,no,no,155,
+2026-11-17,12:21,12:21,swing,P,SPY261117P00735000,0,full,2.96,14.3,10.5,20.4,-4.5,3,3,runner ratchet,14.3,10.5,"ran $1.07, SPY 98.8/21.5",,21.5,98.8,24.6,94.7,99.3,22.5,,,no,no,175,
+2026-11-17,1:08,1:08,smart,P,SPY261117P00733000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+wick),,17.1,21,24.6,12.5,39,16.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,1:29,1:30,lined,P,SPY261117P00735000,0,full,,,,,,,,,,,"stalled, arrow 1 min after the dot",,8.6,100,10.2,100,100,7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,1:30,1:30,fade,P,SPY261117P00735000,0,full,,,,,,,,,,,"SPY side 100/9.7, contract 100/6.5, day 0.692%",,9.7,100,14.7,100,100,7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-17,1:31,1:31,fade,P,SPY261117P00735000,0,full,3.02,24.3,16.2,32.4,-0.7,3,3,runner ratchet,24.3,16.2,"SPY side 100/14, contract 100/11.8, day 0.72%",,14,91.2,23.8,88.3,94.6,12.4,,,no,no,243,
+2026-11-17,1:31,1:31,swing,P,SPY261117P00735000,0,full,3.02,24.3,16.2,32.4,-0.7,3,3,runner ratchet,24.3,16.2,"ran $1.79, SPY 91.2/14",,14,91.2,23.8,88.3,94.6,12.4,,,no,no,243,
+2026-11-17,1:42,1:42,lined,C,SPY261117C00730000,0,full,2.67,-3.3,-2.6,9.4,-12,10,0,x after the mark,-3.3,-2.6,stalled,,100,13.2,100,9.8,20.9,100,,,no,no,257,
+2026-11-17,1:44,1:44,swing,C,SPY261117C00730000,0,full,2.77,9.2,-3.8,18.9,-20,29,0,x after the mark,9.2,-3.8,"ran $1.82, SPY 95.3/12.6",,95.3,12.6,96.7,7.5,22,92.5,,,no,no,255,
+2026-11-17,1:49,1:49,swing,C,SPY261117C00730000,0,full,2.70,14.2,-11.3,22.3,-17.7,23,2,x after the mark,14.2,-11.3,"ran $1.52, SPY 96.9/23.6",,96.9,23.6,97.8,20.7,32,94.4,,,no,no,261,
+2026-11-17,2:16,2:16,smart,P,SPY261117P00733000,0,full,2.40,24.1,4.5,34,-3.1,8,1,runner ratchet,24.1,4.5,smart 3/4 (range+vwap+wick),,23.9,54.8,30.5,56.6,65,21.2,,,no,no,287,
+2026-11-17,2:59,2:59,lined,C,SPY261117C00727000,0,full,2.72,24.2,-8,34.7,-12.7,6,0,x after the mark,24.2,-8,stalled,,83.4,6.6,84.7,8.9,9.3,81.5,,,no,no,330,
+2026-11-17,2:59,2:59,swing,C,SPY261117C00727000,0,full,2.72,4.2,-8,14.4,-12.7,4,0,x after the mark,4.2,-8,"ran $1.68, SPY 83.4/6.6",,83.4,6.6,84.7,8.9,9.3,81.5,,,no,no,330,
+2026-11-18,11:00,11:00,lined,P,SPY261118P00732000,0,full,3.04,29.2,9.3,37.8,-4,7,2,runner ratchet,29.2,9.3,stalled,,8.4,78.7,14.9,100,90.1,7.1,,,no,no,95,
+2026-11-18,11:00,11:00,smart,P,SPY261118P00732000,0,full,3.04,29.2,9.3,37.8,-4,7,2,runner ratchet,29.2,9.3,smart 3/4 (range+vwap+wick),,8.4,78.7,14.9,100,90.1,7.1,,,no,no,95,
+2026-11-18,11:35,11:35,smart,P,SPY261118P00731000,0,full,3.17,24.3,5.7,32,0,3,1,runner ratchet,24.3,5.7,smart 3/4 (range+vwap+wick),,24.2,81.5,39.4,71.2,83.2,15.2,,,no,yes,126,
+2026-11-18,11:39,11:39,trend,P,SPY261118P00730000,0,full,3.21,5.7,4.7,20.2,-16.2,15,2,runner ratchet,5.7,4.7,"strong trend, 1 ITM, white dot, both charts yes",yes,47.6,50,67.6,34.7,63.2,34.5,,,same side,yes,131,
+2026-11-18,11:39,11:39,smart,P,SPY261118P00730000,0,full,3.21,14.3,4.7,20.2,-16.2,14,2,runner ratchet,14.3,4.7,smart 4/4 (range+vwap+not expanding+wick),,47.6,50,67.6,34.7,63.2,34.5,,,same side,yes,131,
+2026-11-18,12:03,12:03,lined,P,SPY261118P00731000,0,full,2.56,1.3,-6.1,15.8,-16.5,10,0,x after the mark,1.3,-6.1,stalled,,11.8,81,21.2,90.5,88.8,7.1,,,no,no,154,
+2026-11-18,12:03,12:03,smart,P,SPY261118P00731000,0,full,2.56,1.3,-6.1,15.8,-16.5,10,0,x after the mark,1.3,-6.1,smart 4/4 (range+vwap+not expanding+wick),,11.8,81,21.2,90.5,88.8,7.1,,,no,no,154,
+2026-11-18,12:08,12:08,fade,P,SPY261118P00732000,0,full,2.92,14.3,12.4,24.4,0,2,2,runner ratchet,14.3,12.4,"SPY side 100/12.6, contract 100/11.1, day 0.434%",,12.6,86.3,21.2,77.2,90.8,11.2,,,no,yes,161,
+2026-11-18,12:08,12:08,swing,P,SPY261118P00732000,0,full,2.92,14.3,12.4,24.4,0,2,2,runner ratchet,14.3,12.4,"ran $2.68, SPY 86.3/12.6",,12.6,86.3,21.2,77.2,90.8,11.2,,,no,yes,161,
+2026-11-18,12:27,12:27,swing,P,SPY261118P00734000,0,full,2.55,34.1,-17.9,41.4,-23.1,12,2,x after the mark,34.1,-17.9,"ran $2.87, SPY 92.8/16.4",,16.4,92.8,20.4,88.6,95.1,13.9,,,no,no,178,
+2026-11-18,12:30,12:30,swing,P,SPY261118P00735000,0,full,2.85,19.2,-6.3,27.4,-11.3,5,0,x after the mark,19.2,-6.3,"ran $3.31, SPY 99.9/22.2",,22.2,99.9,28.8,100,100,30.3,,,no,no,181,
+2026-11-18,12:34,12:34,swing,P,SPY261118P00735000,0,full,,,,,,,,,,,"ran $2.34, SPY 94/21.8",,21.8,94,27,89.9,96.7,26.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-18,12:42,12:42,smart,C,SPY261118C00730000,0,full,2.75,-0.5,4.7,18.7,-14.4,10,5,runner ratchet,-0.5,4.7,smart 3/4 (range+vwap+wick),,94.1,10.1,89.5,4.8,22,86.8,,,no,no,194,
+2026-11-18,12:42,12:42,swing,C,SPY261118C00730000,0,full,2.75,4.3,4.7,18.7,-14.4,10,5,runner ratchet,4.3,4.7,"ran $1.09, SPY 94.1/10.1",,94.1,10.1,89.5,4.8,22,86.8,,,no,no,194,
+2026-11-18,12:46,12:46,swing,C,SPY261118C00730000,0,full,2.78,9.2,-12,17.2,-15.6,8,2,x after the mark,9.2,-12,"ran $2.00, SPY 93.3/12.6",,93.3,12.6,95.5,7.3,27.6,85.7,,,no,no,197,
+2026-11-18,12:52,12:52,trend,C,SPY261118C00728000,0,half,4.08,6.4,-20.4,11.7,-30.3,28,11,stop -20%,6.4,-20.4,"weak trend, 3 ITM half port, call pane arrow, both charts yes",yes,78.5,14.9,85.4,9,32.4,65.2,,,no,no,206,
+2026-11-18,12:54,12:54,trend,C,SPY261118C00729000,0,half,3.62,16.3,-20.5,24.6,-39.3,35,6,stop -20%,16.3,-20.5,"weak trend, 3 ITM half port, SPY pane arrow, both charts no",no,78.6,21.3,87.5,11.8,39.7,69.6,,,no,no,205,
+2026-11-18,12:57,12:57,trend,C,SPY261118C00728000,0,half,3.82,10.2,-2.8,16,-25.7,23,2,no confirm in 3 min,10.2,-2.8,"weak trend, 3 ITM half port, SPY pane arrow, both charts yes",yes,35,13.8,55.2,8.1,30.8,26.6,,,no,no,210,
+2026-11-18,1:29,1:29,swing,P,SPY261118P00734000,0,full,2.51,3.6,-20.7,5.3,-36.2,30,0,stop -20%,3.6,-20.7,"ran $1.95, SPY 92.9/6.4",,6.4,92.9,11.6,84.1,95.2,7.4,,,no,no,240,
+2026-11-18,1:33,1:33,swing,P,SPY261118P00734000,0,full,1.99,4,4.4,14.8,-19.4,13,12,runner ratchet,4,4.4,"ran $2.21, SPY 90.8/10.2",,10.2,90.8,18.4,88.8,94.6,12.3,,,no,no,249,
+2026-11-18,2:08,2:08,swing,C,SPY261118C00729000,0,full,,,,,,,,,,,"ran $2.32, SPY 86.3/5.9",,86.3,5.9,94.3,4.7,14.7,83.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-18,2:09,2:09,lined,C,SPY261118C00729000,0,full,,,,,,,,,,,stalled,,83.5,8.5,94.8,5.4,23.6,74.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-18,2:59,2:59,smart,P,SPY261118P00732000,0,full,2.11,-16.5,-12.3,1.9,-27.9,10,1,x after the mark,-16.5,-12.3,smart 4/4 (range+vwap+not expanding+wick),,9.3,70.9,31.1,69.4,69.7,7,,,no,no,331,
+2026-11-19,11:06,11:06,trend,P,SPY261119P00733000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,12.6,78.8,43.2,76.8,90.3,31.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,11:06,11:06,lined,P,SPY261119P00731000,0,full,,,,,,,,,,,stalled,,12.6,78.8,43.2,76.8,90.3,31.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,11:06,11:06,smart,P,SPY261119P00731000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,12.6,78.8,43.2,76.8,90.3,31.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,11:07,11:07,trend,P,SPY261119P00732000,0,half,5.02,20.9,-2.5,33.2,-44.5,40,15,no +8% by minute 15,20.9,-2.5,"weak trend, 3 ITM half port, white dot, both charts yes",yes,23.5,65.3,68.6,56.6,78.6,59.7,,,no,no,100,
+2026-11-19,11:12,11:12,trend,P,SPY261119P00733000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, SPY pane arrow, both charts no",no,14.6,64.5,53,65.7,78.5,34.4,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-19,11:31,11:31,trend,P,SPY261119P00732000,0,half,4.58,11.9,-3.7,15.1,-39.3,17,2,no confirm in 3 min,11.9,-3.7,"weak trend, 3 ITM half port, SPY pane arrow, both charts yes",yes,26.9,23.2,56.9,23.1,36.4,57.4,,,no,no,122,
+2026-11-19,12:28,12:28,lined,P,SPY261119P00727000,0,full,3.84,19.4,-11.1,30.3,-16.1,8,0,cut -10% (no confirm),19.4,-11.1,stalled,,10.7,81.4,29.1,80.3,91.7,2,,,no,no,180,
+2026-11-19,12:28,12:28,smart,P,SPY261119P00727000,0,full,3.84,19.4,-11.1,30.3,-16.1,8,0,cut -10% (no confirm),19.4,-11.1,smart 4/4 (range+vwap+not expanding+wick),,10.7,81.4,29.1,80.3,91.7,2,,,no,no,180,
+2026-11-19,12:30,12:30,fade,P,SPY261119P00727000,0,full,3.53,29.4,5.4,41.5,-8.8,7,2,runner ratchet,29.4,5.4,"SPY side 100/11.1, contract 100/2.7, day 1.615%",,11.1,89.9,33.3,92.5,98.5,2.3,,,no,no,181,
+2026-11-19,12:33,12:33,fade,P,SPY261119P00727000,0,full,3.43,34.3,8.1,45.8,-3.5,4,2,runner ratchet,34.3,8.1,"SPY side 100/7.3, contract 100/2.1, day 1.614%",,7.3,88.7,22.5,86.6,97.5,2.1,,,no,yes,184,
+2026-11-19,12:37,12:37,smart,P,SPY261119P00726000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,13.5,84.8,35.3,79.9,96.1,3.8,,,same side,yes,,0DTE: no fill at the 5% bid
+2026-11-19,12:47,12:47,trend,P,SPY261119P00727000,0,half,4.94,4.6,8.2,14.9,-8.3,3,3,runner ratchet,4.6,8.2,"weak trend, 3 ITM half port, put pane arrow, both charts no",no,29.8,11.9,61,6.1,24.5,8.8,,,no,no,198,
+2026-11-19,12:50,12:50,trend,P,SPY261119P00727000,0,half,4.88,29.1,-12.5,50.5,-17.5,15,1,cut -10% (no confirm),29.1,-12.5,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,26.9,13.4,59.2,5.7,30.8,7.1,,,no,no,202,
+2026-11-19,12:56,12:56,trend,P,SPY261119P00724000,0,full,,,,,,,,,,,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,25,17.7,56.8,9.7,44.7,5.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,12:59,12:59,trend,P,SPY261119P00723000,0,full,3.16,38.3,-17.1,69.2,-19.1,15,0,cut -10% (no confirm),38.3,-17.1,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,24.9,3.2,53.1,2,5.6,6.8,,,no,no,211,
+2026-11-19,1:12,1:12,swing,C,SPY261119C00719000,0,full,3.25,4.4,-14.4,19.7,-23.1,12,0,cut -10% (no confirm),4.4,-14.4,"ran $1.83, SPY 98.9/7.8",,98.9,7.8,98.8,5.6,19.8,98.9,,,no,no,223,
+2026-11-19,1:16,1:16,swing,C,SPY261119C00718000,0,full,3.16,19.3,14.5,28.9,-3.9,4,4,runner ratchet,19.3,14.5,"ran $2.86, SPY 92.7/9.5",,92.7,9.5,94,7.7,15.4,85.1,,,no,no,227,
+2026-11-19,1:31,1:31,lined,P,SPY261119P00723000,0,full,3.09,3.3,-19.7,8.2,-30.7,10,0,x after the mark,3.3,-19.7,stalled,,9.7,99.3,16.4,98,100,6.4,,,no,no,242,
+2026-11-19,1:31,1:31,smart,P,SPY261119P00723000,0,full,3.09,3.3,-19.7,8.2,-30.7,10,0,x after the mark,3.3,-19.7,smart 4/4 (range+vwap+not expanding+wick),,9.7,99.3,16.4,98,100,6.4,,,no,no,242,
+2026-11-19,1:31,1:31,swing,P,SPY261119P00723000,0,full,3.09,44.2,-19.7,51.6,-30.7,18,0,x after the mark,44.2,-19.7,"ran $2.10, SPY 99.3/9.7",,9.7,99.3,16.4,98,100,6.4,,,no,no,242,
+2026-11-19,1:32,1:32,swing,P,SPY261119P00723000,0,full,2.95,4.3,-20.6,13.7,-27.6,10,0,stop -20%,4.3,-20.6,"ran $2.72, SPY 95.8/11.3",,11.3,95.8,20.7,92.2,97.2,7.9,,,no,no,243,
+2026-11-19,1:35,1:35,swing,P,SPY261119P00724000,0,full,2.81,19.2,12.7,25.2,-5.4,4,4,runner ratchet,19.2,12.7,"ran $2.95, SPY 94.8/18.8",,18.8,94.8,27.8,89.1,96.4,15.5,,,no,no,246,
+2026-11-19,1:37,1:37,fade,P,SPY261119P00724000,0,full,2.79,19.2,13.1,26,-4.7,2,2,runner ratchet,19.2,13.1,"SPY side 100/9.9, contract 100/9.2, day 2%",,9.9,99.3,18.6,100,100,8.8,,,no,no,248,
+2026-11-19,1:37,1:37,swing,P,SPY261119P00724000,0,full,2.79,19.2,13.1,26,-4.7,2,2,runner ratchet,19.2,13.1,"ran $2.77, SPY 99.3/9.9",,9.9,99.3,18.6,100,100,8.8,,,no,no,248,
+2026-11-19,1:38,1:38,lined,P,SPY261119P00724000,0,full,,,,,,,,,,,stalled,,7.7,97.8,15.3,95.3,99,6.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,1:38,1:38,smart,P,SPY261119P00724000,0,full,,,,,,,,,,,smart 4/4 (range+vwap+not expanding+wick),,7.7,97.8,15.3,95.3,99,6.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-19,1:40,1:40,smart,P,SPY261119P00723000,0,full,2.75,14.2,11,22.4,-8.5,2,2,runner ratchet,14.2,11,smart 3/4 (range+vwap+not expanding),,24.6,69.5,36.9,59.1,81.5,21.9,,,no,no,251,
+2026-11-19,1:40,1:40,swing,P,SPY261119P00723000,0,full,2.75,14.2,11,22.4,-8.5,2,2,runner ratchet,14.2,11,"ran $1.11, SPY 69.5/24.6",,24.6,69.5,36.9,59.1,81.5,21.9,,,no,no,251,
+2026-11-19,2:30,2:30,lined,P,SPY261119P00722000,0,full,2.52,24.1,16,32.3,-15.4,7,7,runner ratchet,24.1,16,stalled,,30.9,85.9,47,75.6,91.5,23.7,,,no,no,302,
+2026-11-19,2:30,2:30,smart,P,SPY261119P00722000,0,full,2.52,24.1,16,32.3,-15.4,7,7,runner ratchet,24.1,16,smart 3/4 (range+vwap+wick),,30.9,85.9,47,75.6,91.5,23.7,,,no,no,302,
+2026-11-19,2:30,2:30,swing,P,SPY261119P00722000,0,full,2.52,24.1,16,32.3,-15.4,7,7,runner ratchet,24.1,16,"ran $1.84, SPY 85.9/30.9",,30.9,85.9,47,75.6,91.5,23.7,,,no,no,302,
+2026-11-19,2:54,2:54,swing,C,SPY261119C00717000,0,full,2.59,4.2,6.2,11.5,-15.2,2,2,runner ratchet,4.2,6.2,"ran $1.07, SPY 93/19.4",,93,19.4,96.2,16,29.9,90.6,,,no,no,325,
+2026-11-20,9:45,9:45,trend,C,SPY261120C00710000,0,half,5.63,4.6,11.7,22.3,-3.8,2,2,runner ratchet,4.6,11.7,"weak trend, 3 ITM half port, call pane arrow, both charts no",no,90.8,82.5,100,59.6,100,65.2,,,no,no,16,
+2026-11-20,10:35,10:35,lined,C,SPY261120C00708000,0,full,4.07,-11.4,1.6,18,-27.9,10,0,x after the mark,-11.4,1.6,not stalled,,64.6,23.5,83.7,21.1,31.6,42.9,,,same side,no,67,
+2026-11-20,10:43,10:43,trend,P,SPY261120P00710000,0,full,4.04,37.5,4.8,69.9,-9.1,15,1,runner ratchet,37.5,4.8,"strong trend, 1 ITM, put pane arrow, both charts yes",yes,35.3,8.8,60.9,8.1,14,12.9,,,no,no,79,
+2026-11-20,11:14,11:14,smart,P,SPY261120P00710000,0,full,4.08,24.4,12.5,35.9,0,4,1,runner ratchet,24.4,12.5,smart 4/4 (range+vwap+not expanding+wick),,6.7,100,15.1,98.6,100,2.7,,,no,yes,105,
+2026-11-20,11:17,11:17,trend,P,SPY261120P00710000,0,half,5.03,4.6,5.5,10.2,-0.5,2,1,runner ratchet,4.6,5.5,"weak trend, 3 ITM half port, white dot, both charts yes",yes,26.8,66.6,49.5,57.9,73.1,13.7,,,same side,yes,108,
+2026-11-20,11:17,11:17,smart,P,SPY261120P00708000,0,full,3.82,14.4,6.7,26.2,-3.2,9,1,runner ratchet,14.4,6.7,smart 4/4 (range+vwap+not expanding+wick),,26.8,66.6,49.5,57.9,73.1,13.7,,,same side,yes,108,
+2026-11-20,11:40,11:40,lined,C,SPY261120C00702000,0,full,3.80,-12.3,-0.7,2.1,-18.2,10,0,x after the mark,-12.3,-0.7,not stalled,,68.5,12.6,88,12.4,14.2,56.3,,,no,no,132,
+2026-11-20,12:05,12:05,lined,C,SPY261120C00700000,0,full,,,,,,,,,,,not stalled,,74.3,29.1,85.6,31.8,31.1,78.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-20,12:35,12:35,trend,P,SPY261120P00702000,0,full,3.62,4.4,7.8,26.5,-9.1,4,1,runner ratchet,4.4,7.8,"strong trend, 1 ITM, SPY pane arrow, both charts yes",yes,37.3,47,58.1,38.1,58.3,29.4,,,no,no,186,
+2026-11-20,1:21,1:21,smart,P,SPY261120P00703000,0,full,3.48,19.4,7.6,28.5,-6,5,3,runner ratchet,19.4,7.6,smart 4/4 (range+vwap+not expanding+wick),,12.4,100,13.3,97.3,100,8.8,,,no,no,233,
+2026-11-20,1:25,1:25,swing,P,SPY261120P00703000,0,full,,,,,,,,,,,"ran $1.22, SPY 93.7/13.1",,13.1,93.7,22.5,81.1,100,10.7,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-20,1:37,1:37,smart,P,SPY261120P00703000,0,full,2.99,44.2,12,52.7,-2.4,7,4,runner ratchet,44.2,12,smart 4/4 (range+vwap+not expanding+wick),,13.6,93.7,19.1,90.8,99.3,10.4,,,no,no,248,
+2026-11-20,1:49,1:49,swing,C,SPY261120C00699000,0,full,,,,,,,,,,,"ran $1.34, SPY 89/37.4",,89,37.4,94.4,23.4,64.3,72.8,,,no,no,,0DTE: no bars
+2026-11-20,1:58,1:58,swing,P,SPY261120P00704000,0,full,,,,,,,,,,,"ran $2.04, SPY 74.1/59.8",,59.8,74.1,57.4,66.3,82.6,53.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-20,2:16,2:16,swing,C,SPY261120C00697000,0,full,,,,,,,,,,,"ran $2.40, SPY 97.1/24",,97.1,24,,,,,,,no,no,,0DTE: no bars
+2026-11-23,10:01,10:01,fade,P,SPY261123P00723000,0,full,4.39,14.5,-0.2,23.7,-10.2,4,0,x after the mark,14.5,-0.2,"SPY side 100/7.8, contract 100/9, day 0.353%",,7.8,95.8,9.2,89.2,98.1,9,,,no,no,35,
+2026-11-23,10:02,10:02,lined,P,SPY261123P00723000,0,full,4.37,14.5,0,24.2,-9.8,4,0,x after the mark,14.5,0,stalled,,7.3,79.1,14.4,69.1,92,4.7,,,no,no,35,
+2026-11-23,10:03,10:03,fade,P,SPY261123P00723000,0,full,4.25,14.5,1.3,20.3,-7.3,1,0,x after the mark,14.5,1.3,"SPY side 100/14.9, contract 100/14.1, day 0.347%",,14.9,68.3,25.3,60.1,88.4,15.5,,,no,no,35,
+2026-11-23,10:23,10:23,lined,P,SPY261123P00727000,0,full,3.69,-8,-10.7,16.6,-21.9,10,0,x after the mark,-8,-10.7,not stalled,,8.5,74.2,20.3,86.8,98.9,12.3,,,no,no,54,
+2026-11-23,10:48,10:48,lined,C,SPY261123C00722000,0,full,4.36,-0.7,6.6,17.7,-18.6,30,5,runner ratchet,-0.7,6.6,stalled,,88.4,13.1,92.9,9.5,23,82.1,,,no,no,84,
+2026-11-23,10:48,10:48,smart,C,SPY261123C00722000,0,full,4.36,-0.7,6.6,17.7,-18.6,30,5,runner ratchet,-0.7,6.6,smart 4/4 (range+vwap+not expanding+wick),,88.4,13.1,92.9,9.5,23,82.1,,,no,no,84,
+2026-11-23,10:58,10:58,smart,C,SPY261123C00722000,0,full,4.25,14.5,6.1,20.8,-16.4,10,4,runner ratchet,14.5,6.1,smart 3/4 (range+vwap+wick),,80,14.4,92.6,11.2,29.7,68.4,,,same side,yes,92,
+2026-11-23,11:05,11:05,smart,C,SPY261123C00722000,0,full,4.31,-33.1,10,18.9,-32.7,30,6,runner ratchet,-33.1,10,smart 4/4 (range+vwap+not expanding+wick),,49.4,17.9,71.6,15.4,28.7,36.3,,,no,no,96,
+2026-11-23,11:34,11:34,smart,C,SPY261123C00722000,0,full,3.70,-46.4,-11.7,0,-50.1,10,0,x after the mark,-46.4,-11.7,smart 3/4 (range+vwap+not expanding),,24.6,26.7,48,25.2,55.6,13.4,,,no,no,125,
+2026-11-23,11:59,11:59,lined,P,SPY261123P00725000,0,full,3.20,24.3,9.7,31.2,0,2,0,x after the mark,24.3,9.7,stalled,,4.6,100,6.1,100,100,3.7,,,no,yes,150,
+2026-11-23,12:01,12:01,swing,P,SPY261123P00725000,0,full,,,,,,,,,,,"ran $3.41, SPY 96.8/10",,10,96.8,16.9,95,97.5,7.4,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-23,12:50,12:50,swing,C,SPY261123C00720000,0,full,2.81,24.2,15.6,35.2,0,3,3,runner ratchet,24.2,15.6,"ran $2.61, SPY 90.6/34.6",,90.6,34.6,95.6,43.1,47.4,88.2,,,no,no,201,
+2026-11-23,1:03,1:03,swing,P,SPY261123P00724000,0,full,2.55,9.2,7.9,15.1,-8.8,1,1,runner ratchet,9.2,7.9,"ran $3.19, SPY 90.9/9.5",,9.5,90.9,17.2,86.7,93.8,7.1,,,no,no,214,
+2026-11-23,1:20,1:20,lined,P,SPY261123P00726000,0,full,2.68,14.2,-8.2,20.9,-10.4,8,0,x after the mark,14.2,-8.2,stalled,,11.1,61.6,17.4,55,85.6,11.6,,,no,no,232,
+2026-11-23,1:25,1:26,lined,P,SPY261123P00726000,0,full,,,,,,,,,,,"stalled, arrow 1 min after the dot",,5.3,69.5,10.1,74.7,92.7,4.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-23,1:42,1:42,swing,C,SPY261123C00721000,0,full,2.54,34.1,-12,47.8,-36.1,21,0,cut -10% (no confirm),34.1,-12,"ran $1.52, SPY 95.9/16.4",,95.9,16.4,100,12.1,34.5,87.3,,,no,no,253,
+2026-11-23,1:46,1:46,swing,C,SPY261123C00720000,0,full,2.74,9.2,7,18.1,0,2,0,x after the mark,9.2,7,"ran $2.20, SPY 96/5.6",,96,5.6,99.4,5,22.9,83.3,,,no,no,257,
+2026-11-23,1:49,1:49,lined,C,SPY261123C00721000,0,full,2.18,19,-11.7,31.1,-25.6,11,1,x after the mark,19,-11.7,stalled,,66,15.3,79.8,12.3,39.4,61.3,,,no,no,260,
+2026-11-23,2:06,2:06,lined,P,SPY261123P00725000,0,full,,,,,,,,,,,stalled,,10.5,100,20.1,100,100,7.6,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-23,2:07,2:07,swing,P,SPY261123P00725000,0,full,2.36,4.1,5.5,10.3,-17.7,10,10,runner ratchet,4.1,5.5,"ran $2.14, SPY 88.5/25.6",,25.6,88.5,41.9,80.7,93.2,20,,,no,no,283,
+2026-11-23,2:08,2:08,lined,P,SPY261123P00725000,0,full,2.45,34,-5.7,46.1,-20.8,25,2,no confirm in 3 min,34,-5.7,stalled,,35.7,73.4,54.1,63,80.2,31,,,no,no,282,
+2026-11-23,2:47,2:47,swing,C,SPY261123C00720000,0,full,2.19,9,-6.2,18,-15.7,6,0,x after the mark,9,-6.2,"ran $1.79, SPY 83.7/33",,83.7,33,92.1,23.8,52.1,76.6,,,no,no,318,
+2026-11-23,2:50,2:50,swing,C,SPY261123C00719000,0,full,,,,,,,,,,,"ran $2.67, SPY 98.4/15.4",,98.4,15.4,100,15,23.8,98.9,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-24,10:12,10:12,trend,C,SPY261124C00717000,0,full,3.98,4.5,10,20.6,-9.3,2,1,runner ratchet,4.5,10,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,67.1,20.6,76.2,17.7,35.6,62,,,no,no,43,
+2026-11-24,10:24,10:25,lined,C,SPY261124C00715000,0,full,3.60,19.4,-8,27.2,-26.4,8,0,x after the mark,19.4,-8,"stalled, arrow 1 min after the dot",,100,5.2,100,2.4,9.4,98.3,,,no,no,55,
+2026-11-24,11:08,11:08,lined,C,SPY261124C00712000,0,full,3.38,19.4,5.3,29.3,-1.6,4,1,runner ratchet,19.4,5.3,stalled,,57.3,18.9,79.7,18,28.8,46.2,,,no,no,104,
+2026-11-24,11:23,11:23,smart,P,SPY261124P00717000,0,full,3.53,19.4,-14.7,25.4,-14.2,6,0,x after the mark,19.4,-14.7,smart 4/4 (range+vwap+not expanding+wick),,19.7,68.1,30.4,66,83.3,14.2,,,no,yes,114,
+2026-11-24,11:27,11:27,smart,P,SPY261124P00716000,0,full,3.04,24.3,9.9,31.6,-8.8,3,2,runner ratchet,24.3,9.9,smart 4/4 (range+vwap+not expanding+wick),,37.1,82.4,48.6,81.6,91.8,31.2,,,same side,yes,123,
+2026-11-24,11:42,11:42,lined,C,SPY261124C00712000,0,full,,,,,,,,,,,stalled,,81.5,20.3,94.1,22.5,29.9,72.1,,,no,yes,,0DTE: no fill at the 5% bid
+2026-11-24,11:51,11:51,smart,P,SPY261124P00717000,0,full,3.11,14.3,11.7,22.9,-4.1,2,2,runner ratchet,14.3,11.7,smart 3/4 (range+vwap+not expanding),,26.7,87.6,36.8,86.6,94.8,30.3,,,no,no,144,
+2026-11-24,12:16,12:16,swing,P,SPY261124P00719000,0,full,2.79,4.3,6.2,11.4,-12.9,3,3,runner ratchet,4.3,6.2,"ran $2.69, SPY 88.3/32.8",,32.8,88.3,44,76.3,95.4,31.8,,,same side,yes,169,
+2026-11-24,12:49,12:49,smart,C,SPY261124C00718000,0,full,2.43,14.1,-16.5,24.6,-21.5,11,0,cut -10% (no confirm),14.1,-16.5,smart 3/4 (range+vwap+not expanding),,60.9,13,62.5,4.8,34.3,71.6,,,no,no,200,
+2026-11-24,12:54,12:54,smart,C,SPY261124C00717000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,85.7,10.6,85.5,4.5,23.4,79.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-24,12:56,12:56,trend,C,SPY261124C00718000,0,full,,,,,,,,,,,"strong trend, 1 ITM, white dot, both charts yes",yes,54.8,24.4,65.1,11,47.8,44.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-24,12:56,12:56,smart,C,SPY261124C00718000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,54.8,24.4,65.1,11,47.8,44.1,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-24,1:10,1:10,smart,C,SPY261124C00717000,0,full,2.44,-6.6,5.3,15.1,-16.4,10,3,runner ratchet,-6.6,5.3,smart 4/4 (range+vwap+not expanding+wick),,64.8,10,77.4,2.9,34.7,62.8,,,no,no,221,
+2026-11-24,1:22,1:22,smart,C,SPY261124C00717000,0,full,,,,,,,,,,,smart 3/4 (range+vwap+not expanding),,70.1,15.8,91.4,19.2,27.2,51.4,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-24,1:46,1:46,smart,C,SPY261124C00717000,0,full,2.36,-37.9,-12.9,0,-38,10,0,x after the mark,-37.9,-12.9,smart 4/4 (range+vwap+not expanding+wick),,58.5,34.2,72.9,32.2,46.2,61,,,no,no,258,
+2026-11-24,1:56,1:56,swing,C,SPY261124C00716000,0,full,2.06,4,6.7,14.5,-2.9,1,1,runner ratchet,4,6.7,"ran $1.77, SPY 87.8/24.6",,87.8,24.6,91.2,22,31.7,85.9,,,no,no,269,
+2026-11-24,2:17,2:17,swing,P,SPY261124P00720000,0,full,2.00,13.9,9.8,22.2,-10.2,4,3,runner ratchet,13.9,9.8,"ran $1.19, SPY 87.1/18.9",,18.9,87.1,27.8,81.5,93.9,15.3,,,no,no,288,
+2026-11-24,2:34,2:34,smart,C,SPY261124C00716000,0,full,2.22,-4.6,-6.9,3.1,-19.5,10,0,x after the mark,-4.6,-6.9,smart 4/4 (range+vwap+not expanding+wick),,56.8,10.3,81.2,10.1,19.2,63.6,,,no,no,306,
+2026-11-24,2:39,2:39,smart,C,SPY261124C00716000,0,full,1.96,-36.4,6.9,17.1,-59.7,30,4,runner ratchet,-36.4,6.9,smart 3/4 (range+vwap+wick),,83.8,10.8,100,8,23,100,,,no,no,310,
+2026-11-24,2:44,2:44,smart,C,SPY261124C00716000,0,full,2.11,-17,-14.2,7.7,-62.5,30,2,no confirm in 3 min,-17,-14.2,smart 4/4 (range+vwap+not expanding+wick),,66.7,25.9,88.3,16,50.4,63.1,,,no,no,315,
+2026-11-25,10:24,10:24,lined,C,SPY261125C00697000,0,full,4.27,19.5,-2.3,29.4,-4.1,4,0,x after the mark,19.5,-2.3,stalled,,84.2,10,92.4,7.3,15.3,86.1,,,no,no,57,
+2026-11-25,10:27,10:27,lined,C,SPY261125C00697000,0,full,,,,,,,,,,,stalled,,88.4,11.6,97.3,10.2,16.6,88.8,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-25,10:57,10:57,trend,P,SPY261125P00703000,0,half,,,,,,,,,,,"weak trend, 3 ITM half port, white dot, both charts yes",yes,43.7,32.7,66.2,25.9,54.8,37.5,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-25,11:11,11:11,lined,C,SPY261125C00697000,0,full,3.50,14.4,12.4,20.7,-0.7,1,0,x after the mark,14.4,12.4,stalled,,43.5,22.6,70.6,24.1,35.4,37.5,,,no,no,103,
+2026-11-25,11:52,11:52,trend,P,SPY261125P00702000,0,half,4.32,-75.3,-19.9,0,-75.1,19,0,cut -10% (no confirm),-75.3,-19.9,"weak trend, 3 ITM half port, put pane arrow, both charts yes",yes,27.7,39.2,39.1,27.5,59.5,20.1,,,opposite side,no,144,
+2026-11-25,12:00,12:00,swing,P,SPY261125P00703000,0,full,3.34,-50.4,-13.5,0,-53.7,5,0,cut -10% (no confirm),-50.4,-13.5,"ran $2.39, SPY 87.6/16.3",,16.3,87.6,19.8,91.7,91.5,18.8,,,no,no,151,
+2026-11-25,12:35,12:35,trend,C,SPY261125C00708000,0,full,3.70,15.7,9.6,26.3,-17.7,15,6,runner ratchet,15.7,9.6,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,52.8,37,75,8.7,61.3,48.9,,,no,no,186,
+2026-11-25,12:39,12:39,trend,C,SPY261125C00708000,0,full,3.34,32.8,15.5,76.4,-3.2,15,2,runner ratchet,32.8,15.5,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,26.4,34.3,50.6,7.5,60.7,19.3,,,no,no,190,
+2026-11-25,12:41,12:41,trend,C,SPY261125C00708000,0,full,,,,,,,,,,,"strong trend, 1 ITM, call pane arrow, both charts no",no,23.7,35.2,40.6,7.5,63.2,22.3,,,no,no,,0DTE: no fill at the 5% bid
+2026-11-25,12:46,12:46,trend,C,SPY261125C00709000,0,full,3.51,4.4,5.1,14.6,-9.1,5,3,runner ratchet,4.4,5.1,"strong trend, 1 ITM, call pane arrow, both charts no",no,15.5,48,18.5,12.1,78,18.4,,,no,no,197,
+2026-11-25,12:50,12:50,trend,C,SPY261125C00710000,0,full,2.99,4.3,11.4,50.4,-7.1,6,1,runner ratchet,4.3,11.4,"strong trend, 1 ITM, call pane arrow, both charts no",no,20.5,44.7,24.3,9.6,72.9,24,,,no,no,203,
+2026-11-25,12:52,12:52,trend,C,SPY261125C00710000,0,full,3.07,4.3,10,46.6,-9.4,6,1,runner ratchet,4.3,10,"strong trend, 1 ITM, call pane arrow, both charts yes",yes,12.2,39.4,17.3,7.4,70.2,16.2,,,no,no,203,
+2026-11-25,1:28,1:28,lined,P,SPY261125P00716000,0,full,3.00,34.2,11.9,44.9,-0.1,4,2,runner ratchet,34.2,11.9,not stalled,,31.4,80.6,34.2,81,100,34.8,,,no,no,239,
+2026-11-25,1:35,1:35,smart,C,SPY261125C00713000,0,full,3.18,54.2,7.5,74.7,-10.4,8,1,runner ratchet,54.2,7.5,smart 3/4 (range+vwap+wick),,61.5,69,68.4,63.2,83.4,54.6,,,no,no,246,
+2026-11-25,1:49,1:49,lined,P,SPY261125P00719000,0,full,3.05,14.3,5.8,20.6,-2.6,1,0,x after the mark,14.3,5.8,not stalled,,25.6,100,27.1,100,100,25,,,no,no,262,
+2026-11-25,1:51,1:51,swing,P,SPY261125P00719000,0,full,3.37,9.4,5.3,18.6,-19.4,13,1,runner ratchet,9.4,5.3,"ran $2.00, SPY 89/48.5",,48.5,89,42.6,78.1,96.4,63.2,,,no,no,262,
+2026-11-25,2:45,2:45,smart,C,SPY261125C00715000,0,full,2.21,33.9,-12,49.1,-23.7,7,0,x after the mark,33.9,-12,smart 3/4 (range+vwap+not expanding),,94.6,15.7,98,5,19.1,99,,,no,no,316,
+2026-11-25,2:45,2:45,swing,C,SPY261125C00715000,0,full,2.21,9.1,-12,24.2,-23.7,5,0,x after the mark,9.1,-12,"ran $1.27, SPY 94.6/15.7",,94.6,15.7,98,5,19.1,99,,,no,no,316,
+2026-11-25,2:50,2:50,swing,C,SPY261125C00714000,0,full,,,,,,,,,,,"ran $1.38, SPY 89.8/21.9",,89.8,21.9,94.7,8.3,24.7,80.2,,,no,no,,0DTE: no fill at the 5% bid
