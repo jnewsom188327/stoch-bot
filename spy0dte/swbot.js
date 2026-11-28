@@ -10,6 +10,7 @@ const { computeMarks, closedOnly, paneStrikes, osi, coreT } = require("./marks")
 const { loadCore } = require("./core");
 const { SwEngine, swMarks, weakOpen, leadSignal, nextTradingDay, SW, SW_CFG } = require("./swrev");
 const { freshState, newDay } = require("./ledger");
+const { ShadowLive } = require("./shadow"); // shadow avenues: LOG ONLY, never orders, never changes a real trade
 
 const DIR = path.join(__dirname, "smallwin");
 fs.mkdirSync(DIR, { recursive: true });
@@ -82,6 +83,9 @@ async function main() {
   log("expiry", { dte, exp });
   const pc = prevClose(st, day);
   log("prev_close", { prevClose: pc });
+  // Shadow logs (Nov 28): watch the other avenues all day 9:30-3:00 and score them at night. Read only: it gets copies of the
+  // bars and the real bot's position side, and nothing it returns is used by the engine. SW_SHADOW=off turns it off.
+  const shadow = process.env.SW_SHADOW === "off" ? null : new ShadowLive({ day, exp, log, fetchOpt: async (s) => closedOnly(await api.bars(s, "OPTION"), Math.floor(Date.now() / 1000)) });
 
   const optCache = {};
   const market = {
@@ -105,7 +109,7 @@ async function main() {
   const eng = new SwEngine({ state: st, market, broker: null, log, cfg }); // broker null = DRY RUN, always
   const endMin = half ? 12 * 60 + 55 : 15 * 60 + 10;
   const stats = { setups: 0, skipped: {} };
-  let lastBarT = 0, sawToday = false, error = null, wo, vixOk = null;
+  let lastBarT = 0, sawToday = false, error = null, wo, vixOk = null, doneLogged = false;
   const optRows = {}, armed = {}, saved = {}, leadSeen = new Set();
 
   while (et().min < 9 * 60 + 25) await sleep(5000);
@@ -152,6 +156,8 @@ async function main() {
             } catch (e) { if (vixOk == null) log("vix1d", { ok: false, note: "no VIX1D from Public; the vix1d_div booster is off today", err: String(e.message).slice(0, 160) }); vixOk = false; }
           }
           if (wo === undefined && rows.length >= 15) { wo = weakOpen(rows, pc); log("weak_open", { weakOpen: wo, prevClose: pc }); }
+          // after the real bot is done for the day (and flat) it only keeps watching for the shadow log
+          if (!(doneLogged && st.halt && !eng.pos && !eng.pending)) {
           eng.setCtx(rows, pane);
           await eng.tick();
           const ms = swMarks(exp, rows, SW, L.hmLabel, { optRows, weakOpen: !!wo, vix: vix || vixC, vixRows, armed });
@@ -165,6 +171,8 @@ async function main() {
           if (ms.length) log("setups", { bar: last.timestamp.slice(11, 16), setups: ms.map((m) => `${m.setup} ${m.s} [${m.boosters.join("+") || "no booster"}]`) });
           await eng.onMarks(ms, kills);
           saveState(st);
+          }
+          if (shadow && t.min <= 15 * 60 + 1) { shadow.noteBot(coreT(last), eng); await shadow.minute(saved); }
         }
       }
     } catch (e) {
@@ -174,7 +182,10 @@ async function main() {
       st.halt = st.halt || "error";
       break;
     }
-    if (st.halt && !eng.pos && !eng.pending) { log("done_for_day", { why: st.halt }); break; }
+    if (st.halt && !eng.pos && !eng.pending) {
+      if (!doneLogged) { log("done_for_day", { why: st.halt }); doneLogged = true; }
+      if (!shadow || et().min > 15 * 60 + 1) break; // the shadow log keeps watching until 3:00 (no trading)
+    }
     await sleep(5000);
   }
   if (eng.pos || eng.pending) await eng.flatten("end of the run").catch(() => {});
@@ -185,8 +196,10 @@ async function main() {
     stats.skipped[k] = (stats.skipped[k] || 0) + 1;
   }
   saveState(st);
+  let shadowMd = "";
+  if (shadow && sawToday) shadowMd = await shadow.final(saved, st, DIR); // fetches the shadow contracts' bars, so saveBars keeps them
   saveBars(day, exp, saved);
-  summary({ day, st, events, stats, error, sawToday, half });
+  summary({ day, st, events, stats, error, sawToday, half, shadowMd });
 }
 
 // The day's bars (SPY + every option chart the bot looked at, 1DTE and the 0DTE twins) in the results/bars_<day>.json
@@ -212,7 +225,7 @@ function csvRow(t) {
     r.peak, r.oppAtPeak, r.sideNow, r.oppNow, r.ran15, r.swing, r.stall, r.trendLine, r.shading, r.ttm, r.ttmTurning, o.optFear, o.optGreed, q(r.panes), r.vixGreed, r.vixFear].join(",") + "\n";
 }
 
-function summary({ day, st, events, stats, error, sawToday, half }) {
+function summary({ day, st, events, stats, error, sawToday, half, shadowMd = "" }) {
   const dir = path.join(DIR, "summaries");
   fs.mkdirSync(dir, { recursive: true });
   const trades = st.trades.filter((t) => t.day === day);
@@ -234,7 +247,7 @@ function summary({ day, st, events, stats, error, sawToday, half }) {
   const sk = Object.entries(stats.skipped).sort((a, b) => b[1] - a[1]);
   if (sk.length) L2.push("Skipped: " + sk.map(([k, n]) => `${k} ×${n}`).join(" · "));
   L2.push("", `Full log: spy0dte/smallwin/logs/${day}.jsonl · all trades: spy0dte/smallwin/trades.csv`);
-  const md = L2.join("\n");
+  const md = L2.join("\n") + shadowMd;
   const title = `DRY RUN · ${pnl >= 0 ? "+" : ""}${usd(pnl)} · ${trades.length} trade${trades.length === 1 ? "" : "s"} · balance ${usd(st.balance)}${st.halt ? " · " + st.halt : ""}${error ? " · ERROR" : ""}`;
   fs.writeFileSync(path.join(dir, `${day}.title`), title + "\n");
   fs.writeFileSync(path.join(dir, `${day}.md`), md + "\n");

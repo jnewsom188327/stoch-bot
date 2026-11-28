@@ -53,7 +53,7 @@ function loadDay(f) {
   let vixRows = null;
   if (B.vix) { const p = L.parseBars(toRes(B.vix.map(([t, o, h, l, c]) => ({ timestamp: t, open: String(o), high: String(h), low: String(l), close: String(c), volume: "1" })))); if (p) vixRows = new Map(L.compute(L.cleanPrints(p.filter((x) => !x.live && !x.fill))).map((x) => [x.t, x])); }
   const pane = marks.filter((m) => m.k === "P").map((m) => ({ ts: m.ts, side: m.side, src: m.src }));
-  return { day: B.day, exp: B.exp || B.day, vixRows, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
+  return { file: f, day: B.day, exp: B.exp || B.day, vixRows, spy, rows, optRows, oc, pane, kills, n: B.spy.length };
 }
 
 let CACHE = null;
@@ -89,7 +89,7 @@ function vixRowsFor(D) {
   return VIXROWS.get(D.day) || null;
 }
 
-async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet = true } = {}) {
+async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet = true, hook = null } = {}) {
   Object.assign(SWING, swg);
   const P = { ...SW, ...swp };
   const state = { balance: 1000, trades: [], last10: [], day: null };
@@ -122,8 +122,10 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
       await eng.tick();
       const ms = swMarks(D.exp, R, P, L.hmLabel, { optRows: D.optRows, weakOpen: !!wo, vix: vix || null, vixRows: cfg.noVixPane ? null : vixRowsFor(D), swing: swp.swing !== false, armed, bothBoost: !!swp.bothBoost });
       await eng.onMarks(ms, D.kills.filter((k) => k.ts <= t));
+      if (hook) hook.minute(D, t, eng); // shadow baseline: reads the position side only
     }
     await eng.flatten("end of day");
+    if (hook) await hook.day(D, state);
     peakBal = Math.max(peakBal, state.balance); maxDD = Math.min(maxDD, state.balance / peakBal - 1);
   }
   const T = state.trades;
@@ -132,7 +134,54 @@ async function run({ cfg = {}, swp = {}, swg = {}, from, to, vix = null, quiet =
 
 module.exports = { run, days, loadVix };
 
-if (require.main === module) {
+// SHADOW=1: also replay the shadow avenues on every saved day (the baseline): writes spy0dte/smallwin/shadow_baseline.csv,
+// shadow_baseline_real.csv and SHADOW_BASELINE.md. The engine's trades are the same either way.
+async function shadowBaseline(r0opts) {
+  const S = require("./shadow");
+  const busy = new Map();
+  const out = path.join(__dirname, "smallwin");
+  fs.mkdirSync(out, { recursive: true });
+  const csv = path.join(out, "shadow_baseline.csv"), rcsv = path.join(out, "shadow_baseline_real.csv");
+  for (const f of [csv, rcsv]) if (fs.existsSync(f)) fs.unlinkSync(f);
+  const hook = {
+    minute(D, t, eng) { const p = eng.pos || eng.pending; if (!busy.has(D.day)) busy.set(D.day, new Map()); if (p && p.m) busy.get(D.day).set(Math.round((((t % 86400) + 86400) % 86400) / 60 - 570), p.m.s); },
+  };
+  const tmp = path.join(out, ".shadow_tmp");
+  fs.mkdirSync(tmp, { recursive: true });
+  // finish() writes shadow.csv / shadow_real.csv; the baseline keeps them under their own names
+  hook.day = async (D, state) => { const B = JSON.parse(fs.readFileSync(path.join(RES, D.file), "utf8")); S.finish(D.day, B, busy.get(D.day) || new Map(), state.trades, tmp, null); };
+  const r = await run({ ...r0opts, hook });
+  fs.renameSync(path.join(tmp, "shadow.csv"), csv); fs.renameSync(path.join(tmp, "shadow_real.csv"), rcsv); fs.rmSync(tmp, { recursive: true, force: true });
+  const rows = S.parseCsv(csv), real = S.parseCsv(rcsv), days = [...new Set(rows.map((x) => x.date))];
+  const L = [`# Shadow baseline · ${days.length} saved days (${days[0]} to ${days[days.length - 1]}) · 0DTE bars (1DTE bars are saved from Nov 30 on)`, "",
+    "Every signal scored on its own (one row per signal, overlapping signals all counted). 5% bid, skipped if it doesn't fill.", "",
+    "| Avenue | Signals | Filled | Own exits: won · avg · total · worst | Small-win exits: won · avg · total · worst |", "|---|---|---|---|---|"];
+  for (const a of S.AVENUES) { const T = rows.filter((x) => x.avenue === a.id), A = S.record(T, "result_a"), Bb = S.record(T, "result_b");
+    L.push(`| ${a.name} | ${T.length} | ${A.filled} | ${A.filled ? `${A.won}/${A.filled} (${A.pct}%) · ${A.avg}% · ${A.sum}% · ${A.worst}%` : "—"} | ${Bb.filled ? `${Bb.won}/${Bb.filled} (${Bb.pct}%) · ${Bb.avg}% · ${Bb.sum}% · ${Bb.worst}%` : "—"} |`); }
+  const tw = rows.filter((x) => x.avenue === "trend" && x.both_charts);
+  const y = S.record(tw.filter((x) => x.both_charts === "yes"), "result_a"), n = S.record(tw.filter((x) => x.both_charts === "no"), "result_a");
+  L.push("", `Trend safety check (both charts breaking your way): yes ${y.won}/${y.filled} (${y.pct}%) avg ${y.avg}% · no ${n.won}/${n.filled} (${n.pct}%) avg ${n.avg}%`);
+  const usd = (x) => "$" + Math.round(x).toLocaleString("en-US");
+  const safe = rows.filter((x) => x.avenue !== "trend" || x.both_charts === "yes");
+  const alone = S.combine([], real, "result_a", [], true);
+  L.push("", "One $1,000 account, first come, one trade at a time (full port; weak-trend signals half):", "",
+    "| Account | Own exits | Small-win exits |", "|---|---|---|");
+  const acct = (lab, R, ids, withReal) => { const a = S.combine(R, real, "result_a", ids, withReal), b = S.combine(R, real, "result_b", ids, withReal); L.push(`| ${lab} | ${usd(a.eq)} · ${a.n} trades · ${a.won} won · worst drop ${Math.round(a.mdd * 100)}% | ${usd(b.eq)} · ${b.n} trades · ${b.won} won · worst drop ${Math.round(b.mdd * 100)}% |`); };
+  L.push(`| Small-win reversal bot alone | ${usd(alone.eq)} · ${alone.n} trades · ${alone.won} won · worst drop ${Math.round(alone.mdd * 100)}% | (same) |`);
+  acct("Trend (safety check) + reversal dots (lined up)", safe, ["trend", "lined"], false);
+  acct("All three (+ Swing Break)", safe, ["trend", "lined", "swing"], false);
+  for (const a of S.AVENUES) acct(`Small-win bot + ${a.name}`, a.id === "trend" ? safe : rows, [a.id], true);
+  L.push("", "Rules are copied from the Edge Stress Test (build/track.js, swing.js, itm.js) and the 1 ITM Confluence trackers (lu_track.js, bs_build.js). Replay fills at the next bar's open with the 1¢ slip the trackers use; live fills will cost a little more.");
+  fs.writeFileSync(path.join(out, "SHADOW_BASELINE.md"), L.join("\n") + "\n");
+  console.log(L.join("\n"));
+  return r;
+}
+
+module.exports.shadowBaseline = shadowBaseline;
+
+if (require.main === module && process.env.SHADOW === "1") {
+  shadowBaseline({ from: process.argv[2], to: process.argv[3], vix: loadVix(), quiet: true }).catch((e) => { console.error(e); process.exit(1); });
+} else if (require.main === module) {
   (async () => {
     const cfg = process.env.CFG ? JSON.parse(process.env.CFG) : {}, swp = process.env.SWP ? JSON.parse(process.env.SWP) : {}, swg = process.env.SWG ? JSON.parse(process.env.SWG) : {};
     const r = await run({ cfg, swp, swg, from: process.argv[2], to: process.argv[3], vix: loadVix(), quiet: false });
