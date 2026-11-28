@@ -276,6 +276,9 @@ function analyze(B0, o = {}) {
       row.exit_b = main.fill != null ? main.why_b : "";
       row.result_a_0dte = zero0.fill != null ? r1(zero0.a * 100) : null;
       row.result_b_0dte = zero0.fill != null ? r1(zero0.b * 100) : null;
+      row.minutes_0dte = zero0.fill != null ? zero0.min : null;
+      row.minutes_b_0dte = zero0.fill != null ? zero0.min_b : null;
+      row.start_tod_0dte = zero0.fill != null ? zero0.startTod : null;
       row.note = main.fill != null ? "" : (one ? `1DTE: ${one.why}; ` : "") + `0DTE: ${zero0.why}`;
       row.start_tod = main.fill != null ? main.startTod : null;
       // contracts it will want at night (1DTE + 0DTE)
@@ -314,7 +317,7 @@ function smallWin(f, ts, m, kills, R, slip) {
 
 // ---------- files ----------
 const COLS = ["date", "time", "known_at", "avenue", "side", "strike", "dte", "port", "entry", "result_a", "result_b", "best", "heat", "minutes", "minutes_b", "exit_b", "result_a_0dte", "result_b_0dte", "flag", "both_charts",
-  "spy_fear", "spy_greed", "call_fear", "call_greed", "put_fear", "put_greed", "vix_fear", "vix_greed", "real_in_trade", "real_same_move", "start_tod", "note"];
+  "spy_fear", "spy_greed", "call_fear", "call_greed", "put_fear", "put_greed", "vix_fear", "vix_greed", "real_in_trade", "real_same_move", "start_tod", "note", "minutes_0dte", "minutes_b_0dte", "start_tod_0dte"];
 const q = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 const csvLine = (r) => COLS.map((k) => q(r[k])).join(",") + "\n";
 function parseCsv(file) {
@@ -361,6 +364,53 @@ function combine(rows, realRows, k, ids, withReal) {
   return { eq, n, won, mdd, worst };
 }
 const usd = (x) => (x < 0 ? "-$" : "$") + Math.abs(Math.round(x)).toLocaleString("en-US");
+
+// ---------- the account grid (the "Shadow Avenues Stats" Sheet), rebuilt every night ----------
+// Every account x both exit styles x 25/50/100% of the account per trade, one trade at a time, first come, $1,000 start.
+// "0DTE" = the saved days from Nov 3 (the baseline replay) plus each dry-run day's 0DTE twins; "1DTE" = dry-run days only.
+const GRID_SETS = [["Small-win bot alone", [], true, false], ["Fade MAIN", ["fade"], false], ["Swing Break", ["swing"], false], ["Trend (safety check)", ["trend"], false, true], ["Trend (all)", ["trend"], false], ["Lined up", ["lined"], false], ["Smart dots", ["smart"], false],
+  ["Trend (safety check) + Lined", ["trend", "lined"], false, true], ["Trend (safety check) + Lined + Swing", ["trend", "lined", "swing"], false, true], ["Swing + Fade", ["swing", "fade"], false], ["Trend (safety check) + Swing + Fade", ["trend", "swing", "fade"], false, true], ["All 5 (trend safe)", ["trend", "lined", "swing", "fade", "smart"], false, true],
+  ["Small-win bot + Fade", ["fade"], true], ["Small-win bot + Swing", ["swing"], true], ["Small-win bot + Swing + Fade", ["swing", "fade"], true], ["Small-win bot + Trend (safety check) + Swing + Fade", ["trend", "swing", "fade"], true, true]];
+const GRID_HEAD = ["Account", "Exits", "Size %", "End $", "Worst drop %", "Win %", "Trades", "Won", "Worst trade %", "Worst hit to account %", "Worst day %", "Green days", "Days traded"];
+// sig rows: {date, avenue, port, both_charts, a, b, s, ma, mb}; real rows: {date, s, e, ret, acct}
+function gridSim(sig, real, ids, k, size, withReal, safe) {
+  const ev = [];
+  for (const r of sig) { if (!ids.includes(r.avenue) || r[k] == null) continue; if (safe && r.avenue === "trend" && r.both_charts !== "yes") continue;
+    ev.push({ d: r.date, s: r.s, e: r.s + ((k === "b" ? r.mb : r.ma) || 0), ret: r[k] / 100, eff: (r[k] / 100) * (r.port === "half" ? 0.5 : 1) * size }); }
+  if (withReal) for (const r of real) if (r.acct != null) ev.push({ d: r.date, s: r.s, e: r.e, ret: r.ret / 100, eff: (r.acct / 100) * size });
+  ev.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.s - b.s));
+  let eq = 1000, pk = 1000, mdd = 0, busy = { d: null, u: -1 }, n = 0, w = 0, worst = 0, worstAcct = 0, day = null, ds = 1000;
+  const dayMap = {};
+  for (const x of ev) { if (x.d === busy.d && x.s <= busy.u) continue; if (x.d !== day) { if (day) dayMap[day] = eq / ds - 1; day = x.d; ds = eq; }
+    eq *= 1 + x.eff; n++; if (x.ret > 0) w++; worst = Math.min(worst, x.ret); worstAcct = Math.min(worstAcct, x.eff); busy = { d: x.d, u: x.e }; pk = Math.max(pk, eq); mdd = Math.max(mdd, (pk - eq) / pk); }
+  if (day) dayMap[day] = eq / ds - 1;
+  const dv = Object.values(dayMap);
+  return [Math.round(eq), -Math.round(mdd * 100), n ? Math.round((w / n) * 100) : 0, n, w, Math.round(worst * 100), Math.round(worstAcct * 100), dv.length ? Math.round(Math.min(...dv) * 100) : 0, dv.filter((v) => v > 0).length, dv.length];
+}
+function gridTable(sig, real) {
+  const out = [];
+  for (const [name, ids, withReal, safe] of GRID_SETS) for (const [k, lab] of [["a", "own"], ["b", "small-win"]]) for (const size of [0.25, 0.5, 1]) {
+    if (!ids.length && k === "b") continue;
+    out.push([name, lab, size * 100, ...gridSim(sig, real, ids, k, size, withReal, safe)]);
+  }
+  return out.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : x[2] - y[2]));
+}
+function writeGrid(dir) {
+  const live = parseCsv(path.join(dir, "shadow.csv")), base = parseCsv(path.join(dir, "shadow_baseline.csv"));
+  const realLive = parseCsv(path.join(dir, "shadow_real.csv")), realBase = parseCsv(path.join(dir, "shadow_baseline_real.csv"));
+  const realOf = (R) => R.filter((r) => r.acct_pct !== "").map((r) => ({ date: r.date, s: num(r.start_tod), e: num(r.end_tod), ret: num(r.ret_pct), acct: num(r.acct_pct) }));
+  const sigOf = (r, z) => ({ date: r.date, avenue: r.avenue, port: r.port, both_charts: r.both_charts, a: num(z ? r.result_a_0dte : r.result_a), b: num(z ? r.result_b_0dte : r.result_b),
+    s: num(z ? r.start_tod_0dte : r.start_tod), ma: num(z ? r.minutes_0dte : r.minutes), mb: num(z ? r.minutes_b_0dte : r.minutes_b) });
+  const liveDays = new Set(live.map((r) => r.date));
+  const zero = [...base.filter((r) => !liveDays.has(r.date)).map((r) => sigOf(r, false)), ...live.map((r) => sigOf(r, r.dte === "1"))];
+  const one = live.filter((r) => r.dte === "1").map((r) => sigOf(r, false));
+  const zeroReal = realOf([...realBase.filter((r) => !liveDays.has(r.date)), ...realLive]), oneReal = realOf(realLive.filter((r) => one.some((x) => x.date === r.date)));
+  const dates = (S) => { const d = [...new Set(S.map((x) => x.date))].sort(); return d.length ? `${d[0]} to ${d[d.length - 1]} (${d.length} days)` : "no days yet"; };
+  const csvOut = (T) => GRID_HEAD.join(",") + "\n" + T.map((r) => r.map(q).join(",")).join("\n") + "\n";
+  fs.writeFileSync(path.join(dir, "shadow_grid_0dte.csv"), csvOut(gridTable(zero, zeroReal)));
+  fs.writeFileSync(path.join(dir, "shadow_grid_1dte.csv"), csvOut(gridTable(one, oneReal)));
+  fs.writeFileSync(path.join(dir, "shadow_grid_days.txt"), `0DTE: ${dates(zero)}\n1DTE: ${dates(one)}\nupdated: ${new Date().toISOString()}\n`);
+}
 
 // The daily issue section
 function section({ day, rows, all, real }) {
@@ -438,7 +488,9 @@ class ShadowLive {
         if (!want.length) break;
         for (const s of want) { tried.add(s); try { saved[s] = await this.fetchOpt(s); } catch {} }
       }
-      return finish(this.day, fromSaved(this.day, this.exp, saved), this.busy, st.trades, dir, this.seen);
+      const md = finish(this.day, fromSaved(this.day, this.exp, saved), this.busy, st.trades, dir, this.seen);
+      try { writeGrid(dir); } catch (e) { this.log("shadow_error", { err: "grid: " + String(e.message).slice(0, 200) }); }
+      return md;
     } catch (e) { this.log("shadow_error", { err: String((e && e.stack) || e).slice(0, 600) }); return "\n\n_Shadow log: error tonight (" + String((e && e.message) || e).slice(0, 120) + "). The real bot is not affected._"; }
   }
 }
@@ -454,4 +506,4 @@ function finish(day, B, busy, trades, dir, seenLive) {
   return section({ day, rows, all: parseCsv(file), real: parseCsv(rf) });
 }
 
-module.exports = { analyze, smallWin, fromSaved, normDay, finish, section, record, combine, parseCsv, realIntervals, writeRows, writeReal, ShadowLive, AVENUES, NAME, EXITS, COLS, EST_SHA256 };
+module.exports = { writeGrid, gridTable, GRID_HEAD, analyze, smallWin, fromSaved, normDay, finish, section, record, combine, parseCsv, realIntervals, writeRows, writeReal, ShadowLive, AVENUES, NAME, EXITS, COLS, EST_SHA256 };
