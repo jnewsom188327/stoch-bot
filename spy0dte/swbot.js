@@ -80,12 +80,13 @@ async function main() {
   const half = !!HALF_DAYS[day] || process.env.SW_HALF === "yes";
   const dte = process.env.SW_DTE != null && process.env.SW_DTE !== "" ? +process.env.SW_DTE : SW_CFG.dte; // SW_DTE: the mock test can force 0DTE
   const exp = dte === 1 ? nextTradingDay(day) : day; // the bot trades (and reads its option panes on) this expiry
-  log("expiry", { dte, exp });
+  const exp1 = nextTradingDay(day); // 1DTE: always saved and shadow-scored, for the 1DTE study (Nov 28), whatever the bot trades
+  log("expiry", { dte, exp, shadow_1dte: exp1 });
   const pc = prevClose(st, day);
   log("prev_close", { prevClose: pc });
   // Shadow logs (Nov 28): watch the other avenues all day 9:30-3:00 and score them at night. Read only: it gets copies of the
   // bars and the real bot's position side, and nothing it returns is used by the engine. SW_SHADOW=off turns it off.
-  const shadow = process.env.SW_SHADOW === "off" ? null : new ShadowLive({ day, exp, log, fetchOpt: async (s) => closedOnly(await api.bars(s, "OPTION"), Math.floor(Date.now() / 1000)) });
+  const shadow = process.env.SW_SHADOW === "off" ? null : new ShadowLive({ day, exp: exp1, log, fetchOpt: async (s) => closedOnly(await api.bars(s, "OPTION"), Math.floor(Date.now() / 1000)) });
 
   const optCache = {};
   const market = {
@@ -137,6 +138,7 @@ async function main() {
             optRows[s] = rowsOf(opt[s].filter((b) => +b.volume > 0).map((b) => str(b, "1")));
             saved[s] = opt[s];
             if (exp !== day) { const z = osi(day, cp, K); try { saved[z] = closedOnly(await api.bars(z, "OPTION"), nowReal); } catch {} } // 0DTE twin, saved for comparing later
+            if (exp1 !== exp) { const z = osi(day, cp, K, exp1); try { saved[z] = closedOnly(await api.bars(z, "OPTION"), nowReal); } catch {} } // 1DTE twin (the 1DTE study)
           }
           saved.SPY = spy;
           const { marks, kills, rows } = computeMarks(day, spy, opt);
@@ -198,19 +200,19 @@ async function main() {
   saveState(st);
   let shadowMd = "";
   if (shadow && sawToday) shadowMd = await shadow.final(saved, st, DIR); // fetches the shadow contracts' bars, so saveBars keeps them
-  saveBars(day, exp, saved);
+  saveBars(day, exp, saved, exp1);
   summary({ day, st, events, stats, error, sawToday, half, shadowMd });
 }
 
 // The day's bars (SPY + every option chart the bot looked at, 1DTE and the 0DTE twins) in the results/bars_<day>.json
 // format, so the day can be replayed on 1DTE later: spy [[ts,o,h,l,c,v]], opt {sym: [[minute since 9:30,o,h,l,c]]}.
-function saveBars(day, exp, saved) {
+function saveBars(day, exp, saved, exp1) {
   try {
     if (!saved.SPY || !saved.SPY.length) return;
     const dir = path.join(DIR, "bars");
     fs.mkdirSync(dir, { recursive: true });
     const base = Date.parse(saved.SPY[0].timestamp);
-    const out = { day, exp, spy: saved.SPY.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close, +b.volume]), opt: {} };
+    const out = { day, exp, exp1, spy: saved.SPY.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close, +b.volume]), opt: {} };
     if (saved.VIX_INDEX) out.vix = saved.VIX_INDEX.map((b) => [b.timestamp, +b.open, +b.high, +b.low, +b.close]);
     for (const [sym, bars] of Object.entries(saved)) if (sym !== "SPY" && sym !== "VIX_INDEX") out.opt[sym] = bars.map((b) => [Math.round((Date.parse(b.timestamp) - base) / 60000), +b.open, +b.high, +b.low, +b.close]);
     fs.writeFileSync(path.join(dir, `${day}.json`), JSON.stringify(out));
